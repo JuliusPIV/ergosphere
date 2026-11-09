@@ -191,7 +191,7 @@ flowchart LR
 | 🤖 **grok** | Tested on 1.0.70. On `PATH` and already signed in as the user that runs Ergosphere. |
 | 🧰 **Installer tools** | Bash, curl, tar, gzip, nohup, sha256sum. Git is not needed. |
 | 🪟 **Windows** | Should run inside [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install), with Python and the Linux grok inside the distro. Untested. |
-| 🍎 **macOS** | Not supported yet. Ergosphere reads Linux's `/proc` to track grok processes, and the installer requires Linux. macOS support is [planned](#-roadmap). |
+| 🍎 **macOS** | Not supported yet. Ergosphere reads Linux's `/proc` to track grok processes, and the installer requires Linux. macOS support is [being explored](#-roadmap). |
 
 Ergosphere does not install grok and does not handle grok sign-in. Sessions come from `~/.grok/sessions` and agents from `~/.grok/agents` (or `GROK_AGENTS_DIR`), so run Ergosphere as the user who owns them.
 
@@ -308,17 +308,18 @@ Plans, not promises. Items are ordered roughly by priority, and each one is tagg
 | **Start on boot** | 🛋️ Quality of life | Ergosphere comes back by itself after a reboot. |
 | **Disconnect or Quit** | 🧭 Usability | Leave a session running and close the page, or stop grok, from one clear dialog. |
 | **Takeover prompt** | 🧭 Usability | When a session is open in a terminal or another browser, a prompt offers to move it here. |
-| **One theme** | 🧭 Usability | One consistent look across the list, the session page and Settings. |
-| **Turn notifications** | ✨ Enhancement | A browser notification when grok finishes a turn (needs HTTPS). |
+| **Consistent theming** | 🧭 Usability | One consistent look across the list, the session page and Settings. |
 | **Thinking and tools view** | ✨ Enhancement | A separate panel for grok's thinking, commands and skills. |
 | **More installer port presets** | 🛋️ Quality of life | Pick 8080 or 8081 in the installer as well as 9241. |
-| **macOS support** | 💻 Platform | Ergosphere on macOS, replacing the Linux-only process checks. |
 
 ### 🔭 Exploring
 
 | Item | Type | What changes |
 | --- | --- | --- |
 | **Sessions survive Ergosphere updates** | ✨ Enhancement | Update the web server without stopping the grok sessions it runs. |
+| **Turn notifications** | ✨ Enhancement | A browser notification when grok finishes a turn (needs HTTPS). |
+| **macOS support** | 💻 Platform | Ergosphere on macOS, replacing the Linux-only process checks. |
+| **More themes** | ✨ Enhancement | Pick from several looks once theming is consistent. |
 
 Have an idea or found a bug? [Open an issue](https://github.com/JuliusPIV/ergosphere/issues).
 
