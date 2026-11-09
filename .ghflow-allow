@@ -1,0 +1,11 @@
+# Ergosphere is a Grok tool: its own product words are not bot attribution.
+# Every other bot word, trailer and emoji check stays on.
+re: ^(grok|x\.ai|xai|llama)$
+# The one-line installer pipes a download into bash by design; only these files may show it.
+README.md :: exec.download_and_run
+skill/SKILL.md :: exec.download_and_run
+install.sh :: exec.download_and_run
+# Screenshots: metadata checked (no EXIF/text chunks) on 2026-11-06.
+docs/images/*.png :: binary
+# README uses the robot emoji as the Grok icon in its requirements table.
+README.md :: bot.trailer

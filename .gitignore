@@ -1,0 +1,10 @@
+cwd-defaults.json
+__pycache__/
+*.pyc
+*.log
+*.key
+*.pem
+ergosphere.token
+ergosphere.json
+ergosphere.json.bak
+.ergosphere.json.*.tmp

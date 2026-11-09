@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" width="1200" height="320" role="img" aria-labelledby="t d">
+  <title id="t">Ergosphere</title>
+  <desc id="d">A rotating black hole with a glowing accretion ring, next to the word Ergosphere.</desc>
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b0820"/>
+      <stop offset="0.55" stop-color="#120a2e"/>
+      <stop offset="1" stop-color="#05040f"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffb347" stop-opacity="0.55"/>
+      <stop offset="0.45" stop-color="#ff6a3d" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#ff6a3d" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="disk" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ff5e3a" stop-opacity="0.2"/>
+      <stop offset="0.25" stop-color="#ff9a3c"/>
+      <stop offset="0.5" stop-color="#fff1c1"/>
+      <stop offset="0.75" stop-color="#ffb347"/>
+      <stop offset="1" stop-color="#ff5e3a" stop-opacity="0.2"/>
+    </linearGradient>
+    <linearGradient id="word" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fff1c1"/>
+      <stop offset="0.5" stop-color="#ffb347"/>
+      <stop offset="1" stop-color="#c18cff"/>
+    </linearGradient>
+    <clipPath id="back"><rect x="0" y="0" width="1200" height="160"/></clipPath>
+    <clipPath id="front"><rect x="0" y="160" width="1200" height="160"/></clipPath>
+  </defs>
+
+  <rect width="1200" height="320" rx="24" fill="url(#sky)"/>
+
+  <g fill="#ffffff">
+    <circle cx="60" cy="40" r="1.2" opacity="0.8"/>
+    <circle cx="140" cy="250" r="1" opacity="0.6"/>
+    <circle cx="420" cy="60" r="1.4" opacity="0.7"/>
+    <circle cx="510" cy="270" r="1" opacity="0.5"/>
+    <circle cx="610" cy="40" r="1.1" opacity="0.8"/>
+    <circle cx="760" cy="290" r="1.3" opacity="0.6"/>
+    <circle cx="880" cy="34" r="1" opacity="0.7"/>
+    <circle cx="990" cy="270" r="1.2" opacity="0.5"/>
+    <circle cx="1120" cy="60" r="1.5" opacity="0.8"/>
+    <circle cx="1160" cy="230" r="1" opacity="0.6"/>
+    <circle cx="40" cy="170" r="1" opacity="0.5"/>
+    <circle cx="700" cy="160" r="0.9" opacity="0.4"/>
+  </g>
+
+  <g transform="translate(250 160)">
+    <circle r="150" fill="url(#glow)"/>
+
+    <!-- far half of the accretion ring, behind the hole -->
+    <g clip-path="url(#back)" transform="translate(-250 -160)">
+      <ellipse cx="250" cy="160" rx="170" ry="34" fill="none" stroke="url(#disk)" stroke-width="16" opacity="0.75"/>
+    </g>
+
+    <!-- light bent over the top of the hole -->
+    <path d="M -78 -8 A 80 80 0 0 1 78 -8" fill="none" stroke="#ffcf7a" stroke-width="5" opacity="0.7"/>
+
+    <!-- ergosphere: the region dragged around by the spin -->
+    <g>
+      <ellipse rx="92" ry="78" fill="none" stroke="#c18cff" stroke-width="1.5" stroke-dasharray="6 10" opacity="0.6"/>
+      <animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="24s" repeatCount="indefinite"/>
+    </g>
+
+    <circle r="66" fill="#000000"/>
+    <circle r="68" fill="none" stroke="#fff1c1" stroke-width="2.5" opacity="0.9"/>
+
+    <!-- swirling inflow -->
+    <g fill="none" stroke-linecap="round">
+      <path d="M 0 -104 A 104 104 0 0 1 90 -52" stroke="#ffb347" stroke-width="3" opacity="0.65"/>
+      <path d="M 0 104 A 104 104 0 0 1 -90 52" stroke="#ffb347" stroke-width="3" opacity="0.65"/>
+      <path d="M 112 0 A 112 112 0 0 1 56 97" stroke="#c18cff" stroke-width="2" opacity="0.5"/>
+      <path d="M -112 0 A 112 112 0 0 1 -56 -97" stroke="#c18cff" stroke-width="2" opacity="0.5"/>
+      <animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="12s" repeatCount="indefinite"/>
+    </g>
+
+    <!-- near half of the accretion ring, in front of the hole -->
+    <g clip-path="url(#front)" transform="translate(-250 -160)">
+      <ellipse cx="250" cy="160" rx="170" ry="34" fill="none" stroke="url(#disk)" stroke-width="16"/>
+      <ellipse cx="250" cy="160" rx="170" ry="34" fill="none" stroke="#fff8e1" stroke-width="3" opacity="0.8"/>
+    </g>
+  </g>
+
+  <text x="480" y="170" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="96" font-weight="700" letter-spacing="2" fill="url(#word)">Ergosphere</text>
+  <text x="484" y="222" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="26" fill="#d9d3f5" opacity="0.9">Your Grok CLI sessions, live in the browser.</text>
+</svg>
