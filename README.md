@@ -392,6 +392,8 @@ python3 ergosphere.py           # runs in the foreground; prints ERGOSPHERE_READ
 
 For a reverse proxy that handles its own authentication, set `ERGOSPHERE_TOKEN` to the path of a file holding a one-line token. Ergosphere then requires `Authorization: Bearer <token>`, and the proxy must send that header. Browsers do not send it, so use this only behind a proxy. The installer refuses to run while `ERGOSPHERE_TOKEN` is set; start the server yourself in that setup.
 
+To keep the install directory read-only, set `ERGOSPHERE_CONFIG` to the path of the config file. Ergosphere then reads and writes that file, and its `.bak`, instead of `ergosphere.json` next to `ergosphere.py`. Unset means `ergosphere.json` in the install directory.
+
 ---
 
 ## 🔗 Related

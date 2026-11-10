@@ -701,6 +701,10 @@ CONFIG_LOCK = threading.Lock()
 
 
 def config_path():
+    # ERGOSPHERE_CONFIG lets the code folder stay read-only.
+    raw = os.environ.get("ERGOSPHERE_CONFIG")
+    if raw:
+        return Path(raw).expanduser()
     return Path(__file__).resolve().parent / CONFIG_NAME
 
 
@@ -807,7 +811,7 @@ def write_config(data):
     if old == text:
         return
     if old is not None:
-        atomic_write(path.with_name(CONFIG_NAME + ".bak"), old)
+        atomic_write(path.with_name(path.name + ".bak"), old)
     atomic_write(path, text)
     print("config saved %s" % path, flush=True)
 
