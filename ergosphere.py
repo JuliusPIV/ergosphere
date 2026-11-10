@@ -3108,6 +3108,9 @@ function ensureTerm() {
   termOpened = true;
   term.loadAddon(fit);
   term.open(document.getElementById("term"));
+  // Edge draws a writing-hint dot on the focused field's caret; xterm's
+  // hidden helper textarea sits at the terminal cursor, so turn hints off.
+  if (term.textarea) term.textarea.setAttribute("writingsuggestions", "false");
   armEndedPrompt();
 }
 function hideTerm() {
