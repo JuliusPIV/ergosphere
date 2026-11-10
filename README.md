@@ -406,7 +406,7 @@ For a reverse proxy that handles its own authentication, set `ERGOSPHERE_TOKEN` 
 
 ## 📄 License
 
-Copyright (C) 2026 JuliusPIV
+Copyright (C) 2026 Julius Perkins
 
 Ergosphere is licensed under the GNU Affero General Public License version 3 only ([AGPL-3.0-only](https://www.gnu.org/licenses/agpl-3.0.html)). See [LICENSE](LICENSE).
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright (C) 2026 JuliusPIV
+# Copyright (C) 2026 Julius Perkins
 # Licensed under the GNU Affero General Public License v3.0 only.
 # SPDX-License-Identifier: AGPL-3.0-only
 #
