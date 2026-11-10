@@ -282,6 +282,18 @@ grok must already be signed in on the server. Ergosphere itself has no login in 
 Not yet. Ergosphere reads Linux's `/proc` to find grok processes and keep one per session, and the installer uses Linux-only tools. It needs a small port to macOS process tools (`ps`, `lsof`). That is on the [roadmap](#-roadmap).
 </details>
 
+<details>
+<summary><b>I see "Server error (500) | Retrying (attempt N)" in a session. Is Ergosphere broken?</b></summary>
+
+No. That message comes from grok itself: xAI's servers returned an error and grok is retrying the request. Ergosphere only shows grok's screen, so you would see the same message running grok in a terminal. If it keeps retrying, wait and try again later.
+</details>
+
+<details>
+<summary><b>In Microsoft Edge, a small blue dot appears on the cursor and jumps around. What is it?</b></summary>
+
+That dot is Edge's writing-assistance hint, not part of grok or Ergosphere. Edge shows it on the cursor of the focused text field, and the terminal keeps a hidden text field at its cursor, so the dot follows the cursor as grok redraws. Ergosphere tells Edge not to show writing assistance in the terminal. If you still see it, update Ergosphere, or turn it off in Edge: **Settings > Languages > Writing assistance > Show writing hints**. Chrome and Firefox do not show it.
+</details>
+
 ---
 
 ## 📍 Roadmap
