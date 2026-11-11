@@ -46,6 +46,10 @@ def main():
         check(erg.grok_config_defaults() is None, "missing config.toml reads as no defaults")
         check(erg.launch_model_effort("grok-4.7", "high") == ("grok-4.7", "high"),
               "missing config.toml passes -m and effort as picked")
+        check(erg.launch_model_effort("grok-4.7", "high", set()) == ("", ""),
+              "missing config.toml: untouched fields still pass nothing")
+        check(erg.launch_model_effort("grok-4.7", "high", {"effort"}) == ("", "high"),
+              "missing config.toml: a touched field passes as picked")
 
         cfg.parent.mkdir()
         cfg.write_text(CONFIG, encoding="utf-8")
@@ -214,6 +218,14 @@ def main():
     check("savedDefaults.effort = payload.effort" in text and "savedDefaults.model = payload.model" in text,
           "after a launch the page's saved defaults follow what grok was started with")
 
+    # The dialog never shows a value it would not send: untouched selects
+    # show "grok default" (value "", no flag), never a last-used value or a
+    # substitute picked by the page.
+    check('<option value="" selected>grok default</option><option value="low">' in text
+          and 'sel.options[0].textContent = saved ? "grok default (" + saved + ")" : "grok default";' in text,
+          "untouched model and effort show grok default")
+    check("lastEffort" not in text and 'effortsFor(document.getElementById("na-model").value), true, "medium")' not in text,
+          "no preselect from last-used values or a medium substitute")
     check('payload.touched.push("effort")' in text and 'payload.touched.push("model")' in text,
           "the dialog sends which fields the user changed")
 

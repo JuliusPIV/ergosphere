@@ -2066,8 +2066,8 @@ footer { display: none; }
 <label>Agent <span class="combo"><input id="na-agent" name="agent" autocomplete="off"><div class="combo-list" id="na-agent-list" hidden></div></span></label>
 <label>Working directory <span class="combo"><input id="na-cwd" name="cwd" autocomplete="off"><div class="combo-list" id="na-cwd-list" hidden></div></span></label>
 <div class="pair">
-<label>Model <select id="na-model" name="model"><option value="" selected></option></select></label>
-<label>Effort <select id="na-effort" name="effort"><option value="low">low</option><option value="medium" selected>medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label>
+<label>Model <select id="na-model" name="model"><option value="" selected>grok default</option></select></label>
+<label>Effort <select id="na-effort" name="effort"><option value="" selected>grok default</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label>
 </div>
 <div class="na-note">grok saves a model or effort you choose as its new default.</div>
 <div id="na-error" class="na-error" hidden></div>
@@ -2322,25 +2322,18 @@ function applyModelList(data) {
     }
     if (!defaultEfforts.length) defaultEfforts = ["low", "medium", "high", "xhigh"];
   }
-  // Preselect the last launch's model and effort while they are still offered.
-  // grok's own saved defaults come first: picking them passes no flag, so
-  // an untouched Create leaves grok's config as it is.
-  var last = (data && data.last) || {};
-  var conf = (data && data.defaults) || savedDefaults;
-  var lastModel = typeof last.model === "string" ? last.model : "";
-  var lastEffort = typeof last.effort === "string" ? last.effort : "";
-  var confModel = typeof conf.model === "string" ? conf.model : "";
-  var confEffort = typeof conf.effort === "string" ? conf.effort : "";
-  var picked = effortPicked ? document.getElementById("na-effort").value : "";
+  // Never preselect a value that would not be sent.  Untouched fields show
+  // "grok default" (value "", no flag; grok uses its saved value, named in
+  // the label when known).  Only the user's own pick is kept.
+  if (data && data.defaults && typeof data.defaults === "object") savedDefaults = data.defaults;
+  var effortSel = document.getElementById("na-effort");
+  var picked = effortPicked ? effortSel.value : "";
   fillSelect("na-model", rows, false);
-  if (confModel && rows.indexOf(confModel) !== -1) document.getElementById("na-model").value = confModel;
-  else if (lastModel && rows.indexOf(lastModel) !== -1) document.getElementById("na-model").value = lastModel;
-  var levels = effortsFor(document.getElementById("na-model").value);
-  var effort = "medium";
-  if (picked && levels.indexOf(picked) !== -1) effort = picked;
-  else if (confEffort && levels.indexOf(confEffort) !== -1) effort = confEffort;
-  else if (lastEffort && levels.indexOf(lastEffort) !== -1) effort = lastEffort;
-  fillSelect("na-effort", levels, false, effort);
+  var levels = effortsFor(document.getElementById("na-model").value || savedDefaults.model);
+  fillSelect("na-effort", levels, false);
+  if (picked && levels.indexOf(picked) !== -1) effortSel.value = picked;
+  else effortPicked = false;
+  labelDefaults();
   if (data && data.agents && typeof data.agents.length === "number") {
     agentNames = [];
     for (i = 0; i < data.agents.length; i++) {
@@ -2355,18 +2348,25 @@ function applyModelList(data) {
     setModelError("");
   }
 }
-// Before the model list arrives: grok's saved effort if it is offered, so an
-// early untouched Create passes no flag (the blank model passes no -m).
-function savedEffort(levels) {
-  var e = typeof savedDefaults.effort === "string" ? savedDefaults.effort : "";
-  return e && levels.indexOf(e) !== -1 ? e : "medium";
+// The blank option of each select means "no flag": grok's own default.
+function labelDefaults() {
+  var pairs = [["na-model", savedDefaults.model], ["na-effort", savedDefaults.effort]];
+  var i, sel, saved;
+  for (i = 0; i < pairs.length; i++) {
+    sel = document.getElementById(pairs[i][0]);
+    saved = typeof pairs[i][1] === "string" ? pairs[i][1] : "";
+    if (sel.options.length && sel.options[0].value === "") {
+      sel.options[0].textContent = saved ? "grok default (" + saved + ")" : "grok default";
+    }
+  }
 }
 function loadModels() {
   modelFetch += 1;
   var token = modelFetch;
   setModelError("");
   fillSelect("na-model", [], false);
-  fillSelect("na-effort", defaultEfforts, false, savedEffort(defaultEfforts));
+  fillSelect("na-effort", defaultEfforts, false);
+  labelDefaults();
   fetch("/models", {cache: "no-store"}).then(function (resp) {
     if (!resp.ok) throw new Error("model list failed");
     return resp.json();
@@ -2377,7 +2377,9 @@ function loadModels() {
     if (token !== modelFetch || !dialogOpen()) return;
     modelRows = [];
     fillSelect("na-model", [], false);
-    fillSelect("na-effort", defaultEfforts, true, savedEffort(defaultEfforts));
+    fillSelect("na-effort", defaultEfforts, true);
+    if (!document.getElementById("na-effort").value) effortPicked = false;
+    labelDefaults();
     setModelError("model list failed");
   });
 }
@@ -2746,7 +2748,11 @@ window.addEventListener("pageshow", function (ev) {
 });
 document.getElementById("na-model").addEventListener("change", function () {
   modelPicked = true;
-  fillSelect("na-effort", effortsFor(document.getElementById("na-model").value), true, "medium");
+  // Keep the effort if the new model offers it; otherwise fall back to
+  // "grok default" (no flag), never to a substitute the user did not pick.
+  fillSelect("na-effort", effortsFor(document.getElementById("na-model").value || savedDefaults.model), true);
+  if (!document.getElementById("na-effort").value) effortPicked = false;
+  labelDefaults();
 });
 document.addEventListener("mousedown", function (ev) {
   var node = ev.target;
