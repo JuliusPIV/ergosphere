@@ -42,7 +42,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.1.0"
+# GitHub builds release archives with `git archive`, which fills this in from
+# .gitattributes export-subst (e.g. "v0.1.3"). A git checkout keeps the literal
+# placeholder and reports "dev". No hand-edited version, so a release can't drift.
+_ARCHIVE_DESCRIBE = "$Format:%(describe:tags=true,match=v[0-9]*)$"
+VERSION = "dev" if _ARCHIVE_DESCRIBE.startswith("$") else _ARCHIVE_DESCRIBE.lstrip("v")
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9241
 SESSION_CAP = 50

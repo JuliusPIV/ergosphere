@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0--only-blue?style=for-the-badge" alt="License: AGPL-3.0-only"></a>
-  <img src="https://img.shields.io/badge/version-v0.1.0-8A2BE2?style=for-the-badge" alt="Version v0.1.0">
+  <img src="https://img.shields.io/github/v/release/JuliusPIV/ergosphere?style=for-the-badge&color=8A2BE2&label=version" alt="Latest release">
   <img src="https://img.shields.io/badge/python-3_stdlib_only-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3, standard library only">
   <img src="https://img.shields.io/badge/platform-Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Platform: Linux">
   <a href="https://x.ai/news/grok-build-cli"><img src="https://img.shields.io/badge/for-Grok_CLI-000000?style=for-the-badge&logo=x&logoColor=white" alt="For Grok CLI"></a>
@@ -33,7 +33,7 @@ Not a chat clone, and not a wrapper that guesses at grok's output. Every session
 > **One Python file. Standard library only. One line to install.**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/JuliusPIV/ergosphere/v0.1.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/JuliusPIV/ergosphere/main/install.sh | bash
 ```
 
 <p align="center">
@@ -65,7 +65,7 @@ You started a long grok task over SSH. Now you want to check on it from another 
 **1. Install and start it.**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/JuliusPIV/ergosphere/v0.1.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/JuliusPIV/ergosphere/main/install.sh | bash
 ```
 
 With a terminal it asks `Automatic (recommended) or Manual? [A/m]`. **Automatic** asks nothing else: it installs to `~/.local/share/ergosphere`, listens on `127.0.0.1` port `9241`, starts the server and prints a summary.
@@ -82,17 +82,17 @@ With a terminal it asks `Automatic (recommended) or Manual? [A/m]`. **Automatic*
 Manual mode asks for the install directory, port, listen address and an optional first agent:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/JuliusPIV/ergosphere/v0.1.0/install.sh | bash -s -- --manual
+curl -fsSL https://raw.githubusercontent.com/JuliusPIV/ergosphere/main/install.sh | bash -s -- --manual
 ```
 
 Or set them on the command line:
 
 ```bash
 # A different port, still this machine only
-curl -fsSL https://raw.githubusercontent.com/JuliusPIV/ergosphere/v0.1.0/install.sh | bash -s -- --port 9300
+curl -fsSL https://raw.githubusercontent.com/JuliusPIV/ergosphere/main/install.sh | bash -s -- --port 9300
 
 # Listen on one network address of this machine
-curl -fsSL https://raw.githubusercontent.com/JuliusPIV/ergosphere/v0.1.0/install.sh | bash -s -- --bind 192.0.2.10 --yes
+curl -fsSL https://raw.githubusercontent.com/JuliusPIV/ergosphere/main/install.sh | bash -s -- --bind 192.0.2.10 --yes
 ```
 
 All options are in the [installer reference](#installer-options).
@@ -351,6 +351,7 @@ Pass options after `| bash -s --`.
 | `--port N` | Port. Default `ERGOSPHERE_PORT`, else the port saved in `ergosphere.json`, else `9241`. |
 | `--bind ADDR` | Listen address: an IPv4 address of this machine, `0.0.0.0`, or `localhost`. Default: the address saved in `ergosphere.json`, else `127.0.0.1`. |
 | `--yes` | Approve a listen address other than loopback without asking. |
+| `--version vA.B.C` | Install that release instead of the latest one (pin or roll back). The rerun command it prints keeps it. |
 | `--check` | Run the checks only. Change nothing. |
 | `--help` | Show the options. |
 
