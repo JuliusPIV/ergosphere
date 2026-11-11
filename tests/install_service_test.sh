@@ -109,6 +109,14 @@ if [[ "$rc" -ne 0 && ! -e "$unit" && "$(sc is-enabled ergosphere.service 2>&1)" 
 else
   bad "failed start: rc $rc, unit present=$([[ -e "$unit" ]] && echo yes || echo no), is-enabled $(sc is-enabled ergosphere.service 2>&1)"
 fi
+# It says what it did: the unit file it removed, the code it did not put back,
+# and the reset-failed a rerun needs after failed starts.
+if grep -q 'removed the unit file' <<<"$out" && grep -q 'code in .* was NOT put back' <<<"$out" &&
+   grep -q 'systemctl --user reset-failed ergosphere' <<<"$out"; then
+  ok "failed start: the summary names the unit file, the code left in place and reset-failed"
+else
+  bad "failed start: messages: $(grep '^service:' <<<"$out" | tr '\n' '|')"
+fi
 sc reset-failed ergosphere.service 2>/dev/null
 rm -rf -- "$home/app"
 

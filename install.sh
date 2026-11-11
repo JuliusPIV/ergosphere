@@ -52,19 +52,26 @@ cleanup() {
   if [[ "${UNIT_STARTED:-0}" -eq 1 && "${VERIFIED:-0}" -eq 0 ]]; then
     systemctl --user stop ergosphere.service 2>/dev/null || true
   fi
-  # A failed run leaves the unit as it found it: the unit file (or none) and,
-  # since enabling happens only after a good start, its enabled state.
+  # A failed run puts the unit file back as it found it (or removes a new one);
+  # enabling happens only after a good start. The code is NOT rolled back.
   if [[ "$status" -ne 0 && "${UNIT_WRITTEN:-0}" -eq 1 ]]; then
     if [[ "${UNIT_HAD_FILE:-0}" -eq 1 && -f "${STAGE:-}/unit.prev" ]]; then
       cp -p -- "$STAGE/unit.prev" "$UNIT_FILE" 2>/dev/null || true
+      printf 'service: put the unit file %s back as it was before this run\n' "$UNIT_FILE" >&2
     else
       rm -f -- "$UNIT_FILE"
+      printf 'service: removed the unit file %s that this run wrote; nothing was enabled\n' "$UNIT_FILE" >&2
     fi
     systemctl --user daemon-reload 2>/dev/null || true
     if [[ "${UNIT_WAS_ACTIVE:-0}" -eq 1 ]]; then
       systemctl --user start ergosphere.service 2>/dev/null || true
     fi
-    printf 'service: put %s back as it was before this run\n' "$UNIT_FILE" >&2
+    if [[ "${CODE_UPDATED:-0}" -gt 0 ]]; then
+      printf 'service: the code in %s was NOT put back: it is the new release (%s files updated), so the unit may still fail to start\n' "$DEST" "$CODE_UPDATED" >&2
+    fi
+  fi
+  if [[ "$status" -ne 0 && "${UNIT_STARTED:-0}" -eq 1 ]]; then
+    printf 'service: after fixing the cause, run: systemctl --user reset-failed ergosphere   (it stops retrying after 5 failed starts), then rerun this installer\n' >&2
   fi
   if [[ -n "${STAGE:-}" ]]; then
     rm -rf -- "$STAGE"
@@ -858,6 +865,7 @@ install_files() {
   done < <(cd "$SRC" && find . -type f -print0 | sort -z)
   [[ "$files" -gt 0 ]] || fail install "archive has no files"
   printf 'install: %s package files match the archive by sha256 (%s updated)\n' "$files" "$n"
+  CODE_UPDATED=$n
   if [[ "$n" -gt 0 ]]; then CHANGED+=("$n package files"); fi
 }
 
@@ -1079,7 +1087,7 @@ main() {
   AGENT="" AGENT_DIR="" CFG_FILE="" LEGACY_FILE="" CFG_AGENTS="(none)" CFG_NOTE="" SERVER_NOTE="" PID=""
   STAGE="" SRC="" STARTED_PID="" VERIFIED=0 PROBE="" PROBE_PID="" PROBE_DIGEST="" PROBE_AT=""
   PYTHON="" CURL="" GROK="" BLOCKERS=() CHANGED=()
-  SERVICE="" UNIT_FILE="" UNIT_STATE="" UNIT_TYPE=notify WANT_UNIT=0 UNIT_CHANGED=0 UNIT_STARTED=0 UNIT_WRITTEN=0 UNIT_HAD_FILE=0 UNIT_WAS_ACTIVE=0
+  SERVICE="" UNIT_FILE="" UNIT_STATE="" UNIT_TYPE=notify WANT_UNIT=0 UNIT_CHANGED=0 UNIT_STARTED=0 UNIT_WRITTEN=0 UNIT_HAD_FILE=0 UNIT_WAS_ACTIVE=0 CODE_UPDATED=0
   export PYTHONDONTWRITEBYTECODE=1
   trap cleanup EXIT
   trap 'exit 130' INT

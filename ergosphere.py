@@ -1170,10 +1170,15 @@ def kill_all():
     # short wait, stop the sessions from a snapshot taken without the lock.
     locked = LIVE_LOCK.acquire(timeout=2)
     try:
-        try:
-            lives = list(LIVE.values())
-        except RuntimeError:  # changed while copying without the lock
-            lives = list(LIVE.values())
+        lives = []
+        # Without the lock the dict can change while it is copied (RuntimeError);
+        # retry a few times, and never raise out of the signal handler.
+        for _attempt in range(5):
+            try:
+                lives = list(LIVE.values())
+                break
+            except RuntimeError:
+                lives = []
         if locked:
             LIVE.clear()
     finally:

@@ -177,6 +177,21 @@ def check_stop_with_lock_held():
     erg.LIVE_LOCK.release()
     if not done:
         return ["kill_all still waiting for LIVE_LOCK after 5 s, so a hung server does not stop"]
+
+    # Without the lock, a dict that keeps changing while it is copied must not
+    # make kill_all raise (it runs in the SIGTERM handler).
+    class Changing(dict):
+        def values(self):
+            raise RuntimeError("dictionary changed size during iteration")
+
+    erg.LIVE = Changing()
+    erg.LIVE_LOCK.acquire()
+    try:
+        erg.kill_all()
+    except RuntimeError as exc:
+        return ["kill_all raised %r while LIVE changed under it" % exc]
+    finally:
+        erg.LIVE_LOCK.release()
     return []
 
 
