@@ -31,6 +31,10 @@ cleanup() {
   systemctl --user stop "$mgr_unit" 2>/dev/null
   systemctl --user reset-failed "$mgr_unit" 2>/dev/null
   for p in ${pids[@]+"${pids[@]}"}; do kill "$p" 2>/dev/null; done
+  # Stub grok sessions record their own pid.
+  if [[ -f "$work/grok.pids" ]]; then
+    while read -r p; do kill "$p" 2>/dev/null; done <"$work/grok.pids"
+  fi
   rm -rf -- "$work"
 }
 trap cleanup EXIT
@@ -56,7 +60,15 @@ fi
 cp -p "$repo/ergosphere.py" "$repo/LICENSE" "$work/pkg/ergosphere-test/"
 cp -rp "$repo/vendor" "$work/pkg/ergosphere-test/"
 tar -czf "$work/www/src.tar.gz" -C "$work/pkg" ergosphere-test
-printf '#!/bin/sh\necho "grok 0.0.0-test"\n' >"$work/bin/grok"
+# An older release: no SYSTEMD_NOTIFY marker and no READY=1.
+mkdir -p "$work/old/ergosphere-old"
+cp -rp "$work/pkg/ergosphere-test/." "$work/old/ergosphere-old/"
+sed -i -e '/^SYSTEMD_NOTIFY = 1$/d' -e 's/^    sd_notify("READY=1")$/    pass/' "$work/old/ergosphere-old/ergosphere.py"
+tar -czf "$work/www/old.tar.gz" -C "$work/old" ergosphere-old
+# Answers --version; a launch (--cwd ...) is a long-running stand-in for a
+# grok session; anything else (the model list) exits at once.
+# shellcheck disable=SC2016  # $1 and $$ belong to the stub
+printf '#!/bin/sh\n[ "$1" = --version ] && { echo "grok 0.0.0-test"; exit 0; }\n[ "$1" = --cwd ] || exit 0\necho $$ >>%s/grok.pids\nexec sleep 300\n' "$work" >"$work/bin/grok"
 chmod +x "$work/bin/grok"
 python3 -I -c '
 import functools, http.server, sys
@@ -72,7 +84,7 @@ url="http://127.0.0.1:$(cat "$work/www.port")/src.tar.gz"
 run_install() {
   env -u ERGOSPHERE_PORT -u ERGOSPHERE_CONFIG -u DBUS_SESSION_BUS_ADDRESS HOME="$home" \
     XDG_RUNTIME_DIR="$rt" XDG_CONFIG_HOME="$home/.config" PATH="$work/bin:$PATH" TMPDIR="$work" \
-    ERGOSPHERE_INSTALL_SOURCE_URL="$url" bash "$repo/install.sh" --auto --dir "$home/app" --port "$port" "$@" </dev/null 2>&1
+    ERGOSPHERE_INSTALL_SOURCE_URL="${src_url:-$url}" timeout 60 bash "$repo/install.sh" --auto --dir "$home/app" --port "$port" "$@" </dev/null 2>&1
 }
 field() { sed -n "s/^  $1: *//p" <<<"$2" | head -n 1; }
 health_pid() {
@@ -142,6 +154,35 @@ if [[ -f "$unit" && "$main" != 0 && "$main" != "$pid" && "$(health_pid)" == "$ma
   ok "--service took over from plain pid $pid (unit pid $main)"
 else
   bad "takeover: unit pid $main, plain pid $pid, /health pid $(health_pid)"
+fi
+
+# 7. --service with an older release (no READY=1): Type=simple, no watchdog, still serving.
+t0=$SECONDS
+out=$(src_url="${url%/*}/old.tar.gz" run_install --service)
+took=$((SECONDS - t0))
+main=$(sc show -p MainPID --value ergosphere.service)
+if grep -qxF Type=simple "$unit" && ! grep -q '^WatchdogSec=' "$unit" && grep -qxF Restart=always "$unit" &&
+   [[ "$(sc show -p ActiveState --value ergosphere.service)" == active && "$main" != 0 && "$(health_pid)" == "$main" ]] &&
+   grep -q 'no watchdog support' <<<"$out"; then
+  ok "older release: Type=simple, no WatchdogSec, pid $main serves /health, summary says so (${took}s)"
+else
+  bad "older release (${took}s): Type=$(sed -n 's/^Type=//p' "$unit"), state $(sc show -p ActiveState --value ergosphere.service), MainPID $main, /health pid $(health_pid)"
+  printf '%s\n' "$out" | tail -n 6
+fi
+
+# 8. Deferred takeover: a plain server with a grok session open keeps running;
+# the summary's stop line names that pid, not the unit.
+run_install --no-service >/dev/null
+pid=$(health_pid)
+if [[ -n "$pid" ]]; then pids+=("$pid"); fi
+curl --noproxy '*' -s --max-time 5 -H 'Content-Type: application/json' -H "Origin: http://127.0.0.1:$port" \
+  -d '{"cwd": "/tmp", "approval": "ask"}' "http://127.0.0.1:$port/launch" >/dev/null
+out=$(run_install --service)
+stop=$(field stop "$out")
+if [[ "$(health_pid)" == "$pid" && "$stop" == "kill $pid "* ]] && grep -q 'keeps running' <<<"$out"; then
+  ok "deferred takeover: plain pid $pid kept, stop line is 'kill $pid'"
+else
+  bad "deferred takeover: /health pid $(health_pid) (plain $pid), stop line '$stop'"
 fi
 
 exit "$fail"

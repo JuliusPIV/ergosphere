@@ -4812,6 +4812,11 @@ def listen(args, tls, token):
         return None
 
 
+# Installers and deploy scripts look for this exact line to tell that this code
+# sends READY=1 and WATCHDOG=1, so a systemd unit may use Type=notify.
+SYSTEMD_NOTIFY = 1
+
+
 def sd_notify(message):
     """Send one systemd notification. False when NOTIFY_SOCKET is unset or the send failed.
 
@@ -4862,14 +4867,18 @@ def start_watchdog(httpd):
         return None
 
     def loop():
+        # Check and ping at once: READY=1 does not reset the watchdog timer, so
+        # after a restart (exec, same pid) the first ping must not wait a full interval.
         healthy = True
-        while not STOP.wait(interval):
+        while True:
             ok = can_serve(httpd)
             if ok:
                 sd_notify("WATCHDOG=1")
             if ok != healthy:
                 print("watchdog: %s" % ("healthy again, pinging" if ok else "self-check failed, ping skipped"), flush=True)
                 healthy = ok
+            if STOP.wait(interval):
+                return
 
     thread = threading.Thread(target=loop, name="watchdog", daemon=True)
     thread.start()
@@ -4957,6 +4966,9 @@ def restart_self(old_bind, old_port):
     env[RESTART_FALLBACK_ENV] = "%s:%s" % (old_bind, old_port)
     print("restarting: %s (fallback %s:%s)" % (" ".join(argv), old_bind, old_port), flush=True)
     sys.stderr.flush()
+    # A fresh watchdog interval for the new process to come up in.
+    if watchdog_interval() is not None:
+        sd_notify("WATCHDOG=1")
     try:
         os.execve(sys.executable, argv, env)
     except OSError as exc:

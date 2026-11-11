@@ -332,15 +332,15 @@ unit_text() {
     "Description=Ergosphere web portal for grok sessions" \
     "" \
     "[Service]" \
-    "Type=notify" \
+    "Type=$UNIT_TYPE" \
     "WorkingDirectory=$DEST" \
     "Environment=PATH=$path"
   if [[ -n "${ERGOSPHERE_CONFIG:-}" ]]; then printf 'Environment=ERGOSPHERE_CONFIG=%s\n' "$CFG_FILE"; fi
   printf '%s\n' "ExecStart=$PYTHON $DEST/ergosphere.py" \
     "StandardOutput=append:$DEST/ergosphere.log" \
-    "StandardError=append:$DEST/ergosphere.log" \
-    "WatchdogSec=60" \
-    "Restart=always" \
+    "StandardError=append:$DEST/ergosphere.log"
+  if [[ "$UNIT_TYPE" == notify ]]; then printf 'WatchdogSec=60\n'; fi
+  printf '%s\n' "Restart=always" \
     "RestartSec=5" \
     "" \
     "[Install]" \
@@ -351,6 +351,10 @@ unit_text() {
 install_unit() {
   local want
   [[ "$WANT_UNIT" -eq 1 ]] || return 0
+  # Only code with the SYSTEMD_NOTIFY marker sends READY=1; older releases
+  # (--version rollback) would never count as started under Type=notify.
+  UNIT_TYPE=simple
+  if grep -qE '^SYSTEMD_NOTIFY = 1( |$)' "$DEST/ergosphere.py"; then UNIT_TYPE=notify; fi
   want=$(unit_text)
   if [[ ! -f "$UNIT_FILE" || "$(cat -- "$UNIT_FILE")" != "$want" ]]; then
     { mkdir -p -- "${UNIT_FILE%/*}" && printf '%s\n' "$want" >"$UNIT_FILE.part" &&
@@ -981,11 +985,20 @@ summary() {
   printf '  log:      %s\n' "$DEST/ergosphere.log"
   printf '  pid:      %s\n' "$PID"
   if [[ "$WANT_UNIT" -eq 1 ]]; then
-    printf '  service:  %s (enabled: starts at login, restarts if it crashes or hangs)\n' "$UNIT_FILE"
+    if [[ "$UNIT_TYPE" == notify ]]; then
+      printf '  service:  %s (enabled: starts at login, restarts if it crashes or hangs)\n' "$UNIT_FILE"
+    else
+      printf '  service:  %s (enabled: starts at login, restarts if it crashes; this release has no watchdog support, so a hang is not restarted)\n' "$UNIT_FILE"
+    fi
     if [[ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || true)" != yes ]]; then
       printf '            To start at boot before you log in: loginctl enable-linger %s (may need sudo)\n' "$(id -un)"
     fi
+  fi
+  if [[ "$WANT_UNIT" -eq 1 && "$PID" == "$(unit_main_pid)" ]]; then
     printf '  stop:     systemctl --user stop ergosphere   (kill restarts it; stopping also ends its grok sessions)\n'
+  elif [[ "$WANT_UNIT" -eq 1 ]]; then
+    # Deferred takeover: the plain server still serves; the unit starts at the next login.
+    printf '  stop:     kill %s   (not run by systemd yet; ergosphere.service takes over at the next login, or rerun this installer once it is stopped)\n' "$PID"
   else
     printf '  stop:     kill %s   (also stops the grok sessions it started; closing a tab does not)\n' "$PID"
   fi
@@ -1033,7 +1046,7 @@ main() {
   AGENT="" AGENT_DIR="" CFG_FILE="" LEGACY_FILE="" CFG_AGENTS="(none)" CFG_NOTE="" SERVER_NOTE="" PID=""
   STAGE="" SRC="" STARTED_PID="" VERIFIED=0 PROBE="" PROBE_PID="" PROBE_DIGEST="" PROBE_AT=""
   PYTHON="" CURL="" GROK="" BLOCKERS=() CHANGED=()
-  SERVICE="" UNIT_FILE="" UNIT_STATE="" WANT_UNIT=0 UNIT_CHANGED=0 UNIT_STARTED=0
+  SERVICE="" UNIT_FILE="" UNIT_STATE="" UNIT_TYPE=notify WANT_UNIT=0 UNIT_CHANGED=0 UNIT_STARTED=0
   export PYTHONDONTWRITEBYTECODE=1
   trap cleanup EXIT
   trap 'exit 130' INT

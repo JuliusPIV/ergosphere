@@ -356,7 +356,7 @@ Pass options after `| bash -s --`.
 | `--dir DIR` | Install directory. Default `~/.local/share/ergosphere`. |
 | `--port N` | Port. Default `ERGOSPHERE_PORT`, else the port saved in `ergosphere.json`, else `9241`. |
 | `--bind ADDR` | Listen address: an IPv4 address of this machine, `0.0.0.0`, or `localhost`. Default: the address saved in `ergosphere.json`, else `127.0.0.1`. |
-| `--service` | Run it as a systemd user unit, `ergosphere.service` (`Type=notify`, `WatchdogSec=60`, `Restart=always`, `RestartSec=5`, `WantedBy=default.target`), and enable it: it starts at login, at boot with `loginctl enable-linger`, and restarts if it crashes or hangs. A rerun without the flag keeps the unit and updates it when it differs. Never touches system units or a unit from another install. |
+| `--service` | Run it as a systemd user unit, `ergosphere.service` (`Type=notify`, `WatchdogSec=60`, `Restart=always`, `RestartSec=5`, `WantedBy=default.target`), and enable it: it starts at login, at boot with `loginctl enable-linger`, and restarts if it crashes or hangs. A rerun without the flag keeps the unit and updates it when it differs. With a release that has no watchdog support (`--version` v0.1.3 or older) the unit is `Type=simple` without `WatchdogSec`: it restarts after a crash, not a hang, and the summary says so. Never touches system units or a unit from another install. |
 | `--no-service` | Stop, disable and remove that unit (only when it has no grok sessions open); Ergosphere then runs without systemd. |
 | `--yes` | Approve a listen address other than loopback without asking. |
 | `--version vA.B.C` | Install that release instead of the latest one (pin or roll back). The rerun command it prints keeps it. |

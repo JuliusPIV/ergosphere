@@ -1,11 +1,14 @@
-"""Under systemd Type=notify the server says READY=1 and pings WATCHDOG=1,
-and stops pinging while it cannot serve (LIVE_LOCK held).
+"""Under systemd Type=notify the server says READY=1 and pings WATCHDOG=1 at
+once, pings again across a Settings restart, and stops pinging while it
+cannot serve (LIVE_LOCK held).
 
 Run: [ERGOSPHERE_TEST_PORT=<spare port>] python3 -B tests/watchdog_test.py
 Stdlib only, no network: a real server on a free loopback port, with a stub
 grok, a throwaway HOME and config, and our own abstract NOTIFY_SOCKET.
 """
+import http.client
 import importlib.util
+import json
 import os
 import shutil
 import socket
@@ -59,7 +62,7 @@ def check_live_server():
         "PATH": bindir + os.pathsep + env.get("PATH", "/usr/bin:/bin"),
         "ERGOSPHERE_CONFIG": os.path.join(work, "ergosphere.json"),
         "NOTIFY_SOCKET": "@" + name,
-        "WATCHDOG_USEC": "1000000",
+        "WATCHDOG_USEC": "20000000",
     })
     env.pop("WATCHDOG_PID", None)
     env.pop("ERGOSPHERE_TOKEN", None)
@@ -69,13 +72,29 @@ def check_live_server():
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     failures = []
     try:
+        # The interval is 10 s: a ping within 2 s of READY=1 is the immediate one.
         got, ready = recv_until(sock, "READY=1", time.time() + 15)
         if not ready:
             failures.append("no READY=1 within 15s (got %r)" % got)
         else:
-            got, pinged = recv_until(sock, "WATCHDOG=1", time.time() + 5)
+            got, pinged = recv_until(sock, "WATCHDOG=1", time.time() + 2)
             if not pinged:
-                failures.append("no WATCHDOG=1 within 5s of READY (got %r)" % got)
+                failures.append("no WATCHDOG=1 within 2s of READY (got %r)" % got)
+            else:
+                # Settings restart (exec, same pid): a ping before exec, then
+                # READY=1 and an immediate ping from the new process.
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                conn.request("POST", "/settings", body=json.dumps({"action": "restart"}),
+                             headers={"Content-Type": "application/json",
+                                      "Origin": "http://127.0.0.1:%d" % port})
+                status = conn.getresponse().status
+                conn.close()
+                end = time.time() + 8
+                for want in ("WATCHDOG=1", "READY=1", "WATCHDOG=1"):
+                    got, seen = recv_until(sock, want, end)
+                    if not seen:
+                        failures.append("restart (HTTP %s): no %s in order within 8s (got %r)" % (status, want, got))
+                        break
     finally:
         proc.terminate()
         try:
