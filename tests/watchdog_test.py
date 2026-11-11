@@ -15,6 +15,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 from pathlib import Path
@@ -162,8 +163,26 @@ def check_one_slow_miss_keeps_deadline():
     return []
 
 
+def check_stop_with_lock_held():
+    """A hung server (LIVE_LOCK held forever) must still stop: kill_all, run by
+    the SIGTERM handler, may not wait for the lock without a limit."""
+    spec = importlib.util.spec_from_file_location("ergosphere", ROOT / "ergosphere.py")
+    erg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(erg)
+    erg.LIVE_LOCK.acquire()
+    done = []
+    worker = threading.Thread(target=lambda: (erg.kill_all(), done.append(1)), daemon=True)
+    worker.start()
+    worker.join(5)
+    erg.LIVE_LOCK.release()
+    if not done:
+        return ["kill_all still waiting for LIVE_LOCK after 5 s, so a hung server does not stop"]
+    return []
+
+
 def main():
-    failures = check_live_server() + check_lock_held_blocks_ping() + check_one_slow_miss_keeps_deadline()
+    failures = (check_live_server() + check_lock_held_blocks_ping() + check_one_slow_miss_keeps_deadline()
+                + check_stop_with_lock_held())
     for failure in failures:
         print("FAIL: " + failure)
     if failures:

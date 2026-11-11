@@ -1165,9 +1165,20 @@ def kill_proc(proc):
 
 
 def kill_all():
-    with LIVE_LOCK:
-        lives = list(LIVE.values())
-        LIVE.clear()
+    # Shutdown path: a hung server may hold LIVE_LOCK forever, and waiting for
+    # it would keep the process alive until systemd's stop timeout. After a
+    # short wait, stop the sessions from a snapshot taken without the lock.
+    locked = LIVE_LOCK.acquire(timeout=2)
+    try:
+        try:
+            lives = list(LIVE.values())
+        except RuntimeError:  # changed while copying without the lock
+            lives = list(LIVE.values())
+        if locked:
+            LIVE.clear()
+    finally:
+        if locked:
+            LIVE_LOCK.release()
     for live in lives:
         live.shutdown()
 

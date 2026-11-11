@@ -52,6 +52,20 @@ cleanup() {
   if [[ "${UNIT_STARTED:-0}" -eq 1 && "${VERIFIED:-0}" -eq 0 ]]; then
     systemctl --user stop ergosphere.service 2>/dev/null || true
   fi
+  # A failed run leaves the unit as it found it: the unit file (or none) and,
+  # since enabling happens only after a good start, its enabled state.
+  if [[ "$status" -ne 0 && "${UNIT_WRITTEN:-0}" -eq 1 ]]; then
+    if [[ "${UNIT_HAD_FILE:-0}" -eq 1 && -f "${STAGE:-}/unit.prev" ]]; then
+      cp -p -- "$STAGE/unit.prev" "$UNIT_FILE" 2>/dev/null || true
+    else
+      rm -f -- "$UNIT_FILE"
+    fi
+    systemctl --user daemon-reload 2>/dev/null || true
+    if [[ "${UNIT_WAS_ACTIVE:-0}" -eq 1 ]]; then
+      systemctl --user start ergosphere.service 2>/dev/null || true
+    fi
+    printf 'service: put %s back as it was before this run\n' "$UNIT_FILE" >&2
+  fi
   if [[ -n "${STAGE:-}" ]]; then
     rm -rf -- "$STAGE"
   fi
@@ -308,8 +322,8 @@ check_unit() {
     *:absent) row ok service "no systemd unit (--service starts it at login and restarts it if it crashes or hangs)" ;;
   esac
   if [[ "$WANT_UNIT" -eq 1 ]]; then
-    if ! unit_safe "$DEST" || ! unit_safe "$PYTHON" || ! unit_safe "$CFG_FILE"; then
-      row invalid service "a systemd unit needs install dir, python and config paths made of letters, digits and / . _ : + @ -"
+    if ! unit_safe "$DEST" || ! unit_safe "$PYTHON" || ! unit_safe "$CFG_FILE" || ! unit_safe "${GROK%/*}"; then
+      row invalid service "a systemd unit needs install dir, python, grok and config paths made of letters, digits and / . _ : + @ - (no spaces)"
     elif [[ "$UNIT_STATE" == ours ]]; then
       row ok service "$UNIT_FILE present (starts at login, restarts on crash or hang)"
     else
@@ -350,7 +364,7 @@ unit_text() {
     "WantedBy=default.target"
 }
 
-# Writes and enables the unit when it differs; reads both back.
+# Writes the unit when it differs and reads it back (enable_unit enables it later).
 install_unit() {
   local want
   [[ "$WANT_UNIT" -eq 1 ]] || return 0
@@ -360,6 +374,14 @@ install_unit() {
   if grep -qE '^SYSTEMD_NOTIFY = 1( |$)' "$DEST/ergosphere.py"; then UNIT_TYPE=notify; fi
   want=$(unit_text)
   if [[ ! -f "$UNIT_FILE" || "$(cat -- "$UNIT_FILE")" != "$want" ]]; then
+    # Kept so a failed run can put the unit back (cleanup).
+    UNIT_HAD_FILE=0 UNIT_WAS_ACTIVE=0
+    if [[ -f "$UNIT_FILE" ]]; then
+      cp -p -- "$UNIT_FILE" "$STAGE/unit.prev" || fail service "could not keep a copy of $UNIT_FILE"
+      UNIT_HAD_FILE=1
+      if systemctl --user is-active --quiet ergosphere.service 2>/dev/null; then UNIT_WAS_ACTIVE=1; fi
+    fi
+    UNIT_WRITTEN=1
     { mkdir -p -- "${UNIT_FILE%/*}" && printf '%s\n' "$want" >"$UNIT_FILE.part" &&
       mv -f -- "$UNIT_FILE.part" "$UNIT_FILE"; } || fail service "could not write $UNIT_FILE"
     systemctl --user daemon-reload || fail service "systemctl --user daemon-reload failed"
@@ -368,6 +390,12 @@ install_unit() {
     CHANGED+=("ergosphere.service")
   fi
   [[ "$(cat -- "$UNIT_FILE")" == "$want" ]] || fail service "read-back: $UNIT_FILE does not hold the intended unit"
+}
+
+# Enables the unit once start_server succeeded (or kept a busy server for it),
+# so a failed start never leaves an enabled unit that fails at every login.
+enable_unit() {
+  [[ "$WANT_UNIT" -eq 1 ]] || return 0
   if ! systemctl --user is-enabled --quiet ergosphere.service 2>/dev/null; then
     systemctl --user enable --quiet ergosphere.service || fail service "could not enable ergosphere.service"
     CHANGED+=("enabled ergosphere.service")
@@ -1051,7 +1079,7 @@ main() {
   AGENT="" AGENT_DIR="" CFG_FILE="" LEGACY_FILE="" CFG_AGENTS="(none)" CFG_NOTE="" SERVER_NOTE="" PID=""
   STAGE="" SRC="" STARTED_PID="" VERIFIED=0 PROBE="" PROBE_PID="" PROBE_DIGEST="" PROBE_AT=""
   PYTHON="" CURL="" GROK="" BLOCKERS=() CHANGED=()
-  SERVICE="" UNIT_FILE="" UNIT_STATE="" UNIT_TYPE=notify WANT_UNIT=0 UNIT_CHANGED=0 UNIT_STARTED=0
+  SERVICE="" UNIT_FILE="" UNIT_STATE="" UNIT_TYPE=notify WANT_UNIT=0 UNIT_CHANGED=0 UNIT_STARTED=0 UNIT_WRITTEN=0 UNIT_HAD_FILE=0 UNIT_WAS_ACTIVE=0
   export PYTHONDONTWRITEBYTECODE=1
   trap cleanup EXIT
   trap 'exit 130' INT
@@ -1084,6 +1112,7 @@ main() {
   remove_unit
   install_unit
   start_server
+  enable_unit
   summary
 }
 

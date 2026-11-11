@@ -11,7 +11,8 @@
 # only answers --version. The private manager and every server are stopped.
 set -u
 repo=$(cd "$(dirname "$0")/.." && pwd)
-port=${ERGOSPHERE_TEST_PORT:-9551}
+# Default: a free loopback port picked now, so a repro run needs no setting.
+port=${ERGOSPHERE_TEST_PORT:-$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')}
 manager=/usr/lib/systemd/systemd
 mgr_unit="ergo-wd-test-mgr-$$"
 if ! command -v systemd-run >/dev/null || [[ ! -x "$manager" ]] ||
@@ -67,6 +68,11 @@ mkdir -p "$work/old/ergosphere-old"
 cp -rp "$work/pkg/ergosphere-test/." "$work/old/ergosphere-old/"
 sed -i -e '/^SYSTEMD_NOTIFY = 1$/d' -e 's/^    sd_notify("READY=1")$/    pass/' "$work/old/ergosphere-old/ergosphere.py"
 tar -czf "$work/www/old.tar.gz" -C "$work/old" ergosphere-old
+# A release that passes --check but exits at once when started.
+mkdir -p "$work/bad/ergosphere-bad"
+cp -rp "$work/pkg/ergosphere-test/." "$work/bad/ergosphere-bad/"
+sed -i 's/^def serve(args, config):$/&\n    raise SystemExit(3)/' "$work/bad/ergosphere-bad/ergosphere.py"
+tar -czf "$work/www/bad.tar.gz" -C "$work/bad" ergosphere-bad
 # Answers --version; a launch (--cwd ...) is a long-running stand-in for a
 # grok session; anything else (the model list) exits at once.
 # shellcheck disable=SC2016  # $1 and $$ belong to the stub
@@ -94,6 +100,31 @@ health_pid() {
     python3 -I -c 'import json,sys; print(json.load(sys.stdin).get("pid", ""))' 2>/dev/null
 }
 unit="$home/.config/systemd/user/ergosphere.service"
+
+# 0a. A failed --service start leaves no unit behind (not written, not enabled).
+out=$(src_url="${url%/*}/bad.tar.gz" run_install --service)
+rc=$?
+if [[ "$rc" -ne 0 && ! -e "$unit" && "$(sc is-enabled ergosphere.service 2>&1)" != enabled ]]; then
+  ok "failed start: installer rc $rc, no unit file, not enabled"
+else
+  bad "failed start: rc $rc, unit present=$([[ -e "$unit" ]] && echo yes || echo no), is-enabled $(sc is-enabled ergosphere.service 2>&1)"
+fi
+sc reset-failed ergosphere.service 2>/dev/null
+rm -rf -- "$home/app"
+
+# 0b. grok in a directory with a space: --service is refused at check time.
+mkdir -p "$work/g dir"
+cp -p "$work/bin/grok" "$work/g dir/grok"
+out=$(env -u ERGOSPHERE_PORT -u ERGOSPHERE_CONFIG -u DBUS_SESSION_BUS_ADDRESS HOME="$home" \
+  XDG_RUNTIME_DIR="$rt" XDG_CONFIG_HOME="$home/.config" PATH="$work/g dir:/usr/bin:/bin" TMPDIR="$work" \
+  ERGOSPHERE_INSTALL_SOURCE_URL="$url" timeout 60 bash "$repo/install.sh" --auto --dir "$home/app" --port "$port" --service </dev/null 2>&1)
+rc=$?
+if [[ "$rc" -ne 0 ]] && grep -q '^failed at check' <<<"$out" && grep -q 'grok' <<<"$(grep 'service' <<<"$out")" && [[ ! -e "$unit" ]]; then
+  ok "grok dir with a space: refused at check, no unit"
+else
+  bad "grok dir with a space: rc $rc, unit present=$([[ -e "$unit" ]] && echo yes || echo no)"
+  printf '%s\n' "$out" | tail -n 4
+fi
 
 # 1. --service: unit written, enabled, active (READY=1 seen), main pid serves /health.
 out=$(run_install --service)
