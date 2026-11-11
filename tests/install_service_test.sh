@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # install.sh --service writes and enables a systemd user unit (Type=notify,
 # watchdog, Restart=always) whose main pid serves /health; a rerun changes
-# nothing; --no-service removes it. Runs against a private systemd user
-# manager with a throwaway HOME, never the real one; SKIP without systemd.
+# nothing; --no-service removes it. The installer only talks to a private
+# systemd user manager with a throwaway HOME; that private manager itself
+# runs as one transient unit (ergo-wd-test-mgr-<pid>) in the real user
+# manager, stopped and reset on exit. SKIP without systemd.
 #
 # Run: ERGOSPHERE_TEST_PORT=<spare port> bash tests/install_service_test.sh
 # No network: the package is served from 127.0.0.1 and grok is a stub that
@@ -42,7 +44,7 @@ trap cleanup EXIT
 ok() { echo "ok:   $1"; }
 bad() { echo "FAIL: $1"; fail=1; }
 
-# Everything below talks to the private manager only.
+# The installer and every check below talk to the private manager only.
 sc() {
   env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR="$rt" HOME="$home" XDG_CONFIG_HOME="$home/.config" \
     systemctl --user "$@"
@@ -183,6 +185,18 @@ if [[ "$(health_pid)" == "$pid" && "$stop" == "kill $pid "* ]] && grep -q 'keeps
   ok "deferred takeover: plain pid $pid kept, stop line is 'kill $pid'"
 else
   bad "deferred takeover: /health pid $(health_pid) (plain $pid), stop line '$stop'"
+fi
+
+# 9. The unit started while the plain server holds the port (as at the next
+# login) fails and stops retrying instead of looping every 5 s.
+sc start --no-block ergosphere.service
+sleep 32
+n=$(sc show -p NRestarts --value ergosphere.service)
+state=$(sc show -p ActiveState --value ergosphere.service)/$(sc show -p Result --value ergosphere.service)
+if [[ "$state" == failed/* && "$n" -le 5 && "$(health_pid)" == "$pid" ]]; then
+  ok "unit blocked by pid $pid stops retrying ($state after $n restarts)"
+else
+  bad "unit blocked by pid $pid: state $state, NRestarts $n, /health pid $(health_pid)"
 fi
 
 exit "$fail"

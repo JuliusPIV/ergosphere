@@ -330,6 +330,9 @@ unit_text() {
     "# ergosphere-install-dir: $DEST" \
     "[Unit]" \
     "Description=Ergosphere web portal for grok sessions" \
+    "# Stop retrying when it cannot start (another server holds the port)." \
+    "StartLimitIntervalSec=60" \
+    "StartLimitBurst=5" \
     "" \
     "[Service]" \
     "Type=$UNIT_TYPE" \
@@ -909,6 +912,8 @@ start_server() {
       SERVER_NOTE="Ergosphere pid $PID keeps running as before ($why) because it has $kids $noun open; when they are done run: kill $PID, then rerun this installer"
       if [[ "$WANT_UNIT" -eq 1 && "$PID" == "$main" ]]; then
         SERVER_NOTE="Ergosphere pid $PID keeps running as before ($why) because it has $kids $noun open; when they are done run: systemctl --user restart ergosphere"
+      elif [[ "$WANT_UNIT" -eq 1 ]]; then
+        SERVER_NOTE="Ergosphere pid $PID keeps running without systemd because it has $kids $noun open; ergosphere.service is enabled but cannot start while pid $PID holds the port (at login it tries 5 times, then gives up). When they are done run: kill $PID; systemctl --user reset-failed ergosphere; systemctl --user start ergosphere"
       fi
       printf 'start: already running, pid %s, not restarted (%s %s open): %s\n' "$PID" "$kids" "$noun" "$why"
       return 0
@@ -997,8 +1002,8 @@ summary() {
   if [[ "$WANT_UNIT" -eq 1 && "$PID" == "$(unit_main_pid)" ]]; then
     printf '  stop:     systemctl --user stop ergosphere   (kill restarts it; stopping also ends its grok sessions)\n'
   elif [[ "$WANT_UNIT" -eq 1 ]]; then
-    # Deferred takeover: the plain server still serves; the unit starts at the next login.
-    printf '  stop:     kill %s   (not run by systemd yet; ergosphere.service takes over at the next login, or rerun this installer once it is stopped)\n' "$PID"
+    # Deferred takeover: the plain server still serves; the unit cannot start until it stops.
+    printf '  stop:     kill %s   (not run by systemd yet; see the note for starting ergosphere.service after it)\n' "$PID"
   else
     printf '  stop:     kill %s   (also stops the grok sessions it started; closing a tab does not)\n' "$PID"
   fi

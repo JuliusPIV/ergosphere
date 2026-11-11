@@ -4911,6 +4911,16 @@ def serve(args, config):
             args.bind, args.port = host, int(port_text)
             httpd = listen(args, tls, token)
     if httpd is ALREADY_RUNNING:
+        # Under systemd this start failed: another Ergosphere holds the port,
+        # and exit 0 before READY=1 would read as a protocol error.
+        if os.environ.get("NOTIFY_SOCKET"):
+            print(
+                "not starting under systemd: another Ergosphere already serves %s:%s; "
+                "stop it, then start this unit again" % (args.bind, args.port),
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
         return 0
     if httpd is None:
         return 1
