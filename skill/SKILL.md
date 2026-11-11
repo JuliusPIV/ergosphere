@@ -10,10 +10,10 @@ Ergosphere is a local web portal for Grok CLI sessions. It lists your sessions a
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/JuliusPIV/ergosphere/v0.1.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/JuliusPIV/ergosphere/main/install.sh | bash
 ```
 
-Options after `| bash -s --`: `--auto`, `--manual`, `--dir DIR`, `--port N`, `--bind ADDR`, `--yes`, `--check`, `--help`. No terminal means automatic: `~/.local/share/ergosphere`. First install: `127.0.0.1`, port `ERGOSPHERE_PORT` or `9241`; later runs default to the bind and port saved in `ergosphere.json`. A non-loopback bind needs `y` on the terminal or `--yes`. Prerequisites (Linux, python3, grok, bash, curl, tar, gzip, nohup, sha256sum) are checked and never installed. grok sign-in is not checked.
+Options after `| bash -s --`: `--auto`, `--manual`, `--dir DIR`, `--port N`, `--bind ADDR`, `--yes`, `--version vA.B.C` (install that release instead of the latest), `--check`, `--help`. No terminal means automatic: `~/.local/share/ergosphere`. First install: `127.0.0.1`, port `ERGOSPHERE_PORT` or `9241`; later runs default to the bind and port saved in `ergosphere.json`. A non-loopback bind needs `y` on the terminal or `--yes`. Prerequisites (Linux, python3, grok, bash, curl, tar, gzip, nohup, sha256sum) are checked and never installed. grok sign-in is not checked.
 
 Refused: port below 1024 when not root, a bind that is not this machine's address, a non-empty non-Ergosphere dir, any other listener on the port, `ERGOSPHERE_TOKEN` set. Failures print `failed at check|download|install|start: ...` and exit 1.
 

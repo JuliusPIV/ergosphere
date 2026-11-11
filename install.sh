@@ -13,7 +13,7 @@
 {
 usage() {
   cat <<EOF
-Ergosphere installer ${RELEASE}
+Ergosphere installer (installs the latest release unless --version is given)
   curl -fsSL ${SCRIPT_URL} | bash
   ... | bash -s -- [options]
 With a terminal it asks: Automatic (recommended) or Manual? [A/m]
@@ -27,6 +27,7 @@ Settings live in the file named by ERGOSPHERE_CONFIG when it is set, else in
 ergosphere.json next to ergosphere.py. A rerun keeps them;
 --bind and --port change only those two keys.
   --yes        approve a non-loopback bind without asking
+  --version vA.B.C  install this release instead of the latest (pin or roll back)
   --check      run the checks only; change nothing
   --help       this help
 EOF
@@ -122,9 +123,12 @@ parse_args() {
       --auto) MODE=automatic ;;
       --manual) MODE=manual ;;
       --yes) ASSUME_YES=1 ;;
-      --dir|--port|--bind)
+      --dir|--port|--bind|--version)
         [[ $# -ge 2 ]] || fail check "missing value for $1"
         case "$1" in
+          --version)
+            [[ "$2" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail check "--version needs a release tag like vA.B.C (digits), not $2"
+            RELEASE=$2 PINNED=1 ;;
           --dir) set_dir "$2" ;;
           --port) set_port "$2"; ARG_PORT=$PORT ;;
           --bind) set_bind "$2"; ARG_BIND=$BIND ;;
@@ -551,9 +555,33 @@ socket.socket().bind((sys.argv[1], 0))' "$BIND" 2>/dev/null; then
   else
     row warn bind "$BIND: anyone who can reach port $PORT can run grok as this user"
   fi
+  find_release
   if [[ ${#BLOCKERS[@]} -gt 0 ]]; then
     fail check "blocked by ${BLOCKERS[*]} (see above); nothing was changed"
   fi
+}
+
+# The release to install: --version, else the tag that GitHub's
+# releases/latest page redirects to (a plain redirect, no API rate limit).
+find_release() {
+  local url="${ERGOSPHERE_INSTALL_LATEST_URL:-https://github.com/JuliusPIV/ergosphere/releases/latest}" loc
+  if [[ "$PINNED" -eq 1 ]]; then
+    row ok release "$RELEASE (--version)"
+  elif [[ -n "${ERGOSPHERE_INSTALL_SOURCE_URL:-}" ]]; then
+    row ok release "from ERGOSPHERE_INSTALL_SOURCE_URL"
+    return 0
+  else
+    loc=$("$CURL" --proto '=http,https' -fsS --connect-timeout 15 --max-time 30 -o /dev/null \
+      -w '%{redirect_url}' -- "$url" 2>/dev/null) || loc=""
+    RELEASE=${loc##*/tag/}
+    if [[ "$RELEASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      row ok release "$RELEASE (latest)"
+    else
+      row missing release "could not find the latest release at $url; pass --version vA.B.C"
+      return 0
+    fi
+  fi
+  SOURCE_URL="https://github.com/JuliusPIV/ergosphere/archive/refs/tags/${RELEASE}.tar.gz"
 }
 
 # Only a bind chosen in this run is confirmed; a saved one was confirmed when set.
@@ -734,6 +762,7 @@ summary() {
   if [[ "$BIND" == 0.0.0.0 ]]; then url="http://localhost:${PORT}/"; fi
   # Bind and port are in ergosphere.json, so the rerun line needs only --dir.
   if [[ "$DEST" != "$DEFAULT_DEST" ]]; then base+=(--dir "$DEST"); fi
+  if [[ "$PINNED" -eq 1 ]]; then base+=(--version "$RELEASE"); fi
   args=(${base[@]+"${base[@]}"})
   if [[ -n "${ERGOSPHERE_INSTALL_SOURCE_URL:-}" ]]; then
     env="ERGOSPHERE_INSTALL_SOURCE_URL=$(printf '%q' "$ERGOSPHERE_INSTALL_SOURCE_URL") "
@@ -790,9 +819,8 @@ main() {
     exit 1
   fi
   set -euo pipefail
-  RELEASE=v0.1.0
-  SCRIPT_URL="https://raw.githubusercontent.com/JuliusPIV/ergosphere/${RELEASE}/install.sh"
-  SOURCE_URL="https://github.com/JuliusPIV/ergosphere/archive/refs/tags/${RELEASE}.tar.gz"
+  RELEASE="" PINNED=0 SOURCE_URL=""
+  SCRIPT_URL="https://raw.githubusercontent.com/JuliusPIV/ergosphere/main/install.sh"
   DEFAULT_DEST="${HOME:-}/.local/share/ergosphere"
   DEST=$DEFAULT_DEST BIND=127.0.0.1 PORT=9241 ARG_BIND="" ARG_PORT="" MODE="" WANT_CHECK=0 ASSUME_YES=0
   OLD_BIND="" OLD_PORT="" SRV_BIND="" SRV_PORT="" CFG_SOURCE="" CFG_BIND="" CFG_PORT="" AGENT_STATE=none AGENT_ADDED=0
