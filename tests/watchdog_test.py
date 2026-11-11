@@ -137,11 +137,11 @@ def check_one_slow_miss_keeps_deadline():
     erg = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(erg)
     os.environ["NOTIFY_SOCKET"] = "@ergo-wd-test-unused"
-    os.environ["WATCHDOG_USEC"] = "2000000"  # deadline 2 s, ping every 1 s
+    os.environ["WATCHDOG_USEC"] = "2000000"  # deadline 2 s
     os.environ.pop("WATCHDOG_PID", None)
     pings, calls = [], [0]
 
-    def fake_can_serve(_httpd, timeout=2):
+    def fake_can_serve(_httpd, **_kw):
         calls[0] += 1
         if calls[0] == 2:
             time.sleep(0.4)
@@ -160,6 +160,39 @@ def check_one_slow_miss_keeps_deadline():
         return ["only %d pings in 4.5 s" % len(pings)]
     if max(gaps) >= 2.0:
         return ["after one slow miss the next ping came %.2fs after the last good one (deadline 2 s)" % max(gaps)]
+    return []
+
+
+def check_short_watchdog_lock_hold():
+    """WatchdogSec=2 (deadline 2 s) and LIVE_LOCK busy for 1.5 s once: the
+    check's own waits must fit, so a ping still lands within 2 s of the last."""
+    spec = importlib.util.spec_from_file_location("ergosphere", ROOT / "ergosphere.py")
+    erg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(erg)
+    os.environ["NOTIFY_SOCKET"] = "@ergo-wd-test-unused"
+    os.environ["WATCHDOG_USEC"] = "2000000"
+    os.environ.pop("WATCHDOG_PID", None)
+    pings = []
+    erg.inspect_health = lambda *a, **k: "match"
+    erg.sd_notify = lambda msg: pings.append(time.monotonic()) or True
+    erg.print = lambda *a, **k: None
+    httpd = types.SimpleNamespace(server_address=("127.0.0.1", 1), tls=False, token=None)
+    thread = erg.start_watchdog(httpd)
+    time.sleep(1.6)  # just after a ping (every 0.5 s on the branch)
+
+    def hold():
+        with erg.LIVE_LOCK:
+            time.sleep(1.5)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    time.sleep(3.5)
+    erg.STOP.set()
+    thread.join(5)
+    gaps = [b - a for a, b in zip(pings, pings[1:])]
+    if not gaps or max(gaps) >= 2.0:
+        return ["WatchdogSec=2 with a 1.5 s LIVE_LOCK hold: longest gap between pings %.2fs (deadline 2 s)"
+                % (max(gaps) if gaps else 0)]
     return []
 
 
@@ -197,7 +230,7 @@ def check_stop_with_lock_held():
 
 def main():
     failures = (check_live_server() + check_lock_held_blocks_ping() + check_one_slow_miss_keeps_deadline()
-                + check_stop_with_lock_held())
+                + check_short_watchdog_lock_hold() + check_stop_with_lock_held())
     for failure in failures:
         print("FAIL: " + failure)
     if failures:

@@ -66,11 +66,12 @@ cleanup() {
     if [[ "${UNIT_WAS_ACTIVE:-0}" -eq 1 ]]; then
       systemctl --user start ergosphere.service 2>/dev/null || true
     fi
-    if [[ "${CODE_UPDATED:-0}" -gt 0 ]]; then
+    # Only an existing unit is left behind to run the new code, and to need a reset.
+    if [[ "${UNIT_HAD_FILE:-0}" -eq 1 && "${CODE_UPDATED:-0}" -gt 0 ]]; then
       printf 'service: the code in %s was NOT put back: it is the new release (%s files updated), so the unit may still fail to start\n' "$DEST" "$CODE_UPDATED" >&2
     fi
   fi
-  if [[ "$status" -ne 0 && "${UNIT_STARTED:-0}" -eq 1 ]]; then
+  if [[ "$status" -ne 0 && "${UNIT_STARTED:-0}" -eq 1 && -f "${UNIT_FILE:-}" ]]; then
     printf 'service: after fixing the cause, run: systemctl --user reset-failed ergosphere   (it stops retrying after 5 failed starts), then rerun this installer\n' >&2
   fi
   if [[ -n "${STAGE:-}" ]]; then

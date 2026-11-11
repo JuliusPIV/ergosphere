@@ -4646,7 +4646,7 @@ def _health_body_ok(data, host, port, tls):
     return True
 
 
-def inspect_health(host, port, tls, token=None):
+def inspect_health(host, port, tls, token=None, timeout=1):
     # 0.0.0.0 is not a URL host that reaches the listener.
     # The bearer stays in the header. "match" is this server at this exposure.
     # "down" means nothing accepted the connection. Anything else answered,
@@ -4656,9 +4656,9 @@ def inspect_health(host, port, tls, token=None):
     try:
         if tls:
             ctx = ssl._create_unverified_context()
-            conn = http.client.HTTPSConnection(probe, port, timeout=1, context=ctx)
+            conn = http.client.HTTPSConnection(probe, port, timeout=timeout, context=ctx)
         else:
-            conn = http.client.HTTPConnection(probe, port, timeout=1)
+            conn = http.client.HTTPConnection(probe, port, timeout=timeout)
         headers = {}
         if token:
             headers["Authorization"] = "Bearer " + token
@@ -4854,7 +4854,11 @@ def sd_notify(message):
 
 
 def watchdog_interval():
-    """Seconds between WATCHDOG=1 pings (half of WATCHDOG_USEC), or None when not asked."""
+    """Seconds between WATCHDOG=1 pings (a quarter of WATCHDOG_USEC), or None when not asked.
+
+    sd_watchdog_enabled(3) asks for at least every half; a quarter leaves room
+    for a busy LIVE_LOCK or a slow check before systemd's deadline.
+    """
     if not os.environ.get("NOTIFY_SOCKET"):
         return None
     raw = os.environ.get("WATCHDOG_USEC", "")
@@ -4864,16 +4868,16 @@ def watchdog_interval():
     pid = os.environ.get("WATCHDOG_PID", "")
     if pid and pid != str(os.getpid()):
         return None
-    return int(raw) / 2e6
+    return int(raw) / 4e6
 
 
-def can_serve(httpd, timeout=2):
+def can_serve(httpd, timeout=2, health_timeout=1):
     """True only when LIVE_LOCK is free within timeout and our own /health answers."""
     if not LIVE_LOCK.acquire(timeout=timeout):
         return False
     LIVE_LOCK.release()
     host, port = httpd.server_address[:2]
-    return inspect_health(host, port, httpd.tls, httpd.token) == "match"
+    return inspect_health(host, port, httpd.tls, httpd.token, timeout=health_timeout) == "match"
 
 
 def start_watchdog(httpd):
@@ -4882,16 +4886,20 @@ def start_watchdog(httpd):
     if interval is None:
         return None
 
-    # After a failed check, retry soon: systemd's deadline is two intervals after
-    # the last good ping, and one slow miss plus a full interval would pass it.
+    # After a failed check, retry soon instead of waiting a full interval, so
+    # a slow miss or a busy LIVE_LOCK still ends in a ping before the deadline.
     retry = min(1.0, interval / 4)
+    # One check (lock wait + /health) must fit well inside the deadline, even
+    # with a short WatchdogSec: each part gets at most a quarter interval.
+    lock_wait = max(0.1, min(2.0, interval / 4))
+    health_wait = max(0.2, min(1.0, interval / 4))
 
     def loop():
         # Check and ping at once: READY=1 does not reset the watchdog timer, so
         # after a restart (exec, same pid) the first ping must not wait a full interval.
         healthy = True
         while True:
-            ok = can_serve(httpd)
+            ok = can_serve(httpd, timeout=lock_wait, health_timeout=health_wait)
             if ok:
                 sd_notify("WATCHDOG=1")
             if ok != healthy:
