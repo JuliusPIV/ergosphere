@@ -71,7 +71,8 @@ def main():
         check(erg.launch_model_effort("grok-4.7", "high") == ("grok-4.7", "high"),
               "unparseable config.toml passes -m and effort as picked")
 
-    # Python < 3.11 (no tomllib): the fallback still reads the two keys.
+    # Python < 3.11 (no tomllib): saved defaults are unknown, so the flags
+    # are passed as picked (the behaviour before saved-default protection).
     saved = sys.modules.get("tomllib")
     sys.modules["tomllib"] = None  # makes `import tomllib` raise ImportError
     try:
@@ -85,35 +86,21 @@ def main():
     with tempfile.TemporaryDirectory() as home:
         os.environ["HOME"] = home
         cfg = Path(home) / ".grok" / "config.toml"
-        check(old.grok_config_defaults() is None, "no tomllib: missing config.toml reads as no defaults")
         cfg.parent.mkdir()
-        cfg.write_text('[ui]\ndefault = "other"\n\n' + CONFIG.replace(
-            'default_reasoning_effort = "high"', "default_reasoning_effort = 'high'  # saved by grok")
-            + '\n[x.models]\ndefault = "nope"\n', encoding="utf-8")
-        check(old.grok_config_defaults() == {"model": "grok-4.7", "effort": "high"},
-              "no tomllib: [models] defaults are read (got %r)" % (old.grok_config_defaults(),))
-        check(old.launch_model_effort("grok-4.7", "high") == ("", ""),
-              "no tomllib: a default pick passes no flags")
-        check(old.launch_model_effort("grok-4.6", "low") == ("grok-4.6", "low"),
-              "no tomllib: a non-default pick passes both flags")
-        cfg.write_text("[models\ndefault = ", encoding="utf-8")
+        cfg.write_text(CONFIG, encoding="utf-8")
+        check(old.grok_config_defaults() is None, "no tomllib: config.toml is not read")
         check(old.launch_model_effort("grok-4.7", "high") == ("grok-4.7", "high"),
-              "no tomllib: unreadable [models] passes -m and effort as picked")
-        # A real grok layout, with an array table after [models], still reads.
-        cfg.write_text(CONFIG + '\n[[marketplace.sources]]\nname = "Official"\ngit = "https://example.com/m.git"\n',
-                       encoding="utf-8")
-        check(old.grok_config_defaults() == {"model": "grok-4.7", "effort": "high"},
-              "no tomllib: grok layout with [[array]] tables reads (got %r)" % (old.grok_config_defaults(),))
-        # A syntax error anywhere makes the file unreadable, as with tomllib.
-        cfg.write_text(CONFIG + "[ui\n", encoding="utf-8")
-        check(old.grok_config_defaults() is None and
-              old.launch_model_effort("grok-4.7", "high") == ("grok-4.7", "high"),
-              "no tomllib: a malformed line elsewhere passes the flags (got %r)" % (old.grok_config_defaults(),))
-        # [[array]] ends [models]: a later `default` is not the models default.
-        cfg.write_text('[models]\n\n[[profiles]]\ndefault = "grok-x"\n', encoding="utf-8")
-        check(old.launch_model_effort("grok-x", "high") == ("grok-x", "high"),
-              "no tomllib: a default under [[profiles]] is not read as [models] (got %r)"
-              % (old.grok_config_defaults(),))
+              "no tomllib: -m and effort are passed as picked")
+
+    # The list page substitutes its placeholders in one pass: an agent or
+    # folder named like a placeholder must reach the page script intact.
+    with tempfile.TemporaryDirectory() as home:
+        os.environ["HOME"] = home
+        page = erg.dashboard_page([], ["@@SAVED@@", "@@ROWS@@"], {"@@CWDS@@": "/srv/@@AGENTS@@"})
+        check('"@@SAVED@@"' in page and '"@@ROWS@@"' in page and '"/srv/@@AGENTS@@"' in page,
+              "placeholder-like agent and folder names render intact")
+        check("var savedDefaults = {};" in page and "@@CWDS@@" in page,
+              "page placeholders are all substituted once")
 
     # Empty model cache: a launch must not wait on `grok models` nor reject a model.
     calls = []

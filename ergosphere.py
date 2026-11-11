@@ -41,7 +41,7 @@ import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 try:
     import tomllib
-except ImportError:  # Python < 3.11: _models_defaults_fallback reads config.toml.
+except ImportError:  # Python < 3.11: saved defaults unknown, flags passed as picked.
     tomllib = None
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -1151,18 +1151,15 @@ def checked_model_effort(model, effort):
 def grok_config_defaults():
     # grok saves -m as [models] default and --reasoning-effort as
     # default_reasoning_effort in ~/.grok/config.toml.  Read only, never write.
-    # None when the file is missing or unreadable.
+    # None when the file is missing or unreadable, or on Python < 3.11 (no
+    # tomllib): then the flags are passed as picked, as before.
+    if tomllib is None:
+        return None
     path = os.path.expanduser("~/.grok/config.toml")
     try:
         with open(path, "rb") as fh:
-            raw = fh.read()
-    except OSError:
-        return None
-    if tomllib is None:
-        return _models_defaults_fallback(raw)
-    try:
-        data = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeError, ValueError):
+            data = tomllib.load(fh)
+    except (OSError, ValueError):
         return None
     models = data.get("models")
     if not isinstance(models, dict):
@@ -1173,48 +1170,6 @@ def grok_config_defaults():
         "model": model if isinstance(model, str) else "",
         "effort": effort if isinstance(effort, str) else "",
     }
-
-
-_TOML_BLANK_RE = re.compile(r"^\s*(#.*)?$")
-_TOML_TABLE_RE = re.compile(r"^\s*\[([^\[\]]+)\]\s*(#.*)?$")
-_TOML_ARRAY_TABLE_RE = re.compile(r"^\s*\[\[([^\[\]]+)\]\]\s*(#.*)?$")
-_TOML_KEY_VALUE_RE = re.compile(r"""^\s*[A-Za-z0-9_\-."']+\s*=\s*\S""")
-_TOML_MODELS_KEY_RE = re.compile(
-    r"""^\s*(default|default_reasoning_effort)\s*=\s*(?:"([^"\\]*)"|'([^']*)')\s*(#.*)?$""")
-
-
-def _models_defaults_fallback(raw):
-    # Python < 3.11 has no tomllib.  Read only the two quoted keys under
-    # [models].  Anything that is not a blank or comment line, a [table],
-    # an [[array table]] or a one-line key = value makes the whole file
-    # unreadable (None), so a file tomllib would reject passes the flags.
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeError:
-        return None
-    section = ""
-    found = {}
-    for line in text.splitlines():
-        if _TOML_BLANK_RE.match(line):
-            continue
-        array = _TOML_ARRAY_TABLE_RE.match(line)
-        if array:
-            section = "[[%s]]" % array.group(1).strip()
-            continue
-        table = _TOML_TABLE_RE.match(line)
-        if table:
-            section = table.group(1).strip()
-            continue
-        if not _TOML_KEY_VALUE_RE.match(line):
-            return None
-        if section != "models":
-            continue
-        kv = _TOML_MODELS_KEY_RE.match(line)
-        if kv and kv.group(1) not in found:
-            found[kv.group(1)] = kv.group(2) if kv.group(2) is not None else kv.group(3)
-    if not found:
-        return None
-    return {"model": found.get("default", ""), "effort": found.get("default_reasoning_effort", "")}
 
 
 def launch_model_effort(model, effort):
@@ -2795,14 +2750,19 @@ document.getElementById("new-form").addEventListener("submit", function (ev) {
 </html>
 """
     choices = dashboard_cwd_choices(cwd_defaults)
-    body = body.replace("@@AGENTS@@", script_json(list(agents)))
-    body = body.replace("@@CWDS@@", script_json(choices))
-    body = body.replace("@@SAVED@@", script_json(grok_config_defaults() or {}))
-    body = body.replace("@@CWD@@", script_json(cwd_defaults))
-    body = body.replace("@@OLDER_WINDOW@@", str(OLDER_WINDOW))
-    body = body.replace("@@OLDER_STEP@@", str(OLDER_STEP))
-    body = body.replace("@@VERSION@@", html.escape(VERSION))
-    return body.replace("@@ROWS@@", "\n".join(blocks))
+    # One pass: a value that itself contains "@@NAME@@" (an agent or folder
+    # name) must not be substituted again.
+    values = {
+        "AGENTS": script_json(list(agents)),
+        "CWDS": script_json(choices),
+        "SAVED": script_json(grok_config_defaults() or {}),
+        "CWD": script_json(cwd_defaults),
+        "OLDER_WINDOW": str(OLDER_WINDOW),
+        "OLDER_STEP": str(OLDER_STEP),
+        "VERSION": html.escape(VERSION),
+        "ROWS": "\n".join(blocks),
+    }
+    return re.sub(r"@@([A-Z_]+)@@", lambda m: values.get(m.group(1), m.group(0)), body)
 
 
 def bind_choices():

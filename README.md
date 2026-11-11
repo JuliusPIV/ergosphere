@@ -187,7 +187,7 @@ flowchart LR
 | Requirement | Details |
 |---|---|
 | 🐧 **Linux** | Tested on Ubuntu 24.04 LTS. |
-| 🐍 **Python 3** | Tested on 3.12. Standard library only: no pip, no virtualenv. |
+| 🐍 **Python 3** | Tested on 3.12. Standard library only: no pip, no virtualenv. Python 3.11 or later is needed to keep grok's saved model and effort unchanged (see the [FAQ](#-faq)). |
 | 🤖 **grok** | Tested on 1.0.70. On `PATH` and already signed in as the user that runs Ergosphere. |
 | 🧰 **Installer tools** | Bash, curl, tar, gzip, nohup, sha256sum. Git is not needed. |
 | 🪟 **Windows** | Should run inside [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install), with Python and the Linux grok inside the distro. Untested. |
@@ -285,7 +285,7 @@ Not yet. Ergosphere reads Linux's `/proc` to find grok processes and keep one pe
 <details>
 <summary><b>Why did grok's default model or effort change?</b></summary>
 
-grok saves the model and effort it is started with: `-m <model>` becomes `[models] default` and `--reasoning-effort <level>` becomes `default_reasoning_effort` in `~/.grok/config.toml`, and every later grok uses them. Ergosphere only reads that file. It passes a model or effort only when you pick one that differs from those saved defaults, so a session started with the defaults leaves the file as it is. Picking a different one in the new-session dialog makes it grok's new default, as the dialog notes.
+grok saves the model and effort it is started with: `-m <model>` becomes `[models] default` and `--reasoning-effort <level>` becomes `default_reasoning_effort` in `~/.grok/config.toml`, and every later grok uses them. Ergosphere only reads that file. It passes a model or effort only when you pick one that differs from those saved defaults, so a session started with the defaults leaves the file as it is. Picking a different one in the new-session dialog makes it grok's new default, as the dialog notes. This needs Python 3.11 or later, which can read that file; on older Python, Ergosphere passes the model and effort you pick every time, so grok saves them.
 </details>
 
 <details>
