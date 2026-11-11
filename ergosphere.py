@@ -1297,20 +1297,23 @@ class SessionBusy(RuntimeError):
         self.state = state
 
 
+# Fixed, not tempfile.gettempdir(): TMPDIR can differ between servers.
+LOCK_TMP_ROOT = "/tmp"
+
+
 def session_lock_dirs():
     """Where session locks may live, in a fixed order.
 
     Every server of this user tries the same list and uses the first folder
-    that works, so they meet on the same lock file. ~/.cache first (one HOME
-    for every server; XDG_RUNTIME_DIR is not set for system units), then
-    XDG_RUNTIME_DIR when set, then a private folder in the system temp dir.
+    that works, so they meet on the same lock file: ~/.cache (one HOME for
+    every server), then a private folder under /tmp. Nothing that depends on
+    the environment (XDG_RUNTIME_DIR, TMPDIR), which a system unit and a
+    user unit do not share.
     """
-    dirs = [os.path.join(os.path.expanduser("~/.cache"), "ergosphere", "locks")]
-    run = os.environ.get("XDG_RUNTIME_DIR")
-    if run and os.path.isabs(run):
-        dirs.append(os.path.join(run, "ergosphere", "locks"))
-    dirs.append(os.path.join(tempfile.gettempdir(), "ergosphere-%d" % os.getuid(), "locks"))
-    return dirs
+    return [
+        os.path.join(os.path.expanduser("~/.cache"), "ergosphere", "locks"),
+        os.path.join(LOCK_TMP_ROOT, "ergosphere-%d" % os.getuid(), "locks"),
+    ]
 
 
 def _private_dir(path):
@@ -1345,10 +1348,10 @@ def acquire_session_lock(sid):
     SessionLockUnavailable when no folder in session_lock_dirs() works.
     """
     problems = []
-    shared_tmp = tempfile.gettempdir()
-    for folder in session_lock_dirs():
+    home_dir, tmp_dir = session_lock_dirs()
+    for folder in (home_dir, tmp_dir):
         try:
-            if folder.startswith(shared_tmp + os.sep):
+            if folder is tmp_dir:
                 _private_dir(folder)
             else:
                 os.makedirs(folder, mode=0o700, exist_ok=True)
@@ -1825,7 +1828,7 @@ def open_live(sid, cmd, cwd, cols, rows):
             print("session lock: %s" % no_lock, flush=True)
         raise RuntimeError(
             "cannot start: no folder for session lock files is writable "
-            "(~/.cache/ergosphere, XDG_RUNTIME_DIR or the temp dir); see the server log"
+            "(~/.cache/ergosphere or /tmp/ergosphere-<uid>); see the server log"
         )
     print("term pid=%s sid=%s cmd=%s" % (proc.pid, sid, " ".join(cmd)), flush=True)
     return live, False

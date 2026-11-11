@@ -31,10 +31,10 @@ os.makedirs(BIN)
 os.makedirs(CWD)
 os.symlink(sys.executable, GROK)
 os.environ["HOME"] = HOME
-os.environ.pop("XDG_RUNTIME_DIR", None)  # lock folders: ~/.cache, then the temp dir
-LOCK_TMP = os.path.join(TMP, "systmp")  # stands in for the system temp dir
+os.environ.pop("XDG_RUNTIME_DIR", None)
+os.environ.pop("TMPDIR", None)
+LOCK_TMP = os.path.join(TMP, "systmp")  # stands in for /tmp, the second lock folder
 os.makedirs(LOCK_TMP)
-tempfile.tempdir = LOCK_TMP
 # A fake grok: exits 0.8 s after SIGTERM, like a real one finishing up.
 FAKE = ("import signal,sys,time\n"
         "signal.signal(signal.SIGTERM, lambda *a: (time.sleep(0.8), sys.exit(0)))\n"
@@ -46,6 +46,7 @@ def load():
     spec = importlib.util.spec_from_file_location("ergosphere", ROOT / "ergosphere.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    mod.LOCK_TMP_ROOT = LOCK_TMP
     return mod
 
 
@@ -157,14 +158,19 @@ def check_no_resume_while_stopping(erg):
 
 
 def other_server(sid):
-    """A second Ergosphere process (same HOME and temp dir) that starts sid."""
-    env = dict(os.environ, TMPDIR=LOCK_TMP)
+    """A second Ergosphere process (same HOME, its own environment) that starts sid.
+
+    It has XDG_RUNTIME_DIR and TMPDIR set and this one has neither, like a
+    user unit next to a system unit: the lock folder must not depend on them.
+    """
+    env = dict(os.environ, XDG_RUNTIME_DIR=os.path.join(TMP, "run"), TMPDIR=os.path.join(TMP, "othertmp"))
     other = popen([sys.executable, "-B", "-c",
                    "import importlib.util,sys,time\n"
                    "s=importlib.util.spec_from_file_location('e',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\n"
+                   "m.LOCK_TMP_ROOT=sys.argv[6]\n"
                    "m.open_live(sys.argv[2], [sys.argv[3], '-c', sys.argv[4], '--resume', sys.argv[2]], sys.argv[5], 80, 24)\n"
                    "print('up', flush=True); time.sleep(30)\n",
-                   str(ROOT / "ergosphere.py"), sid, GROK, FAKE, CWD], stdout=subprocess.PIPE, env=env)
+                   str(ROOT / "ergosphere.py"), sid, GROK, FAKE, CWD, LOCK_TMP], stdout=subprocess.PIPE, env=env)
     other.stdout.readline()
     return other
 
