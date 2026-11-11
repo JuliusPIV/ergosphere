@@ -46,7 +46,7 @@ def load():
 
 
 def new_sid(n):
-    sid = "0000000%d-0000-4000-8000-000000000000" % n
+    sid = "%08d-0000-4000-8000-000000000000" % n
     folder = os.path.join(HOME, ".grok", "sessions", CWD.replace("/", "%2F"), sid)
     os.makedirs(folder)
     with open(os.path.join(folder, "summary.json"), "w") as fh:
@@ -253,11 +253,54 @@ def check_turn_without_inhibit(erg):
     return None
 
 
+def check_no_lock_folder(erg):
+    sid = new_sid(8)
+    home2 = os.path.join(TMP, "home-ro")
+    os.makedirs(home2)
+    with open(os.path.join(home2, ".cache"), "w") as fh:
+        fh.write("not a folder\n")  # the lock folder cannot be made
+    os.environ["HOME"] = home2
+    try:
+        erg.open_live(sid, fake_cmd(sid), CWD, 80, 24)
+    except Exception as exc:
+        return "lock: a launch fails when the lock folder cannot be made: %s" % exc
+    finally:
+        os.environ["HOME"] = HOME
+    if len(groks_for(sid)) != 1:
+        return "lock: no grok after a launch without the lock folder"
+    return None
+
+
+def check_one_proc_pass(erg):
+    # The list's state lookup reads /proc once, not once per live session.
+    for n in (10, 11, 12):
+        sid = new_sid(n)
+        erg.open_live(sid, fake_cmd(sid), CWD, 80, 24)
+        popen([GROK, "-c", FAKE, "-r", new_sid(n + 10)])
+    time.sleep(0.3)
+    calls = []
+    real = os.listdir
+
+    def counting(path="."):
+        if path == "/proc":
+            calls.append(path)
+        return real(path)
+    os.listdir = counting
+    try:
+        states = erg.list_states()
+    finally:
+        os.listdir = real
+    if len(states) < 6 or len(calls) != 1:
+        return "cost: list_states saw %d sessions with %d /proc passes" % (len(states), len(calls))
+    return None
+
+
 def main():
     erg = load()
     erg.print = lambda *a, **k: None
     checks = (check_quit_tells_every_tab, check_no_resume_while_stopping, check_two_servers,
-              check_held_while_running_here, check_holder_labels, check_words, check_turn_without_inhibit)
+              check_held_while_running_here, check_holder_labels, check_words, check_turn_without_inhibit,
+              check_no_lock_folder, check_one_proc_pass)
     failures = []
     try:
         for check in checks:

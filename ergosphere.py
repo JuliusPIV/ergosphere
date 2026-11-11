@@ -489,7 +489,63 @@ def holder_state(holder):
     return "held-by-other-server"
 
 
-def own_grok_pids():
+class ProcScan:
+    """One pass over /proc, shared by every session a list render looks at.
+
+    cmd: pid -> argv bytes, ppids: pid -> ppid, groks: sorted pids whose
+    argv[0] is grok (not this process). own and fd targets are filled on
+    first use. A single-session lookup builds its own.
+    """
+
+    def __init__(self):
+        self.cmd = {}
+        self.ppids = {}
+        try:
+            names = os.listdir("/proc")
+        except OSError:
+            names = []
+        me = os.getpid()
+        for name in names:
+            if not name.isdigit():
+                continue
+            pid = int(name)
+            ppid = proc_stat_ppid(pid)
+            if ppid is None:
+                continue
+            self.ppids[pid] = ppid
+            self.cmd[pid] = read_proc_cmdline(pid)
+        self.groks = sorted(pid for pid, raw in self.cmd.items() if pid != me and raw and grok_cmdline(raw))
+        self._own = None
+        self._fds = {}
+
+    def cmdline(self, pid):
+        raw = self.cmd.get(pid)
+        return read_proc_cmdline(pid) if raw is None else raw
+
+    def own(self):
+        if self._own is None:
+            self._own = own_grok_pids(self)
+        return self._own
+
+    def fd_targets(self, pid):
+        if pid not in self._fds:
+            out = []
+            fd_dir = "/proc/%d/fd" % pid
+            try:
+                names = os.listdir(fd_dir)
+            except OSError:
+                names = []
+            for name in names:
+                try:
+                    out.append((int(name), os.readlink(os.path.join(fd_dir, name))))
+                except (OSError, ValueError):
+                    continue
+            out.sort()
+            self._fds[pid] = out
+        return self._fds[pid]
+
+
+def own_grok_pids(scan=None):
     """PIDs of the grok terminals this server runs.
 
     Each tracked child, and when that child is a wrapper, the first grok
@@ -504,10 +560,14 @@ def own_grok_pids():
             if proc is not None and proc.pid:
                 roots.append(proc.pid)
     own = set(roots)
+    if not roots:
+        return own
+    if scan is None:
+        scan = ProcScan()
     children = {}
-    for child, parent in _proc_ppid_map().items():
+    for child, parent in scan.ppids.items():
         children.setdefault(parent, []).append(child)
-    stack = [root for root in roots if not grok_cmdline(read_proc_cmdline(root))]
+    stack = [root for root in roots if not grok_cmdline(scan.cmdline(root))]
     seen = set()
     while stack and len(seen) < 4096:
         pid = stack.pop()
@@ -517,14 +577,14 @@ def own_grok_pids():
         for child in children.get(pid, ()):
             if is_ergosphere_server(child):
                 continue
-            if grok_cmdline(read_proc_cmdline(child)):
+            if grok_cmdline(scan.cmdline(child)):
                 own.add(child)
                 continue
             stack.append(child)
     return own
 
 
-def session_holder(sid):
+def session_holder(sid, scan=None):
     """Grok that already owns this session, or None.
 
     via=cmdline: the id is on that grok's command line (Ergosphere resume, or
@@ -537,37 +597,21 @@ def session_holder(sid):
     if not isinstance(sid, str) or not SID_TOKEN_RE.match(sid):
         return None
     marker = "/" + sid + "/"
-    own = own_grok_pids()
+    if scan is None:
+        scan = ProcScan()
+    own = scan.own()
     cmdline_pid = None
     file_pid = None
-    try:
-        pids = os.listdir("/proc")
-    except OSError:
-        return None
-    for pid_text in pids:
-        if not pid_text.isdigit():
-            continue
-        pid = int(pid_text)
+    for pid in scan.groks:
         if pid in own:
             continue
-        raw = read_proc_cmdline(pid)
-        if not raw or not grok_cmdline(raw):
-            continue
+        raw = scan.cmdline(pid)
         if cmdline_contains_sid(raw, sid):
             cmdline_pid = pid
             break
         if file_pid is not None:
             continue
-        fd_dir = "/proc/%s/fd" % pid
-        try:
-            names = os.listdir(fd_dir)
-        except OSError:
-            continue
-        for name in names:
-            try:
-                target = os.readlink(os.path.join(fd_dir, name))
-            except OSError:
-                continue
+        for _num, target in scan.fd_targets(pid):
             if marker in target:
                 file_pid = pid
                 break
@@ -1258,6 +1302,9 @@ def session_lock_path(sid):
     return os.path.join(os.path.expanduser("~/.cache"), "ergosphere", "locks", sid + ".lock")
 
 
+NO_LOCK = -1
+
+
 def acquire_session_lock(sid):
     """Advisory flock held while this server's grok for sid runs.
 
@@ -1265,7 +1312,8 @@ def acquire_session_lock(sid):
     Ergosphere server cannot start the same session in the window between
     its holder check and its spawn (grok itself does not refuse a second
     open). The kernel drops the lock if this server dies. Returns the fd,
-    or None when another process holds the lock.
+    or None when another process holds the lock. Raises OSError when the
+    lock file cannot be made (read-only or foreign-owned cache folder).
     """
     path = session_lock_path(sid)
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
@@ -1709,19 +1757,28 @@ def open_live(sid, cmd, cwd, cols, rows):
             release = getattr(live, "release_lock", None)
             if release:
                 release()
-        fd = acquire_session_lock(sid)
+        no_lock = None
+        try:
+            fd = acquire_session_lock(sid)
+        except OSError as exc:
+            # No lock file possible: start without the cross-server lock,
+            # as before it existed. The holder scan still applies.
+            fd, no_lock = NO_LOCK, exc
         if fd is None:
             raise SessionBusy("held-by-other-server", "session is open in another Ergosphere server")
         try:
             proc, master = spawn_grok(cmd, cwd, cols, rows)
         except Exception:
-            os.close(fd)
+            if fd != NO_LOCK:
+                os.close(fd)
             raise
         live = Live(sid, proc, master, cwd)
-        live.lock_fd = fd
+        live.lock_fd = None if fd == NO_LOCK else fd
         LIVE[sid] = live
         live.start()
     # Log after release: a stalled log write must not block other launches.
+    if no_lock is not None:
+        print("session lock unavailable, started without it: %s" % no_lock, flush=True)
     print("term pid=%s sid=%s cmd=%s" % (proc.pid, sid, " ".join(cmd)), flush=True)
     return live, False
 
@@ -1745,24 +1802,9 @@ def list_live():
 _TURN_MARK = b"agent turn in progress"
 
 
-def _proc_ppid_map():
-    ppids = {}
-    try:
-        names = os.listdir("/proc")
-    except OSError:
-        return ppids
-    for name in names:
-        if not name.isdigit():
-            continue
-        ppid = proc_stat_ppid(name)
-        if ppid is None:
-            continue
-        ppids[int(name)] = ppid
-    return ppids
-
-
-def _turn_in_children(pid, ppids):
+def _turn_in_children(pid, ppids, cmd=None):
     # Direct or deeper. The mark is on systemd-inhibit, not on grok itself.
+    cmd = cmd or {}
     children = {}
     for child, parent in ppids.items():
         children.setdefault(parent, []).append(child)
@@ -1773,7 +1815,9 @@ def _turn_in_children(pid, ppids):
         if child in seen or child == pid:
             continue
         seen.add(child)
-        raw = read_proc_cmdline(child)
+        raw = cmd.get(child)
+        if raw is None:
+            raw = read_proc_cmdline(child)
         if raw and _TURN_MARK in raw.replace(b"\0", b" "):
             return True
         stack.extend(children.get(child, []))
@@ -1892,9 +1936,11 @@ def _turn_without_inhibit(pid, sid):
     return cpu is not None and cpu >= TURN_CPU_PCT and age <= TURN_CPU_WRITE_SECS
 
 
-def grok_turn(pid, sid, ppids=None):
+def grok_turn(pid, sid, scan=None):
     """working or idle for a live grok."""
-    if _turn_in_children(pid, ppids if ppids is not None else _proc_ppid_map()):
+    if scan is None:
+        scan = ProcScan()
+    if _turn_in_children(pid, scan.ppids, scan.cmd):
         return "working"
     if not inhibit_works() and _turn_without_inhibit(pid, sid):
         return "working"
@@ -1922,7 +1968,7 @@ def live_state(live):
     return "running"
 
 
-def session_state(sid, with_turn=True, ppids=None):
+def session_state(sid, with_turn=True, scan=None):
     """The one answer to "who runs this session", for every handler and page.
 
     state: stopped, starting, running-idle, running-working, stopping,
@@ -1935,7 +1981,9 @@ def session_state(sid, with_turn=True, ppids=None):
     with LIVE_LOCK:
         live = LIVE.get(sid)
     here = live_state(live)
-    holder = session_holder(sid)
+    if scan is None:
+        scan = ProcScan()
+    holder = session_holder(sid, scan)
     out = {"id": sid, "state": "stopped", "pid": None, "turn": None, "holder": holder}
     if here == "stopping":
         out["state"] = "stopping"
@@ -1943,7 +1991,7 @@ def session_state(sid, with_turn=True, ppids=None):
         return out
     if here:
         out["pid"] = live.proc.pid
-        turn = grok_turn(live.proc.pid, sid, ppids) if with_turn and here == "running" else "idle"
+        turn = grok_turn(live.proc.pid, sid, scan) if with_turn and here == "running" else "idle"
         out["turn"] = turn
         out["state"] = "starting" if here == "starting" else "running-" + turn
         return out
@@ -1951,7 +1999,7 @@ def session_state(sid, with_turn=True, ppids=None):
         out["state"] = holder_state(holder)
         out["pid"] = holder["pid"]
         if with_turn:
-            out["turn"] = grok_turn(holder["pid"], sid, ppids)
+            out["turn"] = grok_turn(holder["pid"], sid, scan)
     return out
 
 
@@ -1975,25 +2023,11 @@ def _cmdline_session(raw):
     return None
 
 
-def _fd_session(pid):
+def _fd_session(pid, scan):
     # Lowest fd number, not lexical order. Other session files do not count.
     root = os.path.abspath(str(sessions_root()))
     prefix = root + os.sep
-    fd_dir = "/proc/%d/fd" % pid
-    try:
-        names = os.listdir(fd_dir)
-    except OSError:
-        return None
-    nums = []
-    for name in names:
-        if name.isdigit():
-            nums.append(int(name))
-    nums.sort()
-    for num in nums:
-        try:
-            target = os.readlink(os.path.join(fd_dir, str(num)))
-        except OSError:
-            continue
+    for _num, target in scan.fd_targets(pid):
         if not target.endswith("/events.jsonl") or not target.startswith(prefix):
             continue
         sid = os.path.basename(os.path.dirname(target))
@@ -2005,7 +2039,7 @@ def _fd_session(pid):
     return None
 
 
-def dashboard_owners():
+def dashboard_owners(scan=None):
     """Session id -> pid for a live grok that owns it (discovery only).
 
     Command-line session id wins and blocks every other file that grok has
@@ -2014,22 +2048,9 @@ def dashboard_owners():
     from session_state (list_states). Does not start or signal a process,
     and does not read environ.
     """
-    try:
-        pid_names = os.listdir("/proc")
-    except OSError:
-        pid_names = []
-    groks = []
-    for pid_text in pid_names:
-        if not pid_text.isdigit():
-            continue
-        pid = int(pid_text)
-        if pid == os.getpid():
-            continue
-        raw = read_proc_cmdline(pid)
-        if not raw or not grok_cmdline(raw):
-            continue
-        groks.append((pid, raw))
-    groks.sort()
+    if scan is None:
+        scan = ProcScan()
+    groks = [(pid, scan.cmdline(pid)) for pid in scan.groks]
     owned = {}
     need_fd = []
     for pid, raw in groks:
@@ -2040,28 +2061,25 @@ def dashboard_owners():
             continue
         need_fd.append(pid)
     for pid in need_fd:
-        sid = _fd_session(pid)
+        sid = _fd_session(pid, scan)
         if not sid or sid in owned:
             continue
         owned[sid] = pid
-    result = {}
-    for sid, pid in owned.items():
-        raw = read_proc_cmdline(pid)
-        if not raw or not grok_cmdline(raw):
-            continue
-        result[sid] = pid
-    return result
+    return owned
 
 
 def list_states():
-    """Session id -> session_state for each session with a live grok here or on this host."""
-    sids = set(dashboard_owners())
+    """Session id -> session_state for each session with a live grok here or on this host.
+
+    One /proc pass (ProcScan) serves every session in the list.
+    """
+    scan = ProcScan()
+    sids = set(dashboard_owners(scan))
     with LIVE_LOCK:
         sids.update(LIVE)
-    ppids = _proc_ppid_map()
     out = {}
     for sid in sids:
-        state = session_state(sid, ppids=ppids)
+        state = session_state(sid, scan=scan)
         if state["state"] != "stopped":
             out[sid] = state
     return out
@@ -2199,12 +2217,25 @@ def dashboard_cwd_choices(cwd_defaults):
     return choices
 
 
-def dashboard_rows(sessions):
+def list_rows_tag(sessions, owners=None):
+    """Change tag of the list rows, from the same inputs, without the HTML."""
+    if owners is None:
+        owners = list_states()
+    key = [
+        sorted([sid, st["turn"] == "working", st["pid"]] for sid, st in owners.items()),
+        [[row.get(k) for k in ("id", "title", "cwd", "updated")] for row in sessions],
+    ]
+    text = json.dumps(key, default=str, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
+
+
+def dashboard_rows(sessions, owners=None):
     # summary.json has updated_at, not Working or Idle. Those come from
     # session_state of the live groks. A session with no live grok stays
     # under Older sessions. Every older summary is in the page; the script
     # shows 20, then 50 more. The page polls /list-rows for this HTML.
-    owners = list_states()
+    if owners is None:
+        owners = list_states()
     by_id = {}
     for row in sessions:
         by_id[row["id"]] = row
@@ -4295,8 +4326,8 @@ class Handler(BaseHTTPRequestHandler):
     def _list_rows(self):
         # The list page polls this. Unchanged rows cost one short reply.
         _total, sessions = load_sessions(None)
-        body = dashboard_rows(sessions)
-        tag = hashlib.sha256(body.encode("utf-8")).hexdigest()[:32]
+        owners = list_states()
+        tag = list_rows_tag(sessions, owners)
         if self.headers.get("X-Rows-Tag", "") == tag:
             self.send_response(204)
             self.send_header("X-Rows-Tag", tag)
@@ -4304,7 +4335,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        data = body.encode("utf-8")
+        data = dashboard_rows(sessions, owners).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
