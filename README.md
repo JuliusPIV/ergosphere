@@ -283,6 +283,12 @@ Not yet. Ergosphere reads Linux's `/proc` to find grok processes and keep one pe
 </details>
 
 <details>
+<summary><b>Why did grok's default model or effort change?</b></summary>
+
+grok saves the model and effort it is started with: `-m <model>` becomes `[models] default` and `--reasoning-effort <level>` becomes `default_reasoning_effort` in `~/.grok/config.toml`, and every later grok uses them. Ergosphere only reads that file. It passes a model or effort only when you pick one that differs from those saved defaults, so a session started with the defaults leaves the file as it is. Picking a different one in the new-session dialog makes it grok's new default, as the dialog notes.
+</details>
+
+<details>
 <summary><b>I see "Server error (500) | Retrying (attempt N)" in a session. Is Ergosphere broken?</b></summary>
 
 No. That message comes from grok itself: xAI's servers returned an error and grok is retrying the request. Ergosphere only shows grok's screen, so you would see the same message running grok in a terminal. If it keeps retrying, wait and try again later.

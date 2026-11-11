@@ -39,6 +39,10 @@ import uuid
 import fcntl
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+try:
+    import tomllib
+except ImportError:  # Python < 3.11: no config read, flags passed as picked.
+    tomllib = None
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -1114,8 +1118,6 @@ def validate_model_effort(model, effort, models, err):
     if effort and not EFFORT_ID_RE.match(effort):
         raise ValueError("unknown effort")
     if err:
-        if model:
-            raise ValueError("unknown model")
         allowed = DEFAULT_EFFORTS
     else:
         ids = []
@@ -1132,8 +1134,49 @@ def validate_model_effort(model, effort, models, err):
 
 
 def checked_model_effort(model, effort):
+    # A launch never waits on `grok models`.  With a good list (fresh or
+    # stale) grok_models_list answers at once.  With none yet, check the
+    # format only and let grok itself reject a model it does not know.
+    if _MODELS_CACHE["value"] is None:
+        return validate_model_effort(model, effort, [], "no model list yet")
     models, err = grok_models_list()
     return validate_model_effort(model, effort, models, err)
+
+
+def grok_config_defaults():
+    # grok saves -m as [models] default and --reasoning-effort as
+    # default_reasoning_effort in ~/.grok/config.toml.  Read only, never write.
+    # None when the file is missing or unreadable.
+    if tomllib is None:
+        return None
+    path = os.path.expanduser("~/.grok/config.toml")
+    try:
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, ValueError):
+        return None
+    models = data.get("models")
+    if not isinstance(models, dict):
+        models = {}
+    model = models.get("default")
+    effort = models.get("default_reasoning_effort")
+    return {
+        "model": model if isinstance(model, str) else "",
+        "effort": effort if isinstance(effort, str) else "",
+    }
+
+
+def launch_model_effort(model, effort):
+    # Pass -m / --reasoning-effort only when they differ from grok's saved
+    # defaults, so a launch does not rewrite them (grok saves what it is given).
+    defaults = grok_config_defaults()
+    if defaults is None:
+        return model, effort
+    if model and model == defaults["model"]:
+        model = ""
+    if effort and effort == defaults["effort"]:
+        effort = ""
+    return model, effort
 
 
 def kill_proc(proc):
@@ -1969,6 +2012,7 @@ footer { position: fixed; left: 0; right: 0; bottom: 0; width: 100%; box-sizing:
 #new-agent .line input[type="radio"]:focus { outline: 1px solid #fff; background: #000; color: #fff; }
 #new-agent .line input[type="radio"]:checked, #new-agent .line input[type="radio"]:checked:focus { background: radial-gradient(circle, #000 0 28%, #fff 32% 100%); color: #fff; }
 #new-agent .na-error[hidden] { display: none; }
+#new-agent .na-note { font-size: 0.85em; opacity: 0.8; margin: 0.2rem 0; }
 #new-agent .combo { position: relative; display: block; }
 #new-agent .combo-list { position: absolute; z-index: 6; left: 0; right: 0; top: 100%; margin: 0; padding: 0; max-height: 14rem; overflow: auto; background: #000; color: #fff; border: 1px solid #fff; font: inherit; }
 #new-agent .combo-list[hidden] { display: none; }
@@ -1998,13 +2042,14 @@ footer { display: none; }
 <label>Model <select id="na-model" name="model"><option value="" selected></option></select></label>
 <label>Effort <select id="na-effort" name="effort"><option value="low">low</option><option value="medium" selected>medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label>
 </div>
+<div class="na-note">grok saves a model or effort you choose as its new default.</div>
 <div id="na-error" class="na-error" hidden></div>
 <div class="line">Approval
 <label><input type="radio" name="approval" value="ask" checked> ask</label>
 <label><input type="radio" name="approval" value="auto"> auto</label>
 <label><input type="radio" name="approval" value="always-approve"> always approve</label>
 </div>
-<button type="submit">Create</button>
+<button type="submit" id="na-create">Create</button>
 </form>
 </div>
 <footer>↑/↓ select | Enter: open | Ctrl+Enter: new tab | Alt+N new agent</footer>
@@ -2023,7 +2068,11 @@ if (!cwdChoices || typeof cwdChoices.length !== "number") cwdChoices = [];
 var defaultEfforts = ["low", "medium", "high", "xhigh"];
 var modelRows = [];
 var modelFetch = 0;
-var launchBusy = false;
+// One launch at a time: "idle" or "launching".  While launching the dialog
+// stays open and says so; Escape and a second Create never act silently.
+var launchState = "idle";
+// True once the user changes the effort in this dialog opening.
+var effortPicked = false;
 var sortState = {
   working: {col: "updated", dir: "desc"},
   idle: {col: "updated", dir: "desc"},
@@ -2241,13 +2290,24 @@ function applyModelList(data) {
     if (!defaultEfforts.length) defaultEfforts = ["low", "medium", "high", "xhigh"];
   }
   // Preselect the last launch's model and effort while they are still offered.
+  // grok's own saved defaults come first: picking them passes no flag, so
+  // an untouched Create leaves grok's config as it is.
   var last = (data && data.last) || {};
+  var conf = (data && data.defaults) || {};
   var lastModel = typeof last.model === "string" ? last.model : "";
   var lastEffort = typeof last.effort === "string" ? last.effort : "";
+  var confModel = typeof conf.model === "string" ? conf.model : "";
+  var confEffort = typeof conf.effort === "string" ? conf.effort : "";
+  var picked = effortPicked ? document.getElementById("na-effort").value : "";
   fillSelect("na-model", rows, false);
-  if (lastModel && rows.indexOf(lastModel) !== -1) document.getElementById("na-model").value = lastModel;
+  if (confModel && rows.indexOf(confModel) !== -1) document.getElementById("na-model").value = confModel;
+  else if (lastModel && rows.indexOf(lastModel) !== -1) document.getElementById("na-model").value = lastModel;
   var levels = effortsFor(document.getElementById("na-model").value);
-  fillSelect("na-effort", levels, false, lastEffort && levels.indexOf(lastEffort) !== -1 ? lastEffort : "medium");
+  var effort = "medium";
+  if (picked && levels.indexOf(picked) !== -1) effort = picked;
+  else if (confEffort && levels.indexOf(confEffort) !== -1) effort = confEffort;
+  else if (lastEffort && levels.indexOf(lastEffort) !== -1) effort = lastEffort;
+  fillSelect("na-effort", levels, false, effort);
   if (data && data.agents && typeof data.agents.length === "number") {
     agentNames = [];
     for (i = 0; i < data.agents.length; i++) {
@@ -2283,6 +2343,8 @@ function loadModels() {
   });
 }
 function openNew() {
+  if (launchState === "launching") return;
+  effortPicked = false;
   document.getElementById("na-agent").value = "";
   document.getElementById("na-cwd").value = "";
   setApproval("ask");
@@ -2297,6 +2359,10 @@ function openNew() {
   loadModels();
 }
 function closeNew() {
+  if (launchState === "launching") {
+    setModelError("Starting a session…");
+    return;
+  }
   hideList("na-agent");
   hideList("na-cwd");
   document.getElementById("new-agent").hidden = true;
@@ -2333,8 +2399,18 @@ function openBlank(href) {
   a.click();
   a.remove();
 }
+function setLaunch(state) {
+  launchState = state;
+  var btn = document.getElementById("na-create");
+  if (!btn) return;
+  btn.disabled = state === "launching";
+  btn.textContent = state === "launching" ? "Starting…" : "Create";
+}
 function launchNew(blank) {
-  if (launchBusy) return;
+  if (launchState === "launching") {
+    setModelError("Already starting a session.");
+    return;
+  }
   var agent = document.getElementById("na-agent").value.trim();
   var cwd = document.getElementById("na-cwd").value.trim();
   if (!agent && !cwd) {
@@ -2348,7 +2424,7 @@ function launchNew(blank) {
     model: document.getElementById("na-model").value,
     effort: document.getElementById("na-effort").value
   };
-  launchBusy = true;
+  setLaunch("launching");
   setModelError("");
   fetch("/launch", {
     method: "POST",
@@ -2362,20 +2438,22 @@ function launchNew(blank) {
       return {ok: false, data: null};
     });
   }).then(function (res) {
-    launchBusy = false;
     var data = res.data || {};
     if (!res.ok || typeof data.id !== "string" || !data.id) {
+      setLaunch("idle");
       setModelError(typeof data.error === "string" && data.error ? data.error : "could not start");
       return;
     }
     var href = "/chat?resume=" + encodeURIComponent(data.id);
     if (blank) {
+      setLaunch("idle");
       openBlank(href);
       return;
     }
+    // Stay "launching" until the page unloads, so no second Create slips in.
     location.href = href;
   }).catch(function () {
-    launchBusy = false;
+    setLaunch("idle");
     setModelError("could not start");
   });
 }
@@ -2612,6 +2690,13 @@ function bindCombo(inputId) {
 bindCombo("na-agent");
 bindCombo("na-cwd");
 document.getElementById("na-agent").addEventListener("change", fillNewCwd);
+document.getElementById("na-effort").addEventListener("change", function () {
+  effortPicked = true;
+});
+// Back from a session restores this page from the cache: start idle again.
+window.addEventListener("pageshow", function (ev) {
+  if (ev.persisted) setLaunch("idle");
+});
 document.getElementById("na-model").addEventListener("change", function () {
   fillSelect("na-effort", effortsFor(document.getElementById("na-model").value), true, "medium");
 });
@@ -3993,6 +4078,7 @@ class Handler(BaseHTTPRequestHandler):
                 "efforts": list(DEFAULT_EFFORTS),
                 "agents": list_agents(),
                 "last": self.server.config.get("last") or {},
+                "defaults": grok_config_defaults() or {},
             })
             return
         if path == "/session-info":
@@ -4223,8 +4309,9 @@ class Handler(BaseHTTPRequestHandler):
                 os.getcwd(),
             )
             model, effort = checked_model_effort(model, effort)
+            argv_model, argv_effort = launch_model_effort(model, effort)
             sid = str(uuid.uuid4())
-            cmd = grok_argv(agent, approval, cwd, None, sid, model, effort)
+            cmd = grok_argv(agent, approval, cwd, None, sid, argv_model, argv_effort)
             live, _reattach = open_live(sid, cmd, cwd, 80, 24)
         except (ValueError, RuntimeError, OSError) as exc:
             self._json(400, {"ok": False, "error": str(exc)[:300]})
