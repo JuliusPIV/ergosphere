@@ -129,13 +129,46 @@ def check_lock_held_blocks_ping():
     return failures
 
 
+def check_one_slow_miss_keeps_deadline():
+    """One self-check that fails slowly (like a LIVE_LOCK timeout) must not push
+    the next ping past systemd's deadline (2 intervals after the last good ping)."""
+    spec = importlib.util.spec_from_file_location("ergosphere", ROOT / "ergosphere.py")
+    erg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(erg)
+    os.environ["NOTIFY_SOCKET"] = "@ergo-wd-test-unused"
+    os.environ["WATCHDOG_USEC"] = "2000000"  # deadline 2 s, ping every 1 s
+    os.environ.pop("WATCHDOG_PID", None)
+    pings, calls = [], [0]
+
+    def fake_can_serve(_httpd, timeout=2):
+        calls[0] += 1
+        if calls[0] == 2:
+            time.sleep(0.4)
+            return False
+        return True
+
+    erg.can_serve = fake_can_serve
+    erg.sd_notify = lambda msg: pings.append(time.monotonic()) or True
+    erg.print = lambda *a, **k: None
+    thread = erg.start_watchdog(object())
+    time.sleep(4.5)
+    erg.STOP.set()
+    thread.join(3)
+    gaps = [b - a for a, b in zip(pings, pings[1:])]
+    if len(pings) < 3:
+        return ["only %d pings in 4.5 s" % len(pings)]
+    if max(gaps) >= 2.0:
+        return ["after one slow miss the next ping came %.2fs after the last good one (deadline 2 s)" % max(gaps)]
+    return []
+
+
 def main():
-    failures = check_live_server() + check_lock_held_blocks_ping()
+    failures = check_live_server() + check_lock_held_blocks_ping() + check_one_slow_miss_keeps_deadline()
     for failure in failures:
         print("FAIL: " + failure)
     if failures:
         return 1
-    print("PASS: READY=1 and WATCHDOG=1 sent; no ping while LIVE_LOCK is held")
+    print("PASS: READY=1 and WATCHDOG=1 sent; no ping while LIVE_LOCK is held; a slow miss is retried in time")
     return 0
 
 

@@ -4866,6 +4866,10 @@ def start_watchdog(httpd):
     if interval is None:
         return None
 
+    # After a failed check, retry soon: systemd's deadline is two intervals after
+    # the last good ping, and one slow miss plus a full interval would pass it.
+    retry = min(1.0, interval / 4)
+
     def loop():
         # Check and ping at once: READY=1 does not reset the watchdog timer, so
         # after a restart (exec, same pid) the first ping must not wait a full interval.
@@ -4875,9 +4879,9 @@ def start_watchdog(httpd):
             if ok:
                 sd_notify("WATCHDOG=1")
             if ok != healthy:
-                print("watchdog: %s" % ("healthy again, pinging" if ok else "self-check failed, ping skipped"), flush=True)
+                print("watchdog: %s" % ("healthy again, pinging" if ok else "self-check failed, ping skipped, retrying"), flush=True)
                 healthy = ok
-            if STOP.wait(interval):
+            if STOP.wait(interval if ok else retry):
                 return
 
     thread = threading.Thread(target=loop, name="watchdog", daemon=True)
