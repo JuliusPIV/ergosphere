@@ -50,20 +50,27 @@ def main():
         cfg.parent.mkdir()
         cfg.write_text(CONFIG, encoding="utf-8")
         before = cfg.read_bytes()
-        check(erg.grok_config_defaults() == {"model": "grok-4.7", "effort": "high"},
-              "config.toml defaults are read")
-        check(erg.launch_model_effort("grok-4.7", "high") == ("", ""),
-              "model and effort equal to the defaults are not passed")
-        check(erg.launch_model_effort("grok-4.6", "high") == ("grok-4.6", ""),
-              "only a non-default model is passed")
-        check(erg.launch_model_effort("grok-4.7", "low") == ("", "low"),
-              "only a non-default effort is passed")
-        check(erg.launch_model_effort("", "") == ("", ""), "blank picks pass nothing")
-        check(cfg.read_bytes() == before, "config.toml is never written")
-        page = erg.dashboard_page([], [], {})
-        check('var savedDefaults = {"model": "grok-4.7", "effort": "high"};' in page
-              or "var savedDefaults = {\"model\":\"grok-4.7\",\"effort\":\"high\"};" in page,
-              "list page carries the saved defaults before /models answers")
+        if erg.tomllib is None:
+            # Python < 3.11: saved defaults cannot be read; flags as picked.
+            print("note: no tomllib on this Python; saved-default checks skipped")
+            check(erg.grok_config_defaults() is None, "no tomllib here: config.toml is not read")
+            check(erg.launch_model_effort("grok-4.7", "high") == ("grok-4.7", "high"),
+                  "no tomllib here: -m and effort are passed as picked")
+        else:
+            check(erg.grok_config_defaults() == {"model": "grok-4.7", "effort": "high"},
+                  "config.toml defaults are read")
+            check(erg.launch_model_effort("grok-4.7", "high") == ("", ""),
+                  "model and effort equal to the defaults are not passed")
+            check(erg.launch_model_effort("grok-4.6", "high") == ("grok-4.6", ""),
+                  "only a non-default model is passed")
+            check(erg.launch_model_effort("grok-4.7", "low") == ("", "low"),
+                  "only a non-default effort is passed")
+            check(erg.launch_model_effort("", "") == ("", ""), "blank picks pass nothing")
+            check(cfg.read_bytes() == before, "config.toml is never written")
+            page = erg.dashboard_page([], [], {})
+            check('var savedDefaults = {"model": "grok-4.7", "effort": "high"};' in page
+                  or "var savedDefaults = {\"model\":\"grok-4.7\",\"effort\":\"high\"};" in page,
+                  "list page carries the saved defaults before /models answers")
 
         # Unparseable file: pass the flags as before.
         cfg.write_text("[models\ndefault = ", encoding="utf-8")
@@ -171,6 +178,9 @@ def main():
     text = (ROOT / "ergosphere.py").read_text(encoding="utf-8")
     check("grok saves a model or effort you choose as its new default" in text,
           "new-session dialog notes that grok saves the choice as its default")
+
+    check("savedDefaults.effort = payload.effort" in text and "savedDefaults.model = payload.model" in text,
+          "after a launch the page's saved defaults follow what grok was started with")
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     check("default_reasoning_effort" in readme, "README FAQ explains grok saving the model and effort")

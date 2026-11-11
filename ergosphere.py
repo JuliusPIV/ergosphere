@@ -2459,6 +2459,10 @@ function launchNew(blank) {
       setModelError(typeof data.error === "string" && data.error ? data.error : "could not start");
       return;
     }
+    // grok saves what it was started with, so the page's copy of the saved
+    // defaults must follow, or a reopened dialog preselects stale values.
+    if (payload.model) savedDefaults.model = payload.model;
+    if (payload.effort) savedDefaults.effort = payload.effort;
     var href = "/chat?resume=" + encodeURIComponent(data.id);
     if (blank) {
       setLaunch("idle");
