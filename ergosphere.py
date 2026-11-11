@@ -41,7 +41,7 @@ import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 try:
     import tomllib
-except ImportError:  # Python < 3.11: no config read, flags passed as picked.
+except ImportError:  # Python < 3.11: _models_defaults_fallback reads config.toml.
     tomllib = None
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -1152,13 +1152,17 @@ def grok_config_defaults():
     # grok saves -m as [models] default and --reasoning-effort as
     # default_reasoning_effort in ~/.grok/config.toml.  Read only, never write.
     # None when the file is missing or unreadable.
-    if tomllib is None:
-        return None
     path = os.path.expanduser("~/.grok/config.toml")
     try:
         with open(path, "rb") as fh:
-            data = tomllib.load(fh)
-    except (OSError, ValueError):
+            raw = fh.read()
+    except OSError:
+        return None
+    if tomllib is None:
+        return _models_defaults_fallback(raw)
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError):
         return None
     models = data.get("models")
     if not isinstance(models, dict):
@@ -1169,6 +1173,33 @@ def grok_config_defaults():
         "model": model if isinstance(model, str) else "",
         "effort": effort if isinstance(effort, str) else "",
     }
+
+
+_TOML_SECTION_RE = re.compile(r"^\s*\[([^\[\]]+)\]\s*(#.*)?$")
+_TOML_MODELS_KEY_RE = re.compile(
+    r"""^\s*(default|default_reasoning_effort)\s*=\s*(?:"([^"\\]*)"|'([^']*)')\s*(#.*)?$""")
+
+
+def _models_defaults_fallback(raw):
+    # Python < 3.11 has no tomllib.  Read only the two quoted keys under
+    # [models]; anything else in the file is ignored.
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError:
+        return None
+    section = ""
+    found = {}
+    for line in text.splitlines():
+        head = _TOML_SECTION_RE.match(line)
+        if head:
+            section = head.group(1).strip()
+            continue
+        if section != "models":
+            continue
+        kv = _TOML_MODELS_KEY_RE.match(line)
+        if kv and kv.group(1) not in found:
+            found[kv.group(1)] = kv.group(2) if kv.group(2) is not None else kv.group(3)
+    return {"model": found.get("default", ""), "effort": found.get("default_reasoning_effort", "")}
 
 
 def launch_model_effort(model, effort):

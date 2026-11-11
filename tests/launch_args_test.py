@@ -71,6 +71,35 @@ def main():
         check(erg.launch_model_effort("grok-4.7", "high") == ("grok-4.7", "high"),
               "unparseable config.toml passes -m and effort as picked")
 
+    # Python < 3.11 (no tomllib): the fallback still reads the two keys.
+    saved = sys.modules.get("tomllib")
+    sys.modules["tomllib"] = None  # makes `import tomllib` raise ImportError
+    try:
+        old = load_module()
+    finally:
+        if saved is None:
+            sys.modules.pop("tomllib", None)
+        else:
+            sys.modules["tomllib"] = saved
+    check(old.tomllib is None, "no tomllib: module loads with tomllib = None")
+    with tempfile.TemporaryDirectory() as home:
+        os.environ["HOME"] = home
+        cfg = Path(home) / ".grok" / "config.toml"
+        check(old.grok_config_defaults() is None, "no tomllib: missing config.toml reads as no defaults")
+        cfg.parent.mkdir()
+        cfg.write_text('[ui]\ndefault = "other"\n\n' + CONFIG.replace(
+            'default_reasoning_effort = "high"', "default_reasoning_effort = 'high'  # saved by grok")
+            + '\n[x.models]\ndefault = "nope"\n', encoding="utf-8")
+        check(old.grok_config_defaults() == {"model": "grok-4.7", "effort": "high"},
+              "no tomllib: [models] defaults are read (got %r)" % (old.grok_config_defaults(),))
+        check(old.launch_model_effort("grok-4.7", "high") == ("", ""),
+              "no tomllib: a default pick passes no flags")
+        check(old.launch_model_effort("grok-4.6", "low") == ("grok-4.6", "low"),
+              "no tomllib: a non-default pick passes both flags")
+        cfg.write_text("[models\ndefault = ", encoding="utf-8")
+        check(old.launch_model_effort("grok-4.7", "high") == ("grok-4.7", "high"),
+              "no tomllib: unreadable [models] passes -m and effort as picked")
+
     # Empty model cache: a launch must not wait on `grok models` nor reject a model.
     calls = []
     started = threading.Event()
