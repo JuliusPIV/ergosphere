@@ -1000,17 +1000,28 @@ def parse_grok_models(text):
 
 
 # One successful `grok models` run serves every request for MODELS_TTL
-# seconds. The lock makes concurrent requests wait for that one run.
+# seconds. After that the last good list is still served at once and one
+# background run refreshes it, so the dialog and /launch never wait on grok.
+# Only a request with no good list yet waits, and the lock makes concurrent
+# first requests share that one run. A failed refresh keeps the old list.
 MODELS_TTL = 60
 _MODELS_LOCK = threading.Lock()
-_MODELS_CACHE = {"at": 0.0, "value": None}
+_MODELS_CACHE = {"at": 0.0, "value": None, "refreshing": False}
 
 
 def grok_models_list():
     with _MODELS_LOCK:
-        now = time.monotonic()
         cached = _MODELS_CACHE["value"]
-        if cached is not None and now - _MODELS_CACHE["at"] < MODELS_TTL:
+        if cached is not None:
+            stale = time.monotonic() - _MODELS_CACHE["at"] >= MODELS_TTL
+            if stale and not _MODELS_CACHE["refreshing"]:
+                _MODELS_CACHE["refreshing"] = True
+                try:
+                    threading.Thread(target=_refresh_models, name="grok-models", daemon=True).start()
+                except RuntimeError as exc:
+                    # No thread, no refresh: clear the flag so a later request retries.
+                    _MODELS_CACHE["refreshing"] = False
+                    print("models: could not start a refresh, keeping the last list: %s" % exc, file=sys.stderr, flush=True)
             return cached
         value = run_grok_models()
         # Errors are not cached: a fixed login must show on the next request.
@@ -1018,6 +1029,25 @@ def grok_models_list():
             _MODELS_CACHE["at"] = time.monotonic()
             _MODELS_CACHE["value"] = value
         return value
+
+
+def _refresh_models():
+    value = ([], "grok models failed")
+    try:
+        value = run_grok_models()
+    finally:
+        with _MODELS_LOCK:
+            if not value[1]:
+                _MODELS_CACHE["at"] = time.monotonic()
+                _MODELS_CACHE["value"] = value
+            _MODELS_CACHE["refreshing"] = False
+    if value[1]:
+        print("models: refresh failed, keeping the last list: %s" % value[1], file=sys.stderr, flush=True)
+
+
+def _models_cwd():
+    home = os.path.expanduser("~")
+    return home if os.path.isdir(home) else None
 
 
 def run_grok_models():
@@ -1031,6 +1061,8 @@ def run_grok_models():
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            # The user's home, not the service folder (may be a slow share).
+            cwd=_models_cwd(),
             timeout=15,
             check=False,
         )
