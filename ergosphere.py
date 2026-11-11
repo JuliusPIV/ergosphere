@@ -1761,10 +1761,15 @@ class Live:
             pass
 
     def _release_on_exit(self):
+        # grok outlived the kill: the entry stays (state stopping) and keeps
+        # the lock until grok is gone; then leave LIVE as the reader would.
         try:
             self.proc.wait()
         except Exception:
             return
+        with LIVE_LOCK:
+            if LIVE.get(self.sid) is self:
+                LIVE.pop(self.sid, None)
         self.release_lock()
 
 
@@ -5142,9 +5147,12 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(msg, dict) and msg.get("type") == "stop":
             # Stop is the only client message that kills this PTY.
             live.shutdown()
-            with LIVE_LOCK:
-                if LIVE.get(live.sid) is live:
-                    LIVE.pop(live.sid, None)
+            # Pop only once grok is gone; a grok that outlived the kill stays
+            # in LIVE as stopping until _release_on_exit sees it exit.
+            if live.proc.poll() is not None:
+                with LIVE_LOCK:
+                    if LIVE.get(live.sid) is live:
+                        LIVE.pop(live.sid, None)
             print("term stop pid=%s sid=%s" % (live.proc.pid, live.sid), flush=True)
             raise EOFError("stopped")
         if isinstance(msg, dict) and msg.get("type") == "resize":

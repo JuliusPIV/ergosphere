@@ -444,6 +444,30 @@ def check_bad_sid(erg):
     return None
 
 
+def check_stopping_until_exit(erg):
+    # Quit from a tab, grok outlives the kill: the state stays stopping (not
+    # held by some other grok) until grok exits, then reads stopped.
+    sid = new_sid(36)
+    live, _ = erg.open_live(sid, [GROK, "-c", "import signal,time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(60)\n", "--resume", sid], CWD, 80, 24)
+    time.sleep(0.3)
+    real = erg.kill_proc
+    erg.kill_proc = lambda proc: None  # stands in for a grok stuck past SIGKILL + 3 s
+    try:
+        try:
+            erg.Handler._on_text(None, live, b'{"type":"stop"}')
+        except EOFError:
+            pass
+    finally:
+        erg.kill_proc = real
+    during = erg.session_state(sid, with_turn=False)["state"]
+    os.kill(live.proc.pid, signal.SIGKILL)
+    gone = wait_for(lambda: sid not in erg.LIVE, 5)
+    after = erg.session_state(sid, with_turn=False)["state"]
+    if during != "stopping" or not gone or after != "stopped":
+        return "stop: while grok outlived the kill state=%r, after exit LIVE cleared=%s state=%r" % (during, gone, after)
+    return None
+
+
 def check_cpu_callers_share(erg):
     # Two pollers close together both see a busy grok's CPU use.
     busy = popen([sys.executable, "-c", "while True: pass"])
@@ -465,7 +489,7 @@ def main():
               check_held_while_running_here, check_holder_labels, check_words, check_turn_without_inhibit,
               check_disjoint_envs, check_lock_writes_nothing, check_new_session_launch,
               check_one_proc_pass, check_lock_kept_while_grok_lives, check_cpu_callers_share,
-              check_orphan_race, check_bad_sid)
+              check_orphan_race, check_bad_sid, check_stopping_until_exit)
     failures = []
     try:
         for check in checks:
