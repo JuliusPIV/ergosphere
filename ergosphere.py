@@ -1998,10 +1998,6 @@ def grok_turn(pid, sid, scan=None):
     return "idle"
 
 
-# M1 session states (plan: one value answers "who runs this session").
-RUNNING_STATES = ("starting", "running-idle", "running-working")
-
-
 def live_state(live):
     """This server's own entry: starting, running, stopping, or None.
 
@@ -2024,10 +2020,12 @@ def session_state(sid, with_turn=True, scan=None):
 
     state: stopped, starting, running-idle, running-working, stopping,
     held-by-cli or held-by-other-server. pid: the grok it names.
-    holder: another grok on this session (session_holder), also set when
-    this server runs it too (two groks on one session; pages refuse to
-    resume or attach and show the holder notice). turn: working or idle
-    for any state with a live grok, when with_turn.
+    holder: another grok on this session (session_holder). Any holder makes
+    the state held-by-*, also when this server runs a grok on it too (two
+    groks on one session: pages refuse to resume or attach, show the holder
+    notice, and the list marks the row). here: this server's own grok is
+    starting or running. turn: working or idle for any state with a live
+    grok, when with_turn.
     """
     with LIVE_LOCK:
         live = LIVE.get(sid)
@@ -2035,12 +2033,13 @@ def session_state(sid, with_turn=True, scan=None):
     if scan is None:
         scan = ProcScan()
     holder = session_holder(sid, scan)
-    out = {"id": sid, "state": "stopped", "pid": None, "turn": None, "holder": holder}
+    out = {"id": sid, "state": "stopped", "pid": None, "turn": None, "holder": holder,
+           "here": here in ("starting", "running")}
     if here == "stopping":
         out["state"] = "stopping"
         out["pid"] = live.proc.pid
         return out
-    if here:
+    if here and not holder:
         out["pid"] = live.proc.pid
         turn = grok_turn(live.proc.pid, sid, scan) if with_turn and here == "running" else "idle"
         out["turn"] = turn
@@ -2055,7 +2054,8 @@ def session_state(sid, with_turn=True, scan=None):
 
 
 def running_here(state):
-    return state.get("state") in RUNNING_STATES
+    """This server's own grok is starting or running (alone, or beside a holder)."""
+    return bool(state.get("here"))
 
 
 def _cmdline_session(raw):
@@ -2203,7 +2203,16 @@ def dashboard_head(section):
     return '<div class="head" data-section="%s">%s</div>' % (section, "".join(buttons))
 
 
-def dashboard_session_row(section, seq, row, pid, hidden=False):
+def conflict_note(state):
+    """List marker for two groks on one session: this server's and a holder."""
+    if not state.get("here") or not state.get("holder"):
+        return ""
+    if state["holder"].get("kind") == "cli":
+        return "also open in a CLI"
+    return "also open in another Ergosphere server"
+
+
+def dashboard_session_row(section, seq, row, pid, hidden=False, note=""):
     title = row.get("title") if isinstance(row.get("title"), str) else ""
     sid = row.get("id") if isinstance(row.get("id"), str) else ""
     cwd = row.get("cwd") if isinstance(row.get("cwd"), str) else ""
@@ -2219,7 +2228,7 @@ def dashboard_session_row(section, seq, row, pid, hidden=False):
         '<span class="c-sid">%s</span><span class="c-cwd">%s</span>'
     ) % (
         html.escape(shown),
-        html.escape(title or "(no title)"),
+        html.escape(title or "(no title)") + (" [%s]" % html.escape(note) if note else ""),
         html.escape(sid),
         html.escape(cwd),
     )
@@ -2273,7 +2282,7 @@ def list_rows_tag(sessions, owners=None):
     if owners is None:
         owners = list_states()
     key = [
-        sorted([sid, st["turn"] == "working", st["pid"]] for sid, st in owners.items()),
+        sorted([sid, st["turn"] == "working", st["pid"], conflict_note(st)] for sid, st in owners.items()),
         [[row.get(k) for k in ("id", "title", "cwd", "updated")] for row in sessions],
     ]
     text = json.dumps(key, default=str, separators=(",", ":"))
@@ -2305,10 +2314,11 @@ def dashboard_rows(sessions, owners=None):
     for sid in owners:
         info = owners[sid]
         row = owned_row(sid)
+        item = (row, info["pid"], conflict_note(info))
         if info["turn"] == "working":
-            work.append((row, info["pid"]))
+            work.append(item)
         else:
-            idle.append((row, info["pid"]))
+            idle.append(item)
     work.sort(key=lambda item: dashboard_sort_key(item[0]))
     idle.sort(key=lambda item: dashboard_sort_key(item[0]))
     older = [row for row in sessions if row["id"] not in owners]
@@ -2321,16 +2331,16 @@ def dashboard_rows(sessions, owners=None):
         '<div class="sec" id="sec-working">',
         '<div class="empty"%s>- none -</div>' % ("" if not work else " hidden"),
     ]
-    for seq, (row, pid) in enumerate(work):
-        blocks.append(dashboard_session_row("working", seq, row, pid))
+    for seq, (row, pid, note) in enumerate(work):
+        blocks.append(dashboard_session_row("working", seq, row, pid, note=note))
     blocks.append("</div>")
     blocks.append('<div class="bar"></div>')
     blocks.append('<h2 class="group" id="count-idle">Idle Sessions: %d</h2>' % len(idle))
     blocks.append(dashboard_head("idle"))
     blocks.append('<div class="sec" id="sec-idle">')
     blocks.append('<div class="empty"%s>- none -</div>' % ("" if not idle else " hidden"))
-    for seq, (row, pid) in enumerate(idle):
-        blocks.append(dashboard_session_row("idle", seq, row, pid))
+    for seq, (row, pid, note) in enumerate(idle):
+        blocks.append(dashboard_session_row("idle", seq, row, pid, note=note))
     blocks.append("</div>")
     blocks.append('<div class="bar"></div>')
     blocks.append('<h2 class="group">Older Sessions</h2>')

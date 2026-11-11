@@ -158,22 +158,20 @@ def check_no_resume_while_stopping(erg):
 def other_server(sid, fake=None, at=0.0):
     """A second Ergosphere process (same HOME, its own environment) that starts sid.
 
-    It has XDG_RUNTIME_DIR, TMPDIR and a private-looking temp dir set and this
-    one has none, like a user unit next to a system unit with PrivateTmp: the
-    lock must not depend on any of that. at: start time (epoch) for a race.
+    It has XDG_RUNTIME_DIR and TMPDIR set and this one has neither, like a
+    user unit next to a system unit: the lock must not depend on them.
+    at: start time (epoch) for a race.
     """
     env = dict(os.environ, XDG_RUNTIME_DIR=os.path.join(TMP, "run"), TMPDIR=os.path.join(TMP, "othertmp"))
     other = popen([sys.executable, "-B", "-c",
                    "import importlib.util,sys,time\n"
                    "s=importlib.util.spec_from_file_location('e',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\n"
-                   "if hasattr(m, 'session_lock_dirs'):\n"
-                   "    p = sys.argv[7]; m.session_lock_dirs = lambda: (p + '/cache', p + '/tmp/locks')\n"
                    "while time.time() < float(sys.argv[6]): time.sleep(0.001)\n"
                    "try: m.open_live(sys.argv[2], [sys.argv[3], '-c', sys.argv[4], '--resume', sys.argv[2]], sys.argv[5], 80, 24)\n"
                    "except Exception as exc: print('refused', exc, flush=True)\n"
                    "print('up', flush=True); time.sleep(30)\n",
-                   str(ROOT / "ergosphere.py"), sid, GROK, fake or FAKE, CWD, repr(at),
-                   os.path.join(TMP, "private-other")], stdout=subprocess.PIPE, env=env)
+                   str(ROOT / "ergosphere.py"), sid, GROK, fake or FAKE, CWD, repr(at)],
+                  stdout=subprocess.PIPE, env=env)
     if not at:
         other.stdout.readline()
     return other
@@ -191,6 +189,22 @@ def check_two_servers(erg):
     os.kill(other.pid, signal.SIGKILL)
     if n > 1 or not refused:
         return "SM-3: a second server started the same session (%d groks)" % n
+    return None
+
+
+def check_conflict_everywhere(erg):
+    # This server runs the session and a CLI `grok -r` opens it too: the one
+    # state says held, and the list marks the row, not a plain Idle row.
+    sid = new_sid(35)
+    erg.open_live(sid, fake_cmd(sid), CWD, 80, 24)
+    popen([GROK, "-c", FAKE, "-r", sid])
+    time.sleep(0.4)
+    state = erg.session_state(sid, with_turn=False)
+    rows = erg.dashboard_rows([{"id": sid, "title": "t", "cwd": CWD, "updated": ""}])
+    row = [line for line in rows.split("\n") if 'data-sid="%s"' % sid in line]
+    marked = bool(row) and "also open in a CLI" in row[0]
+    if state["state"] != "held-by-cli" or not marked:
+        return "conflict: here + CLI reads %r, list row marked %s" % (state["state"], marked)
     return None
 
 
@@ -283,11 +297,6 @@ def check_disjoint_envs(erg):
     os.symlink(os.path.join(HOME, ".grok"), os.path.join(home2, ".grok"))  # same sessions
     with open(os.path.join(home2, ".cache"), "w") as fh:
         fh.write("not a folder\n")
-    # Code that keeps lock files in its own folders sees no shared one here:
-    # the other server's folders (its private /tmp) are not this one's.
-    if hasattr(erg, "session_lock_dirs"):
-        mine = os.path.join(TMP, "private-here")
-        erg.session_lock_dirs = lambda: (mine + "/cache", mine + "/tmp/locks")
     counts = []
     for n in (30, 31, 32):
         sid = new_sid(n)
@@ -452,6 +461,7 @@ def main():
     erg = load()
     erg.print = lambda *a, **k: None
     checks = (check_quit_tells_every_tab, check_no_resume_while_stopping, check_two_servers,
+              check_conflict_everywhere,
               check_held_while_running_here, check_holder_labels, check_words, check_turn_without_inhibit,
               check_disjoint_envs, check_lock_writes_nothing, check_new_session_launch,
               check_one_proc_pass, check_lock_kept_while_grok_lives, check_cpu_callers_share,
