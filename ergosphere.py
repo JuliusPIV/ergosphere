@@ -4812,6 +4812,71 @@ def listen(args, tls, token):
         return None
 
 
+def sd_notify(message):
+    """Send one systemd notification. False when NOTIFY_SOCKET is unset or the send failed.
+
+    Protocol (sd_notify(3)): one datagram to the AF_UNIX socket in
+    NOTIFY_SOCKET; a leading "@" names the Linux abstract namespace.
+    """
+    addr = os.environ.get("NOTIFY_SOCKET", "")
+    if not addr or addr[0] not in "/@":
+        return False
+    if addr[0] == "@":
+        addr = "\0" + addr[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_CLOEXEC) as sock:
+            sock.connect(addr)
+            sock.sendall(message.encode("ascii"))
+    except OSError:
+        return False
+    return True
+
+
+def watchdog_interval():
+    """Seconds between WATCHDOG=1 pings (half of WATCHDOG_USEC), or None when not asked."""
+    if not os.environ.get("NOTIFY_SOCKET"):
+        return None
+    raw = os.environ.get("WATCHDOG_USEC", "")
+    if not raw.isdigit() or int(raw) <= 0:
+        return None
+    # WATCHDOG_PID names the process systemd expects pings from.
+    pid = os.environ.get("WATCHDOG_PID", "")
+    if pid and pid != str(os.getpid()):
+        return None
+    return int(raw) / 2e6
+
+
+def can_serve(httpd, timeout=2):
+    """True only when LIVE_LOCK is free within timeout and our own /health answers."""
+    if not LIVE_LOCK.acquire(timeout=timeout):
+        return False
+    LIVE_LOCK.release()
+    host, port = httpd.server_address[:2]
+    return inspect_health(host, port, httpd.tls, httpd.token) == "match"
+
+
+def start_watchdog(httpd):
+    """Ping the systemd watchdog only while the server can serve, so a hang is restarted."""
+    interval = watchdog_interval()
+    if interval is None:
+        return None
+
+    def loop():
+        healthy = True
+        while not STOP.wait(interval):
+            ok = can_serve(httpd)
+            if ok:
+                sd_notify("WATCHDOG=1")
+            if ok != healthy:
+                print("watchdog: %s" % ("healthy again, pinging" if ok else "self-check failed, ping skipped"), flush=True)
+                healthy = ok
+
+    thread = threading.Thread(target=loop, name="watchdog", daemon=True)
+    thread.start()
+    print("watchdog: on, self-check and ping every %.1fs" % interval, flush=True)
+    return thread
+
+
 def serve(args, config):
     tls = bool(args.tls_cert)
     # Unset ERGOSPHERE_TOKEN means no bearer check, including --bind 0.0.0.0.
@@ -4870,6 +4935,10 @@ def serve(args, config):
 
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
+    # Under systemd Type=notify: ready once listening (also after a restart,
+    # which keeps the pid), then watchdog pings while it can serve.
+    sd_notify("READY=1")
+    start_watchdog(httpd)
     try:
         httpd.serve_forever()
     finally:

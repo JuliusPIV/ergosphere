@@ -19,13 +19,17 @@ Ergosphere installer (installs the latest release unless --version is given)
 With a terminal it asks: Automatic (recommended) or Manual? [A/m]
 No terminal means automatic. Prerequisites are checked first and never installed.
   --auto       automatic, no questions
-  --manual     ask install dir, port, bind, optional agent (on /dev/tty)
+  --manual     ask install dir, port, bind, optional agent, start on boot (on /dev/tty)
   --dir DIR    install dir (default: \$HOME/.local/share/ergosphere)
   --port N     port (default: ERGOSPHERE_PORT, else ergosphere.json, else 9241)
   --bind ADDR  IPv4 address or localhost (default: ergosphere.json, else 127.0.0.1)
 Settings live in the file named by ERGOSPHERE_CONFIG when it is set, else in
 ergosphere.json next to ergosphere.py. A rerun keeps them;
 --bind and --port change only those two keys.
+  --service    run it as a systemd user unit (ergosphere.service): starts at
+               login (at boot with loginctl enable-linger), restarts if it
+               crashes or hangs. A rerun without this flag keeps the unit.
+  --no-service remove that unit and run it without systemd
   --yes        approve a non-loopback bind without asking
   --version vA.B.C  install this release instead of the latest (pin or roll back)
   --check      run the checks only; change nothing
@@ -44,6 +48,9 @@ cleanup() {
   # A server this run started but never verified is stopped, not left behind.
   if [[ -n "${STARTED_PID:-}" && "${VERIFIED:-0}" -eq 0 ]]; then
     kill "$STARTED_PID" 2>/dev/null || true
+  fi
+  if [[ "${UNIT_STARTED:-0}" -eq 1 && "${VERIFIED:-0}" -eq 0 ]]; then
+    systemctl --user stop ergosphere.service 2>/dev/null || true
   fi
   if [[ -n "${STAGE:-}" ]]; then
     rm -rf -- "$STAGE"
@@ -123,6 +130,8 @@ parse_args() {
       --auto) MODE=automatic ;;
       --manual) MODE=manual ;;
       --yes) ASSUME_YES=1 ;;
+      --service) SERVICE=1 ;;
+      --no-service) SERVICE=0 ;;
       --dir|--port|--bind|--version)
         [[ $# -ge 2 ]] || fail check "missing value for $1"
         case "$1" in
@@ -229,6 +238,177 @@ ask_manual() {
       printf 'not an existing absolute directory: %s\n' "$AGENT_DIR" >/dev/tty
     done
   fi
+  read_unit
+  if [[ -z "$SERVICE" && ( "$UNIT_STATE" == absent || "$UNIT_STATE" == ours ) ]]; then
+    local hint="y/N"
+    if [[ "$UNIT_STATE" == ours ]]; then hint="Y/n"; fi
+    ask "Start on login/boot and restart if it crashes or hangs (systemd user unit)? [$hint] "
+    case "${REPLY,,}" in
+      "") if [[ "$UNIT_STATE" == ours ]]; then SERVICE=1; else SERVICE=0; fi ;;
+      y|yes) SERVICE=1 ;;
+      n|no) SERVICE=0 ;;
+      *) fail check "answer y or n" ;;
+    esac
+  fi
+}
+
+# systemd user unit (--service). One per user, ergosphere.service, owned by
+# the install dir in its marker line; a unit without our marker is never touched.
+user_systemd() {
+  command -v systemctl >/dev/null && systemctl --user show-environment >/dev/null 2>&1
+}
+
+# A unit line holds these characters without quoting or %-specifiers.
+unit_safe() {
+  [[ "$1" =~ ^[A-Za-z0-9/._:+@-]+$ ]]
+}
+
+# Sets UNIT_FILE and UNIT_STATE: none (no systemd user manager), absent,
+# ours (marker names this install dir) or foreign.
+read_unit() {
+  UNIT_FILE="${XDG_CONFIG_HOME:-${HOME:-}/.config}/systemd/user/ergosphere.service"
+  if ! user_systemd; then
+    UNIT_STATE=none
+  elif [[ ! -e "$UNIT_FILE" ]]; then
+    UNIT_STATE=absent
+  elif grep -qxF "# ergosphere-install-dir: $DEST" "$UNIT_FILE" 2>/dev/null; then
+    UNIT_STATE=ours
+  else
+    UNIT_STATE=foreign
+  fi
+}
+
+# The unit's main pid, or nothing when it is not running.
+unit_main_pid() {
+  local pid
+  pid=$(systemctl --user show -p MainPID --value ergosphere.service 2>/dev/null) || pid=""
+  if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then printf '%s\n' "$pid"; fi
+}
+
+# Decides WANT_UNIT: --service, --no-service, else keep what is installed.
+check_unit() {
+  local main kids
+  read_unit
+  WANT_UNIT=0
+  case "$SERVICE:$UNIT_STATE" in
+    1:none) row missing service "--service needs a systemd user manager (systemctl --user)" ;;
+    1:foreign) row invalid service "$UNIT_FILE belongs to another install; it was not touched" ;;
+    1:*|:ours) WANT_UNIT=1 ;;
+    0:ours)
+      main=$(unit_main_pid)
+      kids=0
+      if [[ -n "$main" ]]; then kids=$(child_count "$main"); fi
+      if [[ "$kids" -gt 0 ]]; then
+        row invalid service "ergosphere.service (pid $main) has $kids grok session(s) open; rerun --no-service when they are done"
+      else
+        row ok service "$UNIT_FILE will be stopped, disabled and removed"
+      fi
+      ;;
+    *:foreign) row warn service "$UNIT_FILE is from another install; left alone" ;;
+    *:absent) row ok service "no systemd unit (--service starts it at login and restarts it if it crashes or hangs)" ;;
+  esac
+  if [[ "$WANT_UNIT" -eq 1 ]]; then
+    if ! unit_safe "$DEST" || ! unit_safe "$PYTHON" || ! unit_safe "$CFG_FILE"; then
+      row invalid service "a systemd unit needs install dir, python and config paths made of letters, digits and / . _ : + @ -"
+    elif [[ "$UNIT_STATE" == ours ]]; then
+      row ok service "$UNIT_FILE present (starts at login, restarts on crash or hang)"
+    else
+      row ok service "$UNIT_FILE will be written and enabled (starts at login, restarts on crash or hang)"
+    fi
+  fi
+}
+
+unit_text() {
+  local p path="" parts=()
+  # The server finds grok on PATH, as with the plain start: grok's dir first,
+  # then the PATH entries a unit line can hold.
+  IFS=: read -r -a parts <<<"${GROK%/*}:${PATH:-/usr/bin:/bin}"
+  for p in "${parts[@]}"; do
+    if [[ "$p" == /* ]] && unit_safe "$p" && [[ ":$path:" != *":$p:"* ]]; then path+="${path:+:}$p"; fi
+  done
+  printf '%s\n' "# Written by the Ergosphere installer; a rerun updates it, --no-service removes it." \
+    "# ergosphere-install-dir: $DEST" \
+    "[Unit]" \
+    "Description=Ergosphere web portal for grok sessions" \
+    "" \
+    "[Service]" \
+    "Type=notify" \
+    "WorkingDirectory=$DEST" \
+    "Environment=PATH=$path"
+  if [[ -n "${ERGOSPHERE_CONFIG:-}" ]]; then printf 'Environment=ERGOSPHERE_CONFIG=%s\n' "$CFG_FILE"; fi
+  printf '%s\n' "ExecStart=$PYTHON $DEST/ergosphere.py" \
+    "StandardOutput=append:$DEST/ergosphere.log" \
+    "StandardError=append:$DEST/ergosphere.log" \
+    "WatchdogSec=60" \
+    "Restart=always" \
+    "RestartSec=5" \
+    "" \
+    "[Install]" \
+    "WantedBy=default.target"
+}
+
+# Writes and enables the unit when it differs; reads both back.
+install_unit() {
+  local want
+  [[ "$WANT_UNIT" -eq 1 ]] || return 0
+  want=$(unit_text)
+  if [[ ! -f "$UNIT_FILE" || "$(cat -- "$UNIT_FILE")" != "$want" ]]; then
+    { mkdir -p -- "${UNIT_FILE%/*}" && printf '%s\n' "$want" >"$UNIT_FILE.part" &&
+      mv -f -- "$UNIT_FILE.part" "$UNIT_FILE"; } || fail service "could not write $UNIT_FILE"
+    systemctl --user daemon-reload || fail service "systemctl --user daemon-reload failed"
+    UNIT_CHANGED=1
+    printf 'service: wrote %s\n' "$UNIT_FILE"
+    CHANGED+=("ergosphere.service")
+  fi
+  [[ "$(cat -- "$UNIT_FILE")" == "$want" ]] || fail service "read-back: $UNIT_FILE does not hold the intended unit"
+  if ! systemctl --user is-enabled --quiet ergosphere.service 2>/dev/null; then
+    systemctl --user enable --quiet ergosphere.service || fail service "could not enable ergosphere.service"
+    CHANGED+=("enabled ergosphere.service")
+  fi
+  systemctl --user is-enabled --quiet ergosphere.service 2>/dev/null || fail service "read-back: ergosphere.service is not enabled"
+  printf 'service: ergosphere.service is enabled (read back)\n'
+}
+
+# --no-service: stop (check_unit saw no grok sessions), disable, remove.
+remove_unit() {
+  local main
+  [[ "$UNIT_STATE" == ours && "$WANT_UNIT" -eq 0 ]] || return 0
+  main=$(unit_main_pid)
+  if [[ -n "$main" ]]; then
+    [[ "$(child_count "$main")" -eq 0 ]] || fail service "ergosphere.service pid $main has grok sessions open; it was left running"
+    systemctl --user stop ergosphere.service || fail service "could not stop ergosphere.service"
+    CHANGED+=("stopped ergosphere.service")
+  fi
+  systemctl --user disable --quiet ergosphere.service 2>/dev/null || true
+  rm -f -- "$UNIT_FILE"
+  systemctl --user daemon-reload || fail service "systemctl --user daemon-reload failed"
+  if [[ -e "$UNIT_FILE" ]] || systemctl --user is-enabled --quiet ergosphere.service 2>/dev/null; then
+    fail service "read-back: ergosphere.service is still installed"
+  fi
+  printf 'service: removed %s (read back)\n' "$UNIT_FILE"
+  CHANGED+=("removed ergosphere.service")
+}
+
+# Starts or restarts the unit (Type=notify waits for READY=1) and reads back
+# that its main pid answers /health.
+start_unit() {
+  local verb=$1 main deadline
+  UNIT_STARTED=1
+  systemctl --user "$verb" ergosphere.service ||
+    fail start "systemctl --user $verb ergosphere.service failed; see journalctl --user -u ergosphere.service and $DEST/ergosphere.log"
+  deadline=$((SECONDS + 10))
+  while (( SECONDS < deadline )); do
+    main=$(unit_main_pid)
+    probe "$BIND" "$PORT"
+    if [[ "$PROBE" == match && -n "$main" && "$PROBE_PID" == "$main" ]]; then
+      VERIFIED=1 PID=$main
+      printf 'start: ergosphere.service %sed, pid %s on %s:%s (read back from /health and systemctl)\n' "$verb" "$PID" "$BIND" "$PORT"
+      CHANGED+=("server ${verb}ed by ergosphere.service")
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail start "ergosphere.service did not answer /health as its main pid on ${BIND}:${PORT}"
 }
 
 # probe BIND PORT. Sets PROBE to match (this product at that bind/port, from
@@ -555,6 +735,7 @@ socket.socket().bind((sys.argv[1], 0))' "$BIND" 2>/dev/null; then
   else
     row warn bind "$BIND: anyone who can reach port $PORT can run grok as this user"
   fi
+  check_unit
   find_release
   if [[ ${#BLOCKERS[@]} -gt 0 ]]; then
     fail check "blocked by ${BLOCKERS[*]} (see above); nothing was changed"
@@ -685,7 +866,7 @@ has_addr_args() {
 # The server reads bind and port from ergosphere.json, so it runs with no
 # address arguments and without ERGOSPHERE_PORT, which would override the file.
 start_server() {
-  local out deadline kids why=""
+  local out deadline kids why="" main=""
   out=$(cd -- "$DEST" && unset ERGOSPHERE_PORT && "$PYTHON" ergosphere.py --check </dev/null 2>&1) ||
     fail install "ergosphere.py --check failed: ${out//$'\n'/; }"
   SRV_BIND=$BIND SRV_PORT=$PORT
@@ -695,6 +876,8 @@ start_server() {
   if [[ "$PROBE" == match || "$PROBE" == moved ]]; then
     same_install
     PID=$PROBE_PID
+    main=""
+    if [[ "$WANT_UNIT" -eq 1 ]]; then main=$(unit_main_pid); fi
     if [[ "$PROBE" == moved ]] || ! same_addr "$PROBE_AT" "$BIND:$PORT"; then
       why="settings moved it from $PROBE_AT to ${BIND}:${PORT}"
     elif server_stale; then
@@ -704,6 +887,10 @@ start_server() {
     elif [[ "$AGENT_ADDED" -eq 1 ]]; then
       # The server reads agents at startup.
       why="agent $AGENT was added"
+    elif [[ "$WANT_UNIT" -eq 1 && "$PID" != "$main" ]]; then
+      why="ergosphere.service takes it over"
+    elif [[ "$WANT_UNIT" -eq 1 && "$UNIT_CHANGED" -eq 1 ]]; then
+      why="ergosphere.service changed"
     fi
     if [[ -z "$why" ]]; then
       printf 'start: already running, pid %s (read back from /health)\n' "$PID"
@@ -716,10 +903,17 @@ start_server() {
       if [[ "$kids" -eq 1 ]]; then noun="grok session"; fi
       SRV_BIND=${PROBE_AT%:*} SRV_PORT=${PROBE_AT##*:}
       SERVER_NOTE="Ergosphere pid $PID keeps running as before ($why) because it has $kids $noun open; when they are done run: kill $PID, then rerun this installer"
+      if [[ "$WANT_UNIT" -eq 1 && "$PID" == "$main" ]]; then
+        SERVER_NOTE="Ergosphere pid $PID keeps running as before ($why) because it has $kids $noun open; when they are done run: systemctl --user restart ergosphere"
+      fi
       printf 'start: already running, pid %s, not restarted (%s %s open): %s\n' "$PID" "$kids" "$noun" "$why"
       return 0
     fi
     printf 'start: restarting pid %s (no grok sessions): %s\n' "$PID" "$why"
+    if [[ "$WANT_UNIT" -eq 1 && "$PID" == "$main" ]]; then
+      start_unit restart
+      return 0
+    fi
     kill "$PID" 2>/dev/null || true
     deadline=$((SECONDS + 10))
     while kill -0 "$PID" 2>/dev/null && (( SECONDS < deadline )); do sleep 0.2; done
@@ -728,6 +922,10 @@ start_server() {
     probe "$BIND" "$PORT"
   fi
   [[ "$PROBE" == down ]] || fail start "port $PORT is in use by something that is not this Ergosphere; it was not touched"
+  if [[ "$WANT_UNIT" -eq 1 ]]; then
+    start_unit start
+    return 0
+  fi
   # cwd is the install dir. The server finds grok with shutil.which, so
   # keep grok's dir on PATH. exec keeps $! as the server's pid.
   (
@@ -782,7 +980,15 @@ summary() {
   printf '  mode:     %s\n' "$MODE"
   printf '  log:      %s\n' "$DEST/ergosphere.log"
   printf '  pid:      %s\n' "$PID"
-  printf '  stop:     kill %s   (also stops the grok sessions it started; closing a tab does not)\n' "$PID"
+  if [[ "$WANT_UNIT" -eq 1 ]]; then
+    printf '  service:  %s (enabled: starts at login, restarts if it crashes or hangs)\n' "$UNIT_FILE"
+    if [[ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || true)" != yes ]]; then
+      printf '            To start at boot before you log in: loginctl enable-linger %s (may need sudo)\n' "$(id -un)"
+    fi
+    printf '  stop:     systemctl --user stop ergosphere   (kill restarts it; stopping also ends its grok sessions)\n'
+  else
+    printf '  stop:     kill %s   (also stops the grok sessions it started; closing a tab does not)\n' "$PID"
+  fi
   printf '  rerun:    %s\n' "$rerun"
   for c in "${CHANGED[@]}"; do list+="${list:+, }$c"; done
   if [[ -z "$list" && -n "$SERVER_NOTE" ]]; then list="nothing; the running server is not updated yet (see note)"; fi
@@ -827,6 +1033,7 @@ main() {
   AGENT="" AGENT_DIR="" CFG_FILE="" LEGACY_FILE="" CFG_AGENTS="(none)" CFG_NOTE="" SERVER_NOTE="" PID=""
   STAGE="" SRC="" STARTED_PID="" VERIFIED=0 PROBE="" PROBE_PID="" PROBE_DIGEST="" PROBE_AT=""
   PYTHON="" CURL="" GROK="" BLOCKERS=() CHANGED=()
+  SERVICE="" UNIT_FILE="" UNIT_STATE="" WANT_UNIT=0 UNIT_CHANGED=0 UNIT_STARTED=0
   export PYTHONDONTWRITEBYTECODE=1
   trap cleanup EXIT
   trap 'exit 130' INT
@@ -856,6 +1063,8 @@ main() {
   download
   install_files
   write_config
+  remove_unit
+  install_unit
   start_server
   summary
 }
