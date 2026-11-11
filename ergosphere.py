@@ -1775,11 +1775,22 @@ class Live:
         # The reader left its loop on `closed`, before grok exited, so it
         # did not tell the other tabs. Do it here.
         self._publish_ended()
-        self.release_lock()
+        if self.proc.poll() is not None:
+            self.release_lock()
+        else:
+            # grok outlived SIGKILL + 3 s: keep the lock until it is gone.
+            threading.Thread(target=self._release_on_exit, daemon=True).start()
         try:
             os.close(self.master)
         except OSError:
             pass
+
+    def _release_on_exit(self):
+        try:
+            self.proc.wait()
+        except Exception:
+            return
+        self.release_lock()
 
 
 class _Client:
@@ -1935,8 +1946,16 @@ def _newest_write(sid):
     return newest
 
 
+CPU_BASE_SECS = 1.0
+
+
 def _cpu_pct(pid):
-    """CPU percent of pid since the previous call for it, or None."""
+    """Recent CPU percent of pid, or None before a first measurement.
+
+    Shared by every caller (list poll, chat polls): one baseline per pid,
+    renewed only once it is CPU_BASE_SECS old, and the last result is
+    returned to callers in between, so close calls do not reset each other.
+    """
     fields = proc_stat_fields(pid)
     if len(fields) < 13:
         return None
@@ -1946,13 +1965,16 @@ def _cpu_pct(pid):
         return None
     now = time.time()
     with _CPU_LOCK:
-        prev = _CPU_SEEN.get(pid)
-        _CPU_SEEN[pid] = (now, ticks)
+        base_at, base_ticks, last = _CPU_SEEN.get(pid, (None, None, None))
+        if base_at is None or now - base_at > 120 or ticks < base_ticks:
+            last = None
+            _CPU_SEEN[pid] = (now, ticks, None)
+        elif now - base_at >= CPU_BASE_SECS:
+            last = 100.0 * (ticks - base_ticks) / os.sysconf("SC_CLK_TCK") / (now - base_at)
+            _CPU_SEEN[pid] = (now, ticks, last)
         if len(_CPU_SEEN) > 512:
             _CPU_SEEN.clear()
-    if not prev or now - prev[0] < 0.2 or now - prev[0] > 120 or ticks < prev[1]:
-        return None
-    return 100.0 * (ticks - prev[1]) / os.sysconf("SC_CLK_TCK") / (now - prev[0])
+    return last
 
 
 def proc_started(pid):

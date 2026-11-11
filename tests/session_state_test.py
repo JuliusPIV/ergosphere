@@ -359,13 +359,45 @@ def check_one_proc_pass(erg):
     return None
 
 
+def check_lock_kept_while_grok_lives(erg):
+    # Quit, but grok outlives the kill: the session lock stays until it exits.
+    sid = new_sid(14)
+    live, _ = erg.open_live(sid, [GROK, "-c", "import signal,time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(60)\n", "--resume", sid], CWD, 80, 24)
+    time.sleep(0.3)
+    real = erg.kill_proc
+    erg.kill_proc = lambda proc: None  # stands in for a grok stuck past SIGKILL + 3 s
+    try:
+        live.shutdown()
+    finally:
+        erg.kill_proc = real
+    held = live.lock_fd is not None
+    os.kill(live.proc.pid, signal.SIGKILL)
+    released = wait_for(lambda: live.lock_fd is None, 5)
+    if not held or not released:
+        return "lock: released while grok still ran (%s) or kept after it exited (%s)" % (not held, not released)
+    return None
+
+
+def check_cpu_callers_share(erg):
+    # Two pollers close together both see a busy grok's CPU use.
+    busy = popen([sys.executable, "-c", "while True: pass"])
+    erg._cpu_pct(busy.pid)
+    time.sleep(1.3)
+    first = erg._cpu_pct(busy.pid)
+    second = erg._cpu_pct(busy.pid)  # another poller right after
+    busy.kill()
+    if first is None or second is None or second < 50:
+        return "cpu: a second caller right after the first saw %r (first %r)" % (second, first)
+    return None
+
+
 def main():
     erg = load()
     erg.print = lambda *a, **k: None
     checks = (check_quit_tells_every_tab, check_no_resume_while_stopping, check_two_servers,
               check_held_while_running_here, check_holder_labels, check_words, check_turn_without_inhibit,
               check_no_lock_folder, check_two_servers_no_cache, check_all_lock_folders_fail,
-              check_one_proc_pass)
+              check_one_proc_pass, check_lock_kept_while_grok_lives, check_cpu_callers_share)
     failures = []
     try:
         for check in checks:
