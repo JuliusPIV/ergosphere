@@ -31,6 +31,10 @@ os.makedirs(BIN)
 os.makedirs(CWD)
 os.symlink(sys.executable, GROK)
 os.environ["HOME"] = HOME
+os.environ.pop("XDG_RUNTIME_DIR", None)  # lock folders: ~/.cache, then the temp dir
+LOCK_TMP = os.path.join(TMP, "systmp")  # stands in for the system temp dir
+os.makedirs(LOCK_TMP)
+tempfile.tempdir = LOCK_TMP
 # A fake grok: exits 0.8 s after SIGTERM, like a real one finishing up.
 FAKE = ("import signal,sys,time\n"
         "signal.signal(signal.SIGTERM, lambda *a: (time.sleep(0.8), sys.exit(0)))\n"
@@ -152,15 +156,22 @@ def check_no_resume_while_stopping(erg):
     return None
 
 
-def check_two_servers(erg):
-    sid = new_sid(3)
+def other_server(sid):
+    """A second Ergosphere process (same HOME and temp dir) that starts sid."""
+    env = dict(os.environ, TMPDIR=LOCK_TMP)
     other = popen([sys.executable, "-B", "-c",
                    "import importlib.util,sys,time\n"
                    "s=importlib.util.spec_from_file_location('e',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\n"
                    "m.open_live(sys.argv[2], [sys.argv[3], '-c', sys.argv[4], '--resume', sys.argv[2]], sys.argv[5], 80, 24)\n"
                    "print('up', flush=True); time.sleep(30)\n",
-                   str(ROOT / "ergosphere.py"), sid, GROK, FAKE, CWD], stdout=subprocess.PIPE)
+                   str(ROOT / "ergosphere.py"), sid, GROK, FAKE, CWD], stdout=subprocess.PIPE, env=env)
     other.stdout.readline()
+    return other
+
+
+def check_two_servers(erg):
+    sid = new_sid(3)
+    other = other_server(sid)
     refused = False
     try:
         erg.open_live(sid, fake_cmd(sid), CWD, 80, 24)
@@ -253,21 +264,68 @@ def check_turn_without_inhibit(erg):
     return None
 
 
-def check_no_lock_folder(erg):
-    sid = new_sid(8)
+def no_cache_home():
+    """A HOME whose ~/.cache is a file: the first lock folder cannot be made."""
     home2 = os.path.join(TMP, "home-ro")
-    os.makedirs(home2)
-    with open(os.path.join(home2, ".cache"), "w") as fh:
-        fh.write("not a folder\n")  # the lock folder cannot be made
-    os.environ["HOME"] = home2
+    if not os.path.isdir(home2):
+        os.makedirs(home2)
+        with open(os.path.join(home2, ".cache"), "w") as fh:
+            fh.write("not a folder\n")
+    return home2
+
+
+def check_no_lock_folder(erg):
+    # ~/.cache unusable: the lock moves to the next folder, the launch works.
+    sid = new_sid(8)
+    os.environ["HOME"] = no_cache_home()
     try:
         erg.open_live(sid, fake_cmd(sid), CWD, 80, 24)
     except Exception as exc:
-        return "lock: a launch fails when the lock folder cannot be made: %s" % exc
+        return "lock: a launch fails when ~/.cache cannot be used: %s" % exc
     finally:
         os.environ["HOME"] = HOME
-    if len(groks_for(sid)) != 1:
-        return "lock: no grok after a launch without the lock folder"
+    lock = os.path.join(LOCK_TMP, "ergosphere-%d" % os.getuid(), "locks", sid + ".lock")
+    if len(groks_for(sid)) != 1 or not os.path.exists(lock):
+        return "lock: without ~/.cache the launch did not use the temp-dir lock"
+    return None
+
+
+def check_two_servers_no_cache(erg):
+    # Both servers fall back to the same folder, so one start still wins.
+    sid = new_sid(9)
+    os.environ["HOME"] = no_cache_home()
+    try:
+        other = other_server(sid)
+        try:
+            erg.open_live(sid, fake_cmd(sid), CWD, 80, 24)
+        except Exception:
+            pass
+        n = len(groks_for(sid))
+        os.kill(other.pid, signal.SIGKILL)
+    finally:
+        os.environ["HOME"] = HOME
+    if n != 1:
+        return "lock: two servers without ~/.cache started %d groks for one session" % n
+    return None
+
+
+def check_all_lock_folders_fail(erg):
+    # Nowhere to lock: refuse with a plain message, start nothing.
+    sid = new_sid(13)
+    private = os.path.join(LOCK_TMP, "ergosphere-%d" % os.getuid())
+    os.makedirs(private, exist_ok=True)
+    os.chmod(private, 0o777)  # others could write it: not used
+    os.environ["HOME"] = no_cache_home()
+    try:
+        erg.open_live(sid, fake_cmd(sid), CWD, 80, 24)
+        message = ""
+    except Exception as exc:
+        message = str(exc)
+    finally:
+        os.environ["HOME"] = HOME
+        os.chmod(private, 0o700)
+    if groks_for(sid) or "no folder for session lock files" not in message or "Errno" in message:
+        return "lock: with no usable lock folder the start was not refused plainly: %r" % message
     return None
 
 
@@ -300,7 +358,8 @@ def main():
     erg.print = lambda *a, **k: None
     checks = (check_quit_tells_every_tab, check_no_resume_while_stopping, check_two_servers,
               check_held_while_running_here, check_holder_labels, check_words, check_turn_without_inhibit,
-              check_no_lock_folder, check_one_proc_pass)
+              check_no_lock_folder, check_two_servers_no_cache, check_all_lock_folders_fail,
+              check_one_proc_pass)
     failures = []
     try:
         for check in checks:

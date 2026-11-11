@@ -28,6 +28,7 @@ import shutil
 import signal
 import socket
 import ssl
+import stat
 import struct
 import subprocess
 import sys
@@ -1296,13 +1297,41 @@ class SessionBusy(RuntimeError):
         self.state = state
 
 
-def session_lock_path(sid):
-    # Outside ~/.grok, but under the same HOME every server of this user
-    # shares. XDG_RUNTIME_DIR is not set for system units, so not there.
-    return os.path.join(os.path.expanduser("~/.cache"), "ergosphere", "locks", sid + ".lock")
+def session_lock_dirs():
+    """Where session locks may live, in a fixed order.
+
+    Every server of this user tries the same list and uses the first folder
+    that works, so they meet on the same lock file. ~/.cache first (one HOME
+    for every server; XDG_RUNTIME_DIR is not set for system units), then
+    XDG_RUNTIME_DIR when set, then a private folder in the system temp dir.
+    """
+    dirs = [os.path.join(os.path.expanduser("~/.cache"), "ergosphere", "locks")]
+    run = os.environ.get("XDG_RUNTIME_DIR")
+    if run and os.path.isabs(run):
+        dirs.append(os.path.join(run, "ergosphere", "locks"))
+    dirs.append(os.path.join(tempfile.gettempdir(), "ergosphere-%d" % os.getuid(), "locks"))
+    return dirs
 
 
-NO_LOCK = -1
+def _private_dir(path):
+    """Make path and its parent (mode 0700) in the shared temp dir, and
+    refuse them unless they are this user's own folders.
+
+    A folder there that someone else made, or that others can write, could
+    be swapped under us.
+    """
+    for folder in (os.path.dirname(path), path):
+        try:
+            os.mkdir(folder, 0o700)
+        except FileExistsError:
+            pass
+        info = os.lstat(folder)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+            raise OSError(errno.EPERM, "not a private folder", folder)
+
+
+class SessionLockUnavailable(RuntimeError):
+    """No lock folder works, so a start could race another server."""
 
 
 def acquire_session_lock(sid):
@@ -1312,21 +1341,35 @@ def acquire_session_lock(sid):
     Ergosphere server cannot start the same session in the window between
     its holder check and its spawn (grok itself does not refuse a second
     open). The kernel drops the lock if this server dies. Returns the fd,
-    or None when another process holds the lock. Raises OSError when the
-    lock file cannot be made (read-only or foreign-owned cache folder).
+    or None when another process holds the lock. Raises
+    SessionLockUnavailable when no folder in session_lock_dirs() works.
     """
-    path = session_lock_path(sid)
-    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        os.close(fd)
-        return None
-    except OSError:
-        os.close(fd)
-        raise
-    return fd
+    problems = []
+    shared_tmp = tempfile.gettempdir()
+    for folder in session_lock_dirs():
+        try:
+            if folder.startswith(shared_tmp + os.sep):
+                _private_dir(folder)
+            else:
+                os.makedirs(folder, mode=0o700, exist_ok=True)
+            fd = os.open(os.path.join(folder, sid + ".lock"), os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+        except OSError as exc:
+            problems.append("%s (%s)" % (folder, exc.strerror or exc))
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            return None
+        except OSError as exc:
+            os.close(fd)
+            problems.append("%s (%s)" % (folder, exc.strerror or exc))
+            continue
+        return fd
+    raise SessionLockUnavailable("no folder for session locks works: " + "; ".join(problems))
+
+
+_LOCK_LOGGED = []
 
 
 def spawn_grok(cmd, cwd, cols, rows):
@@ -1760,25 +1803,30 @@ def open_live(sid, cmd, cwd, cols, rows):
         no_lock = None
         try:
             fd = acquire_session_lock(sid)
-        except OSError as exc:
-            # No lock file possible: start without the cross-server lock,
-            # as before it existed. The holder scan still applies.
-            fd, no_lock = NO_LOCK, exc
-        if fd is None:
-            raise SessionBusy("held-by-other-server", "session is open in another Ergosphere server")
-        try:
-            proc, master = spawn_grok(cmd, cwd, cols, rows)
-        except Exception:
-            if fd != NO_LOCK:
+        except SessionLockUnavailable as exc:
+            no_lock = exc
+        if no_lock is None:
+            if fd is None:
+                raise SessionBusy("held-by-other-server", "session is open in another Ergosphere server")
+            try:
+                proc, master = spawn_grok(cmd, cwd, cols, rows)
+            except Exception:
                 os.close(fd)
-            raise
-        live = Live(sid, proc, master, cwd)
-        live.lock_fd = None if fd == NO_LOCK else fd
-        LIVE[sid] = live
-        live.start()
+                raise
+            live = Live(sid, proc, master, cwd)
+            live.lock_fd = fd
+            LIVE[sid] = live
+            live.start()
     # Log after release: a stalled log write must not block other launches.
     if no_lock is not None:
-        print("session lock unavailable, started without it: %s" % no_lock, flush=True)
+        # Refuse rather than risk two groks on one session; log the folders once.
+        if not _LOCK_LOGGED:
+            _LOCK_LOGGED.append(True)
+            print("session lock: %s" % no_lock, flush=True)
+        raise RuntimeError(
+            "cannot start: no folder for session lock files is writable "
+            "(~/.cache/ergosphere, XDG_RUNTIME_DIR or the temp dir); see the server log"
+        )
     print("term pid=%s sid=%s cmd=%s" % (proc.pid, sid, " ".join(cmd)), flush=True)
     return live, False
 
