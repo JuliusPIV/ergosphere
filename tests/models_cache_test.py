@@ -93,6 +93,42 @@ def main():
     if err or [m["id"] for m in models] != ["grok-b"]:
         failures.append("failed refresh lost the old list: %r %r" % (models, err))
 
+    # 6. A refresh thread that cannot start: old list served, flag cleared,
+    # and a later stale request starts a refresh.
+    script["code"] = 0
+    script["out"] = "  - grok-c (default)\n"
+    # Step 5's last call may have started another (failing) refresh: let it end.
+    for _ in range(50):
+        if not erg._MODELS_CACHE["refreshing"]:
+            break
+        time.sleep(0.1)
+    erg._MODELS_CACHE["value"] = ([{"id": "grok-b", "efforts": []}], "")
+    erg._MODELS_CACHE["at"] -= erg.MODELS_TTL + 1
+    real_start = threading.Thread.start
+
+    def failing_start(self):
+        threading.Thread.start = real_start
+        raise RuntimeError("can't start new thread")
+
+    threading.Thread.start = failing_start
+    try:
+        models, err = erg.grok_models_list()
+    except RuntimeError as exc:
+        failures.append("thread start failure leaked to the request: %s" % exc)
+        models, err = [], "raised"
+    finally:
+        threading.Thread.start = real_start
+    if err or [m["id"] for m in models] != ["grok-b"]:
+        failures.append("thread start failure did not serve the old list: %r %r" % (models, err))
+    if erg._MODELS_CACHE["refreshing"]:
+        failures.append("thread start failure left the refreshing flag set")
+    before = len(calls)
+    erg.grok_models_list()
+    time.sleep(SLOW + 0.5)
+    models, err = erg.grok_models_list()
+    if len(calls) - before != 1 or [m["id"] for m in models] != ["grok-c"]:
+        failures.append("no refresh after a failed thread start: %d runs, %r" % (len(calls) - before, models))
+
     for line in failures:
         print("FAIL " + line)
     if failures:

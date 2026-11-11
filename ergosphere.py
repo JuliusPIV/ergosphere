@@ -1016,7 +1016,12 @@ def grok_models_list():
             stale = time.monotonic() - _MODELS_CACHE["at"] >= MODELS_TTL
             if stale and not _MODELS_CACHE["refreshing"]:
                 _MODELS_CACHE["refreshing"] = True
-                threading.Thread(target=_refresh_models, name="grok-models", daemon=True).start()
+                try:
+                    threading.Thread(target=_refresh_models, name="grok-models", daemon=True).start()
+                except RuntimeError as exc:
+                    # No thread, no refresh: clear the flag so a later request retries.
+                    _MODELS_CACHE["refreshing"] = False
+                    print("models: could not start a refresh, keeping the last list: %s" % exc, file=sys.stderr, flush=True)
             return cached
         value = run_grok_models()
         # Errors are not cached: a fixed login must show on the next request.
