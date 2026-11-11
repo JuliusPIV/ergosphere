@@ -1925,6 +1925,7 @@ def dashboard_page(sessions, agents, cwd_defaults):
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ergosphere</title>
 <style>
 body { background: #000; color: #fff; font: 14px/1.45 ui-monospace, monospace; margin: 0; padding: 0.6rem 0.8rem 3rem; }
@@ -1973,6 +1974,14 @@ footer { position: fixed; left: 0; right: 0; bottom: 0; width: 100%; box-sizing:
 #new-agent .combo-list[hidden] { display: none; }
 #new-agent .combo-list .opt { font: inherit; color: #fff; background: #000; padding: 0 2px; line-height: 1.45; margin: 0; cursor: pointer; overflow-wrap: anywhere; }
 #new-agent .combo-list .opt.hi { background: #fff; color: #000; }
+@media (max-width: 40rem) {
+#corner { position: static; text-align: right; margin: 0 0 0.4rem; }
+.head, a.row.session { grid-template-columns: 19ch minmax(0, 1fr); }
+.head button[data-col="sid"], a.row.session .c-sid { display: none; }
+.head button[data-col="cwd"], a.row.session .c-cwd { grid-column: 1 / -1; }
+a.row.session .c-cwd { padding-left: 2ch; }
+footer { display: none; }
+}
 </style>
 </head>
 <body>
@@ -2700,6 +2709,7 @@ def settings_page(state):
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Settings - Ergosphere</title>
 <style>
 body { background: #000; color: #fff; font: 14px/1.45 ui-monospace, monospace; margin: 0; padding: 0.6rem 0.8rem 3rem; }
@@ -2958,6 +2968,7 @@ def chat_pick_page():
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ergosphere</title>
 <style>
 html, body { height: 100%; margin: 0; background: #111; color: #ddd; font: 14px sans-serif; }
@@ -3017,6 +3028,7 @@ def chat_page(resume="", holder=None, running=False, title=""):
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>@@DOC_TITLE@@</title>
 <link rel="stylesheet" href="/vendor/xterm.css">
 <style>
@@ -3037,6 +3049,17 @@ html, body { height: 100%; margin: 0; background: #111; color: #ddd; font: 14px 
 #busy button { font: 14px/1.45 ui-monospace, monospace; color: #fff; background: #000; border: 1px solid #fff; padding: 0 0.5rem; cursor: pointer; margin-top: 0.6rem; }
 #busy button:hover, #busy button:focus { background: #fff; color: #000; outline: none; }
 @@TERM_CSS@@
+@media (max-width: 40rem) {
+#bar { height: 56px; flex-wrap: wrap; align-content: center; column-gap: 0.6rem; row-gap: 0.2rem; padding-right: 0.6rem; white-space: nowrap; overflow: hidden; font-size: 0; }
+#bar > * { font-size: 14px; }
+#bar::after { content: ""; flex: 0 0 100%; order: 1; height: 0; }
+#status, #title { order: 2; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#status { flex: 0 1 auto; }
+#title { flex: 1 1 0; min-width: 7.5rem; }
+#title::before { content: "| "; }
+#version, #sid, #title-gap { display: none; }
+#wrap { height: calc(100vh - 56px); }
+}
 </style>
 </head>
 <body>
