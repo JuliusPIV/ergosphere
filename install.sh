@@ -23,7 +23,8 @@ No terminal means automatic. Prerequisites are checked first and never installed
   --dir DIR    install dir (default: \$HOME/.local/share/ergosphere)
   --port N     port (default: ERGOSPHERE_PORT, else ergosphere.json, else 9241)
   --bind ADDR  IPv4 address or localhost (default: ergosphere.json, else 127.0.0.1)
-Settings live in ergosphere.json next to ergosphere.py. A rerun keeps them;
+Settings live in the file named by ERGOSPHERE_CONFIG when it is set, else in
+ergosphere.json next to ergosphere.py. A rerun keeps them;
 --bind and --port change only those two keys.
   --yes        approve a non-loopback bind without asking
   --check      run the checks only; change nothing
@@ -417,6 +418,7 @@ if d == before:
 # Named like the server temp files, which .gitignore covers.
 part = os.path.join(os.path.dirname(cfg), ".ergosphere.json.install.tmp")
 try:
+    os.makedirs(os.path.dirname(cfg), exist_ok=True)
     with open(part, "w", encoding="utf-8") as f:
         f.write(json.dumps(d, indent=2) + "\n")
         f.flush()
@@ -429,11 +431,26 @@ if load(cfg) != d:
 print("wrote")' "$@" </dev/null
 }
 
+# The file the server reads: ERGOSPHERE_CONFIG when set (relative to the
+# server's cwd, the install dir), else ergosphere.json next to ergosphere.py.
+# A legacy cwd-defaults.json is looked for next to it, as the server does.
+set_config_file() {
+  local c=${ERGOSPHERE_CONFIG:-}
+  if [[ -z "$c" ]]; then
+    CFG_FILE="$DEST/ergosphere.json"
+  else
+    if [[ "$c" == \~ || "$c" == \~/* ]]; then c="${HOME:-}${c:1}"; fi
+    if [[ "$c" != /* ]]; then c="$DEST/$c"; fi
+    CFG_FILE=$c
+  fi
+  LEGACY_FILE="${CFG_FILE%/*}/cwd-defaults.json"
+}
+
 # Sets CFG_SOURCE (json, legacy or new), CFG_BIND, CFG_PORT, CFG_AGENTS and
 # AGENT_STATE (none, new, same, differs) from the config on disk.
 read_config() {
   local out k v
-  out=$(cfg_py read "$DEST/ergosphere.json" "$DEST/cwd-defaults.json" "$AGENT" "$AGENT_DIR" 2>&1) ||
+  out=$(cfg_py read "$CFG_FILE" "$LEGACY_FILE" "$AGENT" "$AGENT_DIR" 2>&1) ||
     fail check "$out"
   while IFS=$'\t' read -r k v; do
     case "$k" in
@@ -449,6 +466,7 @@ read_config() {
 # Resolves bind and port: --bind/--port (or ERGOSPHERE_PORT) > ergosphere.json
 # > defaults. OLD_* is where a server from this install should be listening now.
 load_config() {
+  set_config_file
   read_config
   set_bind "${CFG_BIND:-127.0.0.1}"
   set_port "${CFG_PORT:-9241}"
@@ -460,13 +478,13 @@ load_config() {
 
 # Checks that depend on the chosen settings. Still before any download.
 check_target() {
-  local cfg="$DEST/ergosphere.json" up old=0
+  local cfg=$CFG_FILE up old=0
   printf 'Checking install target:\n'
   if [[ -e "$DEST" && ! -d "$DEST" ]]; then
     row invalid dir "$DEST exists and is not a directory"
   elif [[ -d "$DEST" && ( ! -w "$DEST" || ! -x "$DEST" ) ]]; then
     row invalid dir "$DEST is not writable"
-  elif [[ -d "$DEST" && ! -f "$DEST/ergosphere.py" && ! -f "$cfg" && ! -f "$DEST/cwd-defaults.json" && -n "$(ls -A -- "$DEST")" ]]; then
+  elif [[ -d "$DEST" && ! -f "$DEST/ergosphere.py" && ! -f "$DEST/ergosphere.json" && ! -f "$DEST/cwd-defaults.json" && -n "$(ls -A -- "$DEST")" ]]; then
     row invalid dir "$DEST is not empty and is not an Ergosphere install"
   elif [[ -d "$DEST" ]]; then
     row ok dir "$DEST exists"
@@ -603,14 +621,14 @@ install_files() {
 # when given, a manual agent when its name is new. cwd-defaults.json is never
 # changed. The result is read back.
 write_config() {
-  local cfg="$DEST/ergosphere.json" out sb=0 sp=0
+  local cfg=$CFG_FILE out sb=0 sp=0
   if [[ -n "$ARG_BIND" ]]; then sb=1; fi
   if [[ -n "$ARG_PORT" ]]; then sp=1; fi
   if [[ "$AGENT_STATE" == differs ]]; then
-    CFG_NOTE="agent ${AGENT} not changed, use Settings (ergosphere.json has another directory for it)"
+    CFG_NOTE="agent ${AGENT} not changed, use Settings ($cfg has another directory for it)"
   fi
   if [[ -n "$AGENT" && "$AGENT_STATE" == new && "$CFG_SOURCE" == json ]]; then AGENT_ADDED=1; fi
-  out=$(cfg_py write "$cfg" "$DEST/cwd-defaults.json" "$BIND" "$PORT" "$sb" "$sp" "$AGENT" "$AGENT_DIR" 2>&1) ||
+  out=$(cfg_py write "$cfg" "$LEGACY_FILE" "$BIND" "$PORT" "$sb" "$sp" "$AGENT" "$AGENT_DIR" 2>&1) ||
     fail install "$out"
   read_config
   [[ "$CFG_SOURCE" == json && ( -z "$CFG_BIND" || "${CFG_BIND,,}" == "${BIND,,}" ) &&
@@ -727,7 +745,7 @@ summary() {
   printf '  bind:     %s\n' "$BIND"
   printf '  port:     %s\n' "$PORT"
   printf '  dir:      %s\n' "$DEST"
-  printf '  config:   %s\n' "$DEST/ergosphere.json"
+  printf '  config:   %s\n' "$CFG_FILE"
   printf '            Change settings in the web page under Settings, or rerun with --bind/--port.\n'
   printf '  agents:   %s\n' "$CFG_AGENTS"
   if [[ -n "$CFG_NOTE" ]]; then printf '  note:     %s\n' "$CFG_NOTE"; fi
@@ -778,7 +796,7 @@ main() {
   DEFAULT_DEST="${HOME:-}/.local/share/ergosphere"
   DEST=$DEFAULT_DEST BIND=127.0.0.1 PORT=9241 ARG_BIND="" ARG_PORT="" MODE="" WANT_CHECK=0 ASSUME_YES=0
   OLD_BIND="" OLD_PORT="" SRV_BIND="" SRV_PORT="" CFG_SOURCE="" CFG_BIND="" CFG_PORT="" AGENT_STATE=none AGENT_ADDED=0
-  AGENT="" AGENT_DIR="" CFG_AGENTS="(none)" CFG_NOTE="" SERVER_NOTE="" PID=""
+  AGENT="" AGENT_DIR="" CFG_FILE="" LEGACY_FILE="" CFG_AGENTS="(none)" CFG_NOTE="" SERVER_NOTE="" PID=""
   STAGE="" SRC="" STARTED_PID="" VERIFIED=0 PROBE="" PROBE_PID="" PROBE_DIGEST="" PROBE_AT=""
   PYTHON="" CURL="" GROK="" BLOCKERS=() CHANGED=()
   export PYTHONDONTWRITEBYTECODE=1
