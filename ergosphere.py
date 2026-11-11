@@ -1532,8 +1532,9 @@ def open_live(sid, cmd, cwd, cols, rows):
         live = Live(sid, proc, master, cwd)
         LIVE[sid] = live
         live.start()
-        print("term pid=%s sid=%s cmd=%s" % (proc.pid, sid, " ".join(cmd)), flush=True)
-        return live, False
+    # Log after release: a stalled log write must not block other launches.
+    print("term pid=%s sid=%s cmd=%s" % (proc.pid, sid, " ".join(cmd)), flush=True)
+    return live, False
 
 
 def list_live():
@@ -4191,9 +4192,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         with LIVE_LOCK:
             live = LIVE.get(sid)
-            if live is not None and live.alive():
-                self._json(200, {"ok": True, "id": sid})
-                return
+            running = live is not None and live.alive()
+        # Reply after release: a slow client must not hold LIVE_LOCK.
+        if running:
+            self._json(200, {"ok": True, "id": sid})
+            return
         if session_holder(sid):
             self._json(409, {"ok": False, "held": True, "error": "session is already running"})
             return
