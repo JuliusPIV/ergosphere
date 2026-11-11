@@ -1137,10 +1137,14 @@ def checked_model_effort(model, effort):
     # A launch never waits on `grok models`.  With a good list (fresh or
     # stale) grok_models_list answers at once.  With none yet, check the
     # format only and let grok itself reject a model it does not know.
+    # Returns (model, effort, listed): listed is False when the model was
+    # only format-checked.
     if _MODELS_CACHE["value"] is None:
-        return validate_model_effort(model, effort, [], "no model list yet")
+        model, effort = validate_model_effort(model, effort, [], "no model list yet")
+        return model, effort, False
     models, err = grok_models_list()
-    return validate_model_effort(model, effort, models, err)
+    model, effort = validate_model_effort(model, effort, models, err)
+    return model, effort, True
 
 
 def grok_config_defaults():
@@ -2057,6 +2061,8 @@ footer { display: none; }
 var cwdDefaults = @@CWD@@;
 var agentNames = @@AGENTS@@;
 var cwdChoices = @@CWDS@@;
+// grok's saved defaults (~/.grok/config.toml), known before /models answers.
+var savedDefaults = @@SAVED@@;
 var rows = [];
 var selectedEl = null;
 var listState = {
@@ -2065,6 +2071,7 @@ var listState = {
 };
 if (!agentNames || typeof agentNames.length !== "number") agentNames = [];
 if (!cwdChoices || typeof cwdChoices.length !== "number") cwdChoices = [];
+if (!savedDefaults || typeof savedDefaults !== "object") savedDefaults = {};
 var defaultEfforts = ["low", "medium", "high", "xhigh"];
 var modelRows = [];
 var modelFetch = 0;
@@ -2293,7 +2300,7 @@ function applyModelList(data) {
   // grok's own saved defaults come first: picking them passes no flag, so
   // an untouched Create leaves grok's config as it is.
   var last = (data && data.last) || {};
-  var conf = (data && data.defaults) || {};
+  var conf = (data && data.defaults) || savedDefaults;
   var lastModel = typeof last.model === "string" ? last.model : "";
   var lastEffort = typeof last.effort === "string" ? last.effort : "";
   var confModel = typeof conf.model === "string" ? conf.model : "";
@@ -2322,12 +2329,18 @@ function applyModelList(data) {
     setModelError("");
   }
 }
+// Before the model list arrives: grok's saved effort if it is offered, so an
+// early untouched Create passes no flag (the blank model passes no -m).
+function savedEffort(levels) {
+  var e = typeof savedDefaults.effort === "string" ? savedDefaults.effort : "";
+  return e && levels.indexOf(e) !== -1 ? e : "medium";
+}
 function loadModels() {
   modelFetch += 1;
   var token = modelFetch;
   setModelError("");
   fillSelect("na-model", [], false);
-  fillSelect("na-effort", defaultEfforts, false, "medium");
+  fillSelect("na-effort", defaultEfforts, false, savedEffort(defaultEfforts));
   fetch("/models", {cache: "no-store"}).then(function (resp) {
     if (!resp.ok) throw new Error("model list failed");
     return resp.json();
@@ -2338,7 +2351,7 @@ function loadModels() {
     if (token !== modelFetch || !dialogOpen()) return;
     modelRows = [];
     fillSelect("na-model", [], false);
-    fillSelect("na-effort", defaultEfforts, true, "medium");
+    fillSelect("na-effort", defaultEfforts, true, savedEffort(defaultEfforts));
     setModelError("model list failed");
   });
 }
@@ -2737,6 +2750,7 @@ document.getElementById("new-form").addEventListener("submit", function (ev) {
     choices = dashboard_cwd_choices(cwd_defaults)
     body = body.replace("@@AGENTS@@", script_json(list(agents)))
     body = body.replace("@@CWDS@@", script_json(choices))
+    body = body.replace("@@SAVED@@", script_json(grok_config_defaults() or {}))
     body = body.replace("@@CWD@@", script_json(cwd_defaults))
     body = body.replace("@@OLDER_WINDOW@@", str(OLDER_WINDOW))
     body = body.replace("@@OLDER_STEP@@", str(OLDER_STEP))
@@ -4308,7 +4322,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.cwd_defaults,
                 os.getcwd(),
             )
-            model, effort = checked_model_effort(model, effort)
+            model, effort, listed = checked_model_effort(model, effort)
             argv_model, argv_effort = launch_model_effort(model, effort)
             sid = str(uuid.uuid4())
             cmd = grok_argv(agent, approval, cwd, None, sid, argv_model, argv_effort)
@@ -4317,13 +4331,20 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"ok": False, "error": str(exc)[:300]})
             return
         if model or effort:
-            self._remember_last(model, effort)
+            self._remember_last(model, effort, listed)
         self._json(200, {"ok": True, "id": live.sid})
 
-    def _remember_last(self, model, effort):
+    def _remember_last(self, model, effort, listed=True):
         # The launch already happened; a failed save is logged, not returned.
+        # A model that was only format-checked (no list yet) may not exist:
+        # keep the previous remembered model instead of saving it.
         def change(data):
-            data["last"] = {"model": model, "effort": effort}
+            keep = model
+            if not listed:
+                prev = data.get("last")
+                prev = prev.get("model") if isinstance(prev, dict) else ""
+                keep = prev if isinstance(prev, str) else ""
+            data["last"] = {"model": keep, "effort": effort}
         try:
             self._change_config(change)
         except (ValueError, OSError) as exc:

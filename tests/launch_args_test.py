@@ -60,6 +60,10 @@ def main():
               "only a non-default effort is passed")
         check(erg.launch_model_effort("", "") == ("", ""), "blank picks pass nothing")
         check(cfg.read_bytes() == before, "config.toml is never written")
+        page = erg.dashboard_page([], [], {})
+        check('var savedDefaults = {"model": "grok-4.7", "effort": "high"};' in page
+              or "var savedDefaults = {\"model\":\"grok-4.7\",\"effort\":\"high\"};" in page,
+              "list page carries the saved defaults before /models answers")
 
         # Unparseable file: pass the flags as before.
         cfg.write_text("[models\ndefault = ", encoding="utf-8")
@@ -89,7 +93,7 @@ def main():
     except ValueError as exc:
         got = "ValueError: %s" % exc
     took = time.monotonic() - t0
-    check(got == ("grok-4.7", "high"), "empty cache: a named model is accepted (got %r)" % (got,))
+    check(got == ("grok-4.7", "high", False), "empty cache: a named model is accepted (got %r)" % (got,))
     check(took < 1.0, "empty cache: launch check does not wait on grok models (%.2fs)" % took)
     fetch.join(5)
 
@@ -108,6 +112,19 @@ def main():
         check(False, "with a list: an unlisted model is rejected")
     except ValueError:
         check(True, "with a list: an unlisted model is rejected")
+
+    # `last` keeps the previous model when the new one was only format-checked.
+    class Fake:
+        data = {"last": {"model": "grok-4.7", "effort": "high"}}
+
+        def _change_config(self, fn):
+            fn(self.data)
+    fake = Fake()
+    erg.Handler._remember_last(fake, "grok-nope", "low", False)
+    check(fake.data["last"] == {"model": "grok-4.7", "effort": "low"},
+          "unverified model is not saved as last (got %r)" % (fake.data["last"],))
+    erg.Handler._remember_last(fake, "grok-4.6", "low", True)
+    check(fake.data["last"] == {"model": "grok-4.6", "effort": "low"}, "listed model is saved as last")
 
     text = (ROOT / "ergosphere.py").read_text(encoding="utf-8")
     check("grok saves a model or effort you choose as its new default" in text,
