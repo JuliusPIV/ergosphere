@@ -32,6 +32,10 @@ v=$(ver_of "$tmp/arc/ergosphere.py")
 if [ -z "$want" ]; then echo "skip: no release tags in this clone; archive reports '$v'"
 elif [ "$v" = "${want#v}" ]; then ok "archive reports $v (git describe $want)"
 else bad "archive reports '$v', expected '${want#v}'"; fi
+# An archive where describe found no tag expands the placeholder to "".
+v=$(sed 's/^_ARCHIVE_DESCRIBE = .*/_ARCHIVE_DESCRIBE = ""/' ergosphere.py |
+  python3 -I -c 'import sys; ns = {"__name__": "t"}; exec(sys.stdin.read(), ns); print(ns["VERSION"])')
+if [ "$v" = dev ]; then ok "archive with no tag reports dev"; else bad "archive with no tag reports '$v', expected dev"; fi
 
 # 3. The installer: latest-release lookup and --version, in --check mode (changes nothing).
 mkdir -p "$tmp/bin"
