@@ -28,7 +28,6 @@ import shutil
 import signal
 import socket
 import ssl
-import stat
 import struct
 import subprocess
 import sys
@@ -1305,88 +1304,44 @@ class SessionBusy(RuntimeError):
         self.state = state
 
 
-# Fixed, not tempfile.gettempdir(): TMPDIR can differ between servers.
-LOCK_TMP_ROOT = "/tmp"
-
-
-def session_lock_dirs():
-    """Where session locks may live, in a fixed order.
-
-    Every server of this user tries the same list and uses the first folder
-    that works, so they meet on the same lock file: ~/.cache (one HOME for
-    every server), then a private folder under /tmp. Nothing that depends on
-    the environment (XDG_RUNTIME_DIR, TMPDIR), which a system unit and a
-    user unit do not share.
-    """
-    return [
-        os.path.join(os.path.expanduser("~/.cache"), "ergosphere", "locks"),
-        os.path.join(LOCK_TMP_ROOT, "ergosphere-%d" % os.getuid(), "locks"),
-    ]
-
-
-def _private_dir(path):
-    """Make path and its parent (mode 0700) in the shared temp dir, and
-    refuse them unless they are this user's own folders.
-
-    A folder there that someone else made, or that others can write, could
-    be swapped under us.
-    """
-    for folder in (os.path.dirname(path), path):
-        try:
-            os.mkdir(folder, 0o700)
-        except FileExistsError:
-            pass
-        info = os.lstat(folder)
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
-            raise OSError(errno.EPERM, "not a private folder", folder)
-
-
 class SessionLockUnavailable(RuntimeError):
-    """No lock folder works, so a start could race another server."""
+    """The session folder cannot be opened to lock it."""
 
 
 def acquire_session_lock(sid):
-    """Advisory flocks held while this server's grok for sid runs.
+    """Advisory flock on the session's own folder, held while this server's grok runs.
 
-    flock is per open file and works across processes, so a second
-    Ergosphere server cannot start the same session in the window between
-    its holder check and its spawn (grok itself does not refuse a second
-    open). The lock is taken in every folder of session_lock_dirs() that
-    works, so two servers that can use different folders still meet on at
-    least one shared file. The kernel drops the locks if this server dies.
-    Returns the list of fds, or None when another process holds any of
-    them. Raises SessionLockUnavailable when no folder works, ValueError for
-    an id that is not a session id (it becomes a file name).
+    Every server that can resume a session reads the same folder under
+    ~/.grok/sessions, so they always meet on it, whatever their environment
+    (HOME caches, TMPDIR, private /tmp). The folder is opened read-only and
+    nothing is written into ~/.grok. flock works across processes, so a
+    second server cannot start the session in the window between its holder
+    check and its spawn (grok itself does not refuse a second open); the
+    kernel drops it if this server dies.
+    Returns [fd]; [] for a new session whose folder grok has not made yet
+    (its fresh id is unknown to every other server until grok, already
+    running and visible to their holder scan, writes it); None when another
+    process holds the lock. Raises ValueError for an id that is not a
+    session id, SessionLockUnavailable when the folder cannot be opened.
     """
     if not isinstance(sid, str) or not SID_RE.match(sid):
         raise ValueError("unknown session")
-    problems = []
-    fds = []
-    home_dir, tmp_dir = session_lock_dirs()
-    for folder in (home_dir, tmp_dir):
-        try:
-            if folder is tmp_dir:
-                _private_dir(folder)
-            else:
-                os.makedirs(folder, mode=0o700, exist_ok=True)
-            fd = os.open(os.path.join(folder, sid + ".lock"), os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
-        except OSError as exc:
-            problems.append("%s (%s)" % (folder, exc.strerror or exc))
-            continue
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            os.close(fd)
-            close_fds(fds)
-            return None
-        except OSError as exc:
-            os.close(fd)
-            problems.append("%s (%s)" % (folder, exc.strerror or exc))
-            continue
-        fds.append(fd)
-    if not fds:
-        raise SessionLockUnavailable("no folder for session locks works: " + "; ".join(problems))
-    return fds
+    folder = session_dir_for(sid)
+    if folder is None:
+        return []
+    try:
+        fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        raise SessionLockUnavailable("cannot open %s: %s" % (folder, exc.strerror or exc))
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    except OSError as exc:
+        os.close(fd)
+        raise SessionLockUnavailable("cannot lock %s: %s" % (folder, exc.strerror or exc))
+    return [fd]
 
 
 def close_fds(fds):
@@ -1397,7 +1352,6 @@ def close_fds(fds):
             pass
 
 
-_LOCK_LOGGED = []
 
 
 def spawn_grok(cmd, cwd, cols, rows):
@@ -1862,14 +1816,9 @@ def open_live(sid, cmd, cwd, cols, rows):
             live.start()
     # Log after release: a stalled log write must not block other launches.
     if no_lock is not None:
-        # Refuse rather than risk two groks on one session; log the folders once.
-        if not _LOCK_LOGGED:
-            _LOCK_LOGGED.append(True)
-            print("session lock: %s" % no_lock, flush=True)
-        raise RuntimeError(
-            "cannot start: no folder for session lock files is writable "
-            "(~/.cache/ergosphere or /tmp/ergosphere-<uid>); see the server log"
-        )
+        # Refuse rather than risk two groks on one session.
+        print("session lock: %s" % no_lock, flush=True)
+        raise RuntimeError("cannot start: the session folder cannot be locked; see the server log")
     print("term pid=%s sid=%s cmd=%s" % (proc.pid, sid, " ".join(cmd)), flush=True)
     return live, False
 
