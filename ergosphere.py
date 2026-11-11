@@ -546,20 +546,28 @@ class ProcScan:
         return self._fds[pid]
 
 
-def own_grok_pids(scan=None):
+def live_roots():
+    # Caller holds LIVE_LOCK.
+    roots = []
+    for live in LIVE.values():
+        proc = getattr(live, "proc", None)
+        if proc is not None and proc.pid:
+            roots.append(proc.pid)
+    return roots
+
+
+def own_grok_pids(scan=None, roots=None):
     """PIDs of the grok terminals this server runs.
 
     Each tracked child, and when that child is a wrapper, the first grok
     under it. The walk stops at any grok and at any ergosphere.py server:
     a grok or an Ergosphere started from a web session's shell holds its
     own session, and Resume must still see it.
+    roots: this server's grok pids, when the caller already holds LIVE_LOCK.
     """
-    with LIVE_LOCK:
-        roots = []
-        for live in LIVE.values():
-            proc = getattr(live, "proc", None)
-            if proc is not None and proc.pid:
-                roots.append(proc.pid)
+    if roots is None:
+        with LIVE_LOCK:
+            roots = live_roots()
     own = set(roots)
     if not roots:
         return own
@@ -1338,16 +1346,22 @@ class SessionLockUnavailable(RuntimeError):
 
 
 def acquire_session_lock(sid):
-    """Advisory flock held while this server's grok for sid runs.
+    """Advisory flocks held while this server's grok for sid runs.
 
     flock is per open file and works across processes, so a second
     Ergosphere server cannot start the same session in the window between
     its holder check and its spawn (grok itself does not refuse a second
-    open). The kernel drops the lock if this server dies. Returns the fd,
-    or None when another process holds the lock. Raises
-    SessionLockUnavailable when no folder in session_lock_dirs() works.
+    open). The lock is taken in every folder of session_lock_dirs() that
+    works, so two servers that can use different folders still meet on at
+    least one shared file. The kernel drops the locks if this server dies.
+    Returns the list of fds, or None when another process holds any of
+    them. Raises SessionLockUnavailable when no folder works, ValueError for
+    an id that is not a session id (it becomes a file name).
     """
+    if not isinstance(sid, str) or not SID_RE.match(sid):
+        raise ValueError("unknown session")
     problems = []
+    fds = []
     home_dir, tmp_dir = session_lock_dirs()
     for folder in (home_dir, tmp_dir):
         try:
@@ -1363,13 +1377,24 @@ def acquire_session_lock(sid):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             os.close(fd)
+            close_fds(fds)
             return None
         except OSError as exc:
             os.close(fd)
             problems.append("%s (%s)" % (folder, exc.strerror or exc))
             continue
-        return fd
-    raise SessionLockUnavailable("no folder for session locks works: " + "; ".join(problems))
+        fds.append(fd)
+    if not fds:
+        raise SessionLockUnavailable("no folder for session locks works: " + "; ".join(problems))
+    return fds
+
+
+def close_fds(fds):
+    for fd in fds:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 _LOCK_LOGGED = []
@@ -1449,8 +1474,8 @@ class Live:
         self.watcher = None
         self.closed = False
         self.ended_sent = False
-        # Session lock fd (acquire_session_lock); open_live sets it.
-        self.lock_fd = None
+        # Session lock fds (acquire_session_lock); open_live sets them.
+        self.lock_fds = []
         self.sub_state = {"rows": {}, "order": []}
         self.sub_lock = threading.Lock()
 
@@ -1460,12 +1485,8 @@ class Live:
     def release_lock(self):
         # Only once grok is gone: the lock says "an Ergosphere runs this".
         with self.lock:
-            fd, self.lock_fd = self.lock_fd, None
-        if fd is not None:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+            fds, self.lock_fds = self.lock_fds, []
+        close_fds(fds)
 
     def start(self):
         self.reader = threading.Thread(target=self._read, daemon=True)
@@ -1816,19 +1837,27 @@ def open_live(sid, cmd, cwd, cols, rows):
                 release()
         no_lock = None
         try:
-            fd = acquire_session_lock(sid)
+            fds = acquire_session_lock(sid)
         except SessionLockUnavailable as exc:
             no_lock = exc
         if no_lock is None:
-            if fd is None:
+            if fds is None:
                 raise SessionBusy("held-by-other-server", "session is open in another Ergosphere server")
+            # Recheck under the lock: a grok can hold the session with no lock
+            # (left by a killed server, or a CLI started after the caller looked).
+            scan = ProcScan()
+            scan._own = own_grok_pids(scan, live_roots())
+            holder = session_holder(sid, scan)
+            if holder:
+                close_fds(fds)
+                raise SessionBusy(holder_state(holder), "session is already open in another grok")
             try:
                 proc, master = spawn_grok(cmd, cwd, cols, rows)
             except Exception:
-                os.close(fd)
+                close_fds(fds)
                 raise
             live = Live(sid, proc, master, cwd)
-            live.lock_fd = fd
+            live.lock_fds = fds
             LIVE[sid] = live
             live.start()
     # Log after release: a stalled log write must not block other launches.

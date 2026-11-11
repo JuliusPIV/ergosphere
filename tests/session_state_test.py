@@ -15,6 +15,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import fcntl
 import tempfile
 import threading
 import time
@@ -157,7 +158,7 @@ def check_no_resume_while_stopping(erg):
     return None
 
 
-def other_server(sid):
+def other_server(sid, fake=None):
     """A second Ergosphere process (same HOME, its own environment) that starts sid.
 
     It has XDG_RUNTIME_DIR and TMPDIR set and this one has neither, like a
@@ -170,7 +171,7 @@ def other_server(sid):
                    "m.LOCK_TMP_ROOT=sys.argv[6]\n"
                    "m.open_live(sys.argv[2], [sys.argv[3], '-c', sys.argv[4], '--resume', sys.argv[2]], sys.argv[5], 80, 24)\n"
                    "print('up', flush=True); time.sleep(30)\n",
-                   str(ROOT / "ergosphere.py"), sid, GROK, FAKE, CWD, LOCK_TMP], stdout=subprocess.PIPE, env=env)
+                   str(ROOT / "ergosphere.py"), sid, GROK, fake or FAKE, CWD, LOCK_TMP], stdout=subprocess.PIPE, env=env)
     other.stdout.readline()
     return other
 
@@ -370,11 +371,91 @@ def check_lock_kept_while_grok_lives(erg):
         live.shutdown()
     finally:
         erg.kill_proc = real
-    held = live.lock_fd is not None
+    held = lock_held(erg, sid)
     os.kill(live.proc.pid, signal.SIGKILL)
-    released = wait_for(lambda: live.lock_fd is None, 5)
+    released = wait_for(lambda: not lock_held(erg, sid), 5)
     if not held or not released:
         return "lock: released while grok still ran (%s) or kept after it exited (%s)" % (not held, not released)
+    return None
+
+
+def lock_held(erg, sid):
+    """True when some process holds the session lock file in any lock folder."""
+    for folder in erg.session_lock_dirs():
+        path = os.path.join(folder, sid + ".lock")
+        if not os.path.exists(path):
+            continue
+        fd = os.open(path, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        finally:
+            os.close(fd)
+    return False
+
+
+def check_lock_dirs_differ(erg):
+    # Server 1 could not use ~/.cache and locked in /tmp; then ~/.cache became
+    # usable and server 2 starts the same session: still exactly one grok.
+    sid = new_sid(15)
+    home3 = os.path.join(TMP, "home-flip")
+    os.makedirs(home3)
+    cache = os.path.join(home3, ".cache")
+    with open(cache, "w") as fh:
+        fh.write("not a folder\n")
+    os.environ["HOME"] = home3
+    try:
+        other = other_server(sid)
+        os.remove(cache)
+        os.makedirs(cache)
+        try:
+            erg.open_live(sid, fake_cmd(sid), CWD, 80, 24)
+        except Exception:
+            pass
+        n = len(groks_for(sid))
+        os.kill(other.pid, signal.SIGKILL)
+    finally:
+        os.environ["HOME"] = HOME
+    if n != 1:
+        return "lock: servers locking in different folders started %d groks" % n
+    return None
+
+
+def check_orphan_race(erg):
+    # Server 1 starts grok and dies (its lock goes, its grok stays): a start
+    # here must still see that grok and refuse.
+    sid = new_sid(16)
+    hardy = "import signal,time\nsignal.signal(signal.SIGHUP, signal.SIG_IGN)\nwhile True: time.sleep(1)\n"
+    other = other_server(sid, hardy)
+    os.kill(other.pid, signal.SIGKILL)
+    other.wait()
+    time.sleep(0.3)
+    try:
+        erg.open_live(sid, fake_cmd(sid), CWD, 80, 24)
+    except Exception:
+        pass
+    n = len(groks_for(sid))
+    if n != 1:
+        return "lock: a start after the other server died beside its grok made %d groks" % n
+    return None
+
+
+def check_bad_sid(erg):
+    # The session id becomes a file name: nothing may leave the lock folder.
+    outside = os.path.join(HOME, ".cache", "ergosphere", "x.lock")
+    for bad in ("../x", "a/../../x", "..", ""):
+        try:
+            erg.acquire_session_lock(bad)
+            accepted = True
+        except ValueError:
+            accepted = False
+        except Exception:
+            accepted = True
+        if accepted:
+            return "lock: session id %r was not refused" % bad
+    if os.path.exists(outside):
+        return "lock: a traversal id wrote %s" % outside
     return None
 
 
@@ -397,7 +478,8 @@ def main():
     checks = (check_quit_tells_every_tab, check_no_resume_while_stopping, check_two_servers,
               check_held_while_running_here, check_holder_labels, check_words, check_turn_without_inhibit,
               check_no_lock_folder, check_two_servers_no_cache, check_all_lock_folders_fail,
-              check_one_proc_pass, check_lock_kept_while_grok_lives, check_cpu_callers_share)
+              check_one_proc_pass, check_lock_kept_while_grok_lives, check_cpu_callers_share,
+              check_lock_dirs_differ, check_orphan_race, check_bad_sid)
     failures = []
     try:
         for check in checks:
