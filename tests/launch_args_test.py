@@ -113,6 +113,17 @@ def main():
     except ValueError:
         check(True, "with a list: an unlisted model is rejected")
 
+    # A cached list whose lookup reports an error checks nothing: not listed.
+    real_list = erg.grok_models_list
+    erg.grok_models_list = lambda: ([], "grok models failed")
+    try:
+        got = erg.checked_model_effort("grok-new", "low")
+    except ValueError as exc:
+        got = "ValueError: %s" % exc
+    erg.grok_models_list = real_list
+    check(got == ("grok-new", "low", False),
+          "cached list + lookup error: model reported as not listed (got %r)" % (got,))
+
     # `last` keeps the previous model when the new one was only format-checked.
     class Fake:
         data = {"last": {"model": "grok-4.7", "effort": "high"}}

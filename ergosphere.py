@@ -1144,7 +1144,8 @@ def checked_model_effort(model, effort):
         return model, effort, False
     models, err = grok_models_list()
     model, effort = validate_model_effort(model, effort, models, err)
-    return model, effort, True
+    # An error means no list checked this model either.
+    return model, effort, not err
 
 
 def grok_config_defaults():
