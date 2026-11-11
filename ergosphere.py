@@ -1172,9 +1172,30 @@ def grok_config_defaults():
     }
 
 
-def launch_model_effort(model, effort):
-    # Pass -m / --reasoning-effort only when they differ from grok's saved
-    # defaults, so a launch does not rewrite them (grok saves what it is given).
+LAUNCH_FIELDS = ("model", "effort")
+
+
+def launch_touched(obj):
+    # Which of model/effort the user actually changed in the dialog.  A
+    # request without "touched" (an older page or a script) counts both as
+    # chosen, as before.
+    raw = obj.get("touched") if isinstance(obj, dict) else None
+    if raw is None:
+        return set(LAUNCH_FIELDS)
+    if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+        raise ValueError("invalid request")
+    return {x for x in raw if x in LAUNCH_FIELDS}
+
+
+def launch_model_effort(model, effort, touched=LAUNCH_FIELDS):
+    # grok saves what it is started with, so pass -m / --reasoning-effort only
+    # for a field the user chose and only when it differs from grok's saved
+    # default read now.  An untouched field passes nothing: grok uses its own
+    # current default, even one changed outside this page.
+    if "model" not in touched:
+        model = ""
+    if "effort" not in touched:
+        effort = ""
     defaults = grok_config_defaults()
     if defaults is None:
         return model, effort
@@ -2080,8 +2101,11 @@ var modelFetch = 0;
 // One launch at a time: "idle" or "launching".  While launching the dialog
 // stays open and says so; Escape and a second Create never act silently.
 var launchState = "idle";
-// True once the user changes the effort in this dialog opening.
+// True once the user changes the effort / the model in this dialog opening.
+// Only a field the user changed is sent as chosen ("touched"); the server
+// passes no flag for the others, so grok keeps its own current defaults.
 var effortPicked = false;
+var modelPicked = false;
 var sortState = {
   working: {col: "updated", dir: "desc"},
   idle: {col: "updated", dir: "desc"},
@@ -2360,6 +2384,7 @@ function loadModels() {
 function openNew() {
   if (launchState === "launching") return;
   effortPicked = false;
+  modelPicked = false;
   document.getElementById("na-agent").value = "";
   document.getElementById("na-cwd").value = "";
   setApproval("ask");
@@ -2437,8 +2462,11 @@ function launchNew(blank) {
     cwd: cwd,
     approval: approvalValue(),
     model: document.getElementById("na-model").value,
-    effort: document.getElementById("na-effort").value
+    effort: document.getElementById("na-effort").value,
+    touched: []
   };
+  if (modelPicked) payload.touched.push("model");
+  if (effortPicked) payload.touched.push("effort");
   setLaunch("launching");
   setModelError("");
   fetch("/launch", {
@@ -2461,8 +2489,8 @@ function launchNew(blank) {
     }
     // grok saves what it was started with, so the page's copy of the saved
     // defaults must follow, or a reopened dialog preselects stale values.
-    if (payload.model) savedDefaults.model = payload.model;
-    if (payload.effort) savedDefaults.effort = payload.effort;
+    if (modelPicked && payload.model) savedDefaults.model = payload.model;
+    if (effortPicked && payload.effort) savedDefaults.effort = payload.effort;
     var href = "/chat?resume=" + encodeURIComponent(data.id);
     if (blank) {
       setLaunch("idle");
@@ -2717,6 +2745,7 @@ window.addEventListener("pageshow", function (ev) {
   if (ev.persisted) setLaunch("idle");
 });
 document.getElementById("na-model").addEventListener("change", function () {
+  modelPicked = true;
   fillSelect("na-effort", effortsFor(document.getElementById("na-model").value), true, "medium");
 });
 document.addEventListener("mousedown", function (ev) {
@@ -4326,6 +4355,7 @@ class Handler(BaseHTTPRequestHandler):
             approval = self._field_str(obj, "approval")
             model = self._field_str(obj, "model")
             effort = self._field_str(obj, "effort")
+            touched = launch_touched(obj)
             agent, cwd = new_launch(
                 agent,
                 approval,
@@ -4334,28 +4364,32 @@ class Handler(BaseHTTPRequestHandler):
                 os.getcwd(),
             )
             model, effort, listed = checked_model_effort(model, effort)
-            argv_model, argv_effort = launch_model_effort(model, effort)
+            argv_model, argv_effort = launch_model_effort(model, effort, touched)
             sid = str(uuid.uuid4())
             cmd = grok_argv(agent, approval, cwd, None, sid, argv_model, argv_effort)
             live, _reattach = open_live(sid, cmd, cwd, 80, 24)
         except (ValueError, RuntimeError, OSError) as exc:
             self._json(400, {"ok": False, "error": str(exc)[:300]})
             return
-        if model or effort:
-            self._remember_last(model, effort, listed)
+        if (model and "model" in touched) or (effort and "effort" in touched):
+            self._remember_last(model, effort, listed, touched)
         self._json(200, {"ok": True, "id": live.sid})
 
-    def _remember_last(self, model, effort, listed=True):
+    def _remember_last(self, model, effort, listed=True, touched=LAUNCH_FIELDS):
         # The launch already happened; a failed save is logged, not returned.
-        # A model that was only format-checked (no list yet) may not exist:
-        # keep the previous remembered model instead of saving it.
+        # Only fields the user chose are remembered.  A model that was only
+        # format-checked (no list yet) may not exist: keep the previous one.
         def change(data):
-            keep = model
-            if not listed:
-                prev = data.get("last")
-                prev = prev.get("model") if isinstance(prev, dict) else ""
-                keep = prev if isinstance(prev, str) else ""
-            data["last"] = {"model": keep, "effort": effort}
+            prev = data.get("last")
+            if not isinstance(prev, dict):
+                prev = {}
+            keep_model = prev.get("model") if isinstance(prev.get("model"), str) else ""
+            keep_effort = prev.get("effort") if isinstance(prev.get("effort"), str) else ""
+            if "model" in touched and listed:
+                keep_model = model
+            if "effort" in touched:
+                keep_effort = effort
+            data["last"] = {"model": keep_model, "effort": keep_effort}
         try:
             self._change_config(change)
         except (ValueError, OSError) as exc:

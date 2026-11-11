@@ -72,6 +72,35 @@ def main():
                   or "var savedDefaults = {\"model\":\"grok-4.7\",\"effort\":\"high\"};" in page,
                   "list page carries the saved defaults before /models answers")
 
+            # Only fields the user changed ("touched") may pass a flag.
+            # S1: grok's default changed outside the page (now low); the page
+            # still shows high; an untouched Create passes nothing.
+            cfg.write_text(CONFIG.replace('"high"', '"low"'), encoding="utf-8")
+            check(erg.launch_model_effort("grok-4.7", "high", set()) == ("", ""),
+                  "S1: untouched stale effort passes no flag")
+            # J1: after a new-tab launch grok saved low; a reopened, untouched
+            # dialog still sends the old pick: nothing passed.
+            check(erg.launch_model_effort("grok-4.7", "medium", set()) == ("", ""),
+                  "J1: untouched values after a new-tab launch pass no flag")
+            # Grok (a): saved model not listed, last-used model shown instead.
+            check(erg.launch_model_effort("grok-4.6", "medium", set()) == ("", ""),
+                  "untouched preselected model and effort pass no flags")
+            # An explicit pick still passes its flag (and only that one).
+            check(erg.launch_model_effort("grok-4.7", "high", {"effort"}) == ("", "high"),
+                  "touched effort different from the saved one is passed")
+            check(erg.launch_model_effort("grok-4.6", "low", {"model"}) == ("grok-4.6", ""),
+                  "touched model is passed, untouched effort is not")
+            check(erg.launch_model_effort("grok-4.7", "low", {"model", "effort"}) == ("", ""),
+                  "touched values equal to the current saved defaults pass nothing")
+            check(erg.launch_touched({}) == {"model", "effort"} and
+                  erg.launch_touched({"touched": ["effort", "x"]}) == {"effort"},
+                  "missing touched counts both as chosen; unknown names are ignored")
+            try:
+                erg.launch_touched({"touched": "effort"})
+                check(False, "a malformed touched field is rejected")
+            except ValueError:
+                check(True, "a malformed touched field is rejected")
+
         # Unparseable file: pass the flags as before.
         cfg.write_text("[models\ndefault = ", encoding="utf-8")
         check(erg.grok_config_defaults() is None, "unparseable config.toml reads as no defaults")
@@ -172,6 +201,9 @@ def main():
     erg.Handler._remember_last(fake, "grok-nope", "low", False)
     check(fake.data["last"] == {"model": "grok-4.7", "effort": "low"},
           "unverified model is not saved as last (got %r)" % (fake.data["last"],))
+    erg.Handler._remember_last(fake, "grok-4.5", "xhigh", True, {"model"})
+    check(fake.data["last"] == {"model": "grok-4.5", "effort": "low"},
+          "only touched fields are remembered as last (got %r)" % (fake.data["last"],))
     erg.Handler._remember_last(fake, "grok-4.6", "low", True)
     check(fake.data["last"] == {"model": "grok-4.6", "effort": "low"}, "listed model is saved as last")
 
@@ -181,6 +213,9 @@ def main():
 
     check("savedDefaults.effort = payload.effort" in text and "savedDefaults.model = payload.model" in text,
           "after a launch the page's saved defaults follow what grok was started with")
+
+    check('payload.touched.push("effort")' in text and 'payload.touched.push("model")' in text,
+          "the dialog sends which fields the user changed")
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     check("default_reasoning_effort" in readme, "README FAQ explains grok saving the model and effort")
