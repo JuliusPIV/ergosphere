@@ -1942,6 +1942,7 @@ footer { position: fixed; left: 0; right: 0; bottom: 0; width: 100%; box-sizing:
 .head button[data-col="sid"], a.row.session .c-sid { display: none; }
 .head button[data-col="cwd"], a.row.session .c-cwd { grid-column: 1 / -1; }
 a.row.session .c-cwd { padding-left: 2ch; }
+footer { display: none; }
 }
 </style>
 </head>
@@ -2998,11 +2999,6 @@ html, body { height: 100%; margin: 0; background: #111; color: #ddd; font: 14px 
 #bar a { color: #ddd; }
 #version { position: absolute; top: 0; right: 0.6rem; height: 28px; line-height: 28px; font-size: 11px; color: #ddd; }
 #bar { padding-right: 4rem; }
-@media (max-width: 40rem) {
-#bar { padding-right: 0.6rem; white-space: nowrap; overflow: hidden; }
-#version, #sid, #title-gap { display: none; }
-#title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-}
 #stop { font: 14px/1.45 ui-monospace, monospace; color: #fff; background: #000; border: 1px solid #fff; padding: 0 0.5rem; cursor: pointer; }
 #stop:hover, #stop:focus { background: #fff; color: #000; outline: none; }
 #resume-ask { position: absolute; z-index: 6; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 36rem; max-width: calc(100% - 2rem); box-sizing: border-box; background: #000; color: #fff; border: 1px solid #fff; padding: 0.8rem 1rem; font: 14px/1.45 ui-monospace, monospace; }
@@ -3015,6 +3011,17 @@ html, body { height: 100%; margin: 0; background: #111; color: #ddd; font: 14px 
 #busy button { font: 14px/1.45 ui-monospace, monospace; color: #fff; background: #000; border: 1px solid #fff; padding: 0 0.5rem; cursor: pointer; margin-top: 0.6rem; }
 #busy button:hover, #busy button:focus { background: #fff; color: #000; outline: none; }
 @@TERM_CSS@@
+@media (max-width: 40rem) {
+#bar { height: 56px; flex-wrap: wrap; align-content: center; column-gap: 0.6rem; row-gap: 0.2rem; padding-right: 0.6rem; white-space: nowrap; overflow: hidden; font-size: 0; }
+#bar > * { font-size: 14px; }
+#bar::after { content: ""; flex: 0 0 100%; order: 1; height: 0; }
+#status, #title { order: 2; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#status { flex: 0 1 auto; }
+#title { flex: 1 1 0; min-width: 7.5rem; }
+#title::before { content: "| "; }
+#version, #sid, #title-gap { display: none; }
+#wrap { height: calc(100vh - 56px); }
+}
 </style>
 </head>
 <body>
