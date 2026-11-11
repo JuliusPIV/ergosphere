@@ -1175,14 +1175,19 @@ def grok_config_defaults():
     }
 
 
-_TOML_SECTION_RE = re.compile(r"^\s*\[([^\[\]]+)\]\s*(#.*)?$")
+_TOML_BLANK_RE = re.compile(r"^\s*(#.*)?$")
+_TOML_TABLE_RE = re.compile(r"^\s*\[([^\[\]]+)\]\s*(#.*)?$")
+_TOML_ARRAY_TABLE_RE = re.compile(r"^\s*\[\[([^\[\]]+)\]\]\s*(#.*)?$")
+_TOML_KEY_VALUE_RE = re.compile(r"""^\s*[A-Za-z0-9_\-."']+\s*=\s*\S""")
 _TOML_MODELS_KEY_RE = re.compile(
     r"""^\s*(default|default_reasoning_effort)\s*=\s*(?:"([^"\\]*)"|'([^']*)')\s*(#.*)?$""")
 
 
 def _models_defaults_fallback(raw):
     # Python < 3.11 has no tomllib.  Read only the two quoted keys under
-    # [models]; anything else in the file is ignored.
+    # [models].  Anything that is not a blank or comment line, a [table],
+    # an [[array table]] or a one-line key = value makes the whole file
+    # unreadable (None), so a file tomllib would reject passes the flags.
     try:
         text = raw.decode("utf-8")
     except UnicodeError:
@@ -1190,15 +1195,25 @@ def _models_defaults_fallback(raw):
     section = ""
     found = {}
     for line in text.splitlines():
-        head = _TOML_SECTION_RE.match(line)
-        if head:
-            section = head.group(1).strip()
+        if _TOML_BLANK_RE.match(line):
             continue
+        array = _TOML_ARRAY_TABLE_RE.match(line)
+        if array:
+            section = "[[%s]]" % array.group(1).strip()
+            continue
+        table = _TOML_TABLE_RE.match(line)
+        if table:
+            section = table.group(1).strip()
+            continue
+        if not _TOML_KEY_VALUE_RE.match(line):
+            return None
         if section != "models":
             continue
         kv = _TOML_MODELS_KEY_RE.match(line)
         if kv and kv.group(1) not in found:
             found[kv.group(1)] = kv.group(2) if kv.group(2) is not None else kv.group(3)
+    if not found:
+        return None
     return {"model": found.get("default", ""), "effort": found.get("default_reasoning_effort", "")}
 
 

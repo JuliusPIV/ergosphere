@@ -99,6 +99,21 @@ def main():
         cfg.write_text("[models\ndefault = ", encoding="utf-8")
         check(old.launch_model_effort("grok-4.7", "high") == ("grok-4.7", "high"),
               "no tomllib: unreadable [models] passes -m and effort as picked")
+        # A real grok layout, with an array table after [models], still reads.
+        cfg.write_text(CONFIG + '\n[[marketplace.sources]]\nname = "Official"\ngit = "https://example.com/m.git"\n',
+                       encoding="utf-8")
+        check(old.grok_config_defaults() == {"model": "grok-4.7", "effort": "high"},
+              "no tomllib: grok layout with [[array]] tables reads (got %r)" % (old.grok_config_defaults(),))
+        # A syntax error anywhere makes the file unreadable, as with tomllib.
+        cfg.write_text(CONFIG + "[ui\n", encoding="utf-8")
+        check(old.grok_config_defaults() is None and
+              old.launch_model_effort("grok-4.7", "high") == ("grok-4.7", "high"),
+              "no tomllib: a malformed line elsewhere passes the flags (got %r)" % (old.grok_config_defaults(),))
+        # [[array]] ends [models]: a later `default` is not the models default.
+        cfg.write_text('[models]\n\n[[profiles]]\ndefault = "grok-x"\n', encoding="utf-8")
+        check(old.launch_model_effort("grok-x", "high") == ("grok-x", "high"),
+              "no tomllib: a default under [[profiles]] is not read as [models] (got %r)"
+              % (old.grok_config_defaults(),))
 
     # Empty model cache: a launch must not wait on `grok models` nor reject a model.
     calls = []
