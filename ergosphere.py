@@ -1235,9 +1235,25 @@ def kill_proc(proc):
 
 
 def kill_all():
-    with LIVE_LOCK:
-        lives = list(LIVE.values())
-        LIVE.clear()
+    # Shutdown path: a hung server may hold LIVE_LOCK forever, and waiting for
+    # it would keep the process alive until systemd's stop timeout. After a
+    # short wait, stop the sessions from a snapshot taken without the lock.
+    locked = LIVE_LOCK.acquire(timeout=2)
+    try:
+        lives = []
+        # Without the lock the dict can change while it is copied (RuntimeError);
+        # retry a few times, and never raise out of the signal handler.
+        for _attempt in range(5):
+            try:
+                lives = list(LIVE.values())
+                break
+            except RuntimeError:
+                lives = []
+        if locked:
+            LIVE.clear()
+    finally:
+        if locked:
+            LIVE_LOCK.release()
     for live in lives:
         live.shutdown()
 
@@ -4789,7 +4805,7 @@ def _health_body_ok(data, host, port, tls):
     return True
 
 
-def inspect_health(host, port, tls, token=None):
+def inspect_health(host, port, tls, token=None, timeout=1):
     # 0.0.0.0 is not a URL host that reaches the listener.
     # The bearer stays in the header. "match" is this server at this exposure.
     # "down" means nothing accepted the connection. Anything else answered,
@@ -4799,9 +4815,9 @@ def inspect_health(host, port, tls, token=None):
     try:
         if tls:
             ctx = ssl._create_unverified_context()
-            conn = http.client.HTTPSConnection(probe, port, timeout=1, context=ctx)
+            conn = http.client.HTTPSConnection(probe, port, timeout=timeout, context=ctx)
         else:
-            conn = http.client.HTTPConnection(probe, port, timeout=1)
+            conn = http.client.HTTPConnection(probe, port, timeout=timeout)
         headers = {}
         if token:
             headers["Authorization"] = "Bearer " + token
@@ -4971,6 +4987,92 @@ def listen(args, tls, token):
         return None
 
 
+# Installers and deploy scripts look for this exact line to tell that this code
+# sends READY=1 and WATCHDOG=1, so a systemd unit may use Type=notify.
+SYSTEMD_NOTIFY = 1
+
+
+def sd_notify(message):
+    """Send one systemd notification. False when NOTIFY_SOCKET is unset or the send failed.
+
+    Protocol (sd_notify(3)): one datagram to the AF_UNIX socket in
+    NOTIFY_SOCKET; a leading "@" names the Linux abstract namespace.
+    """
+    addr = os.environ.get("NOTIFY_SOCKET", "")
+    if not addr or addr[0] not in "/@":
+        return False
+    if addr[0] == "@":
+        addr = "\0" + addr[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_CLOEXEC) as sock:
+            sock.connect(addr)
+            sock.sendall(message.encode("ascii"))
+    except OSError:
+        return False
+    return True
+
+
+def watchdog_interval():
+    """Seconds between WATCHDOG=1 pings (a quarter of WATCHDOG_USEC), or None when not asked.
+
+    sd_watchdog_enabled(3) asks for at least every half; a quarter leaves room
+    for a busy LIVE_LOCK or a slow check before systemd's deadline.
+    """
+    if not os.environ.get("NOTIFY_SOCKET"):
+        return None
+    raw = os.environ.get("WATCHDOG_USEC", "")
+    if not raw.isdigit() or int(raw) <= 0:
+        return None
+    # WATCHDOG_PID names the process systemd expects pings from.
+    pid = os.environ.get("WATCHDOG_PID", "")
+    if pid and pid != str(os.getpid()):
+        return None
+    return int(raw) / 4e6
+
+
+def can_serve(httpd, timeout=2, health_timeout=1):
+    """True only when LIVE_LOCK is free within timeout and our own /health answers."""
+    if not LIVE_LOCK.acquire(timeout=timeout):
+        return False
+    LIVE_LOCK.release()
+    host, port = httpd.server_address[:2]
+    return inspect_health(host, port, httpd.tls, httpd.token, timeout=health_timeout) == "match"
+
+
+def start_watchdog(httpd):
+    """Ping the systemd watchdog only while the server can serve, so a hang is restarted."""
+    interval = watchdog_interval()
+    if interval is None:
+        return None
+
+    # After a failed check, retry soon instead of waiting a full interval, so
+    # a slow miss or a busy LIVE_LOCK still ends in a ping before the deadline.
+    retry = min(1.0, interval / 4)
+    # One check (lock wait + /health) must fit well inside the deadline, even
+    # with a short WatchdogSec: each part gets at most a quarter interval.
+    lock_wait = max(0.1, min(2.0, interval / 4))
+    health_wait = max(0.2, min(1.0, interval / 4))
+
+    def loop():
+        # Check and ping at once: READY=1 does not reset the watchdog timer, so
+        # after a restart (exec, same pid) the first ping must not wait a full interval.
+        healthy = True
+        while True:
+            ok = can_serve(httpd, timeout=lock_wait, health_timeout=health_wait)
+            if ok:
+                sd_notify("WATCHDOG=1")
+            if ok != healthy:
+                print("watchdog: %s" % ("healthy again, pinging" if ok else "self-check failed, ping skipped, retrying"), flush=True)
+                healthy = ok
+            if STOP.wait(interval if ok else retry):
+                return
+
+    thread = threading.Thread(target=loop, name="watchdog", daemon=True)
+    thread.start()
+    print("watchdog: on, self-check and ping every %.1fs" % interval, flush=True)
+    return thread
+
+
 def serve(args, config):
     tls = bool(args.tls_cert)
     # Unset ERGOSPHERE_TOKEN means no bearer check, including --bind 0.0.0.0.
@@ -4996,6 +5098,16 @@ def serve(args, config):
             args.bind, args.port = host, int(port_text)
             httpd = listen(args, tls, token)
     if httpd is ALREADY_RUNNING:
+        # Under systemd this start failed: another Ergosphere holds the port,
+        # and exit 0 before READY=1 would read as a protocol error.
+        if os.environ.get("NOTIFY_SOCKET"):
+            print(
+                "not starting under systemd: another Ergosphere already serves %s:%s; "
+                "stop it, then start this unit again" % (args.bind, args.port),
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
         return 0
     if httpd is None:
         return 1
@@ -5029,6 +5141,10 @@ def serve(args, config):
 
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
+    # Under systemd Type=notify: ready once listening (also after a restart,
+    # which keeps the pid), then watchdog pings while it can serve.
+    sd_notify("READY=1")
+    start_watchdog(httpd)
     try:
         httpd.serve_forever()
     finally:
@@ -5047,6 +5163,9 @@ def restart_self(old_bind, old_port):
     env[RESTART_FALLBACK_ENV] = "%s:%s" % (old_bind, old_port)
     print("restarting: %s (fallback %s:%s)" % (" ".join(argv), old_bind, old_port), flush=True)
     sys.stderr.flush()
+    # A fresh watchdog interval for the new process to come up in.
+    if watchdog_interval() is not None:
+        sd_notify("WATCHDOG=1")
     try:
         os.execve(sys.executable, argv, env)
     except OSError as exc:

@@ -262,6 +262,8 @@ The grok sessions it started stop with it. Saved sessions stay in `~/.grok/sessi
 <summary><b>Does it start at boot?</b></summary>
 
 No. Run the installer again to start it. A rerun reuses a running server and replaces only files that changed. Starting on boot is on the [roadmap](#-roadmap).
+
+If you run Ergosphere from your own systemd unit, it supports `Type=notify` and the systemd watchdog. It sends `READY=1` once it listens. With `WatchdogSec=` set, it pings only while it can answer its own `/health`, so with `Restart=always` a hung server is restarted, not just a crashed one. Without systemd nothing changes.
 </details>
 
 <details>
