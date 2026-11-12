@@ -40,6 +40,9 @@ class FakeLive:
     def start(self):
         pass
 
+    def lock_when_created(self):
+        pass
+
 
 def lock_free_during(erg, label, block_event, release_event, target):
     """Run target in a thread; once it blocks on I/O, check LIVE_LOCK is free."""

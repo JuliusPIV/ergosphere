@@ -1374,8 +1374,10 @@ class SessionBusy(RuntimeError):
         self.state = state
 
 
-# A new session's folder appears about 0.2 s after grok starts.
-NEW_SESSION_LOCK_SECS = 15
+# A new session's folder appears about 0.2 s after grok starts: poll fast
+# for this long, then once a second, while grok runs.
+NEW_SESSION_FAST_SECS = 5
+TAKEN_TEXT = "session was taken by another Ergosphere server"
 
 
 class SessionLockUnavailable(RuntimeError):
@@ -1502,6 +1504,8 @@ class Live:
         self.watcher = None
         self.closed = False
         self.ended_sent = False
+        # Why this grok was ended, for the pages ("" for a plain exit or Quit).
+        self.end_reason = ""
         # Session lock fds (acquire_session_lock); open_live sets them.
         self.lock_fds = []
         self.sub_state = {"rows": {}, "order": []}
@@ -1593,7 +1597,7 @@ class Live:
     def _publish_ended(self):
         # Every attached client, once: the reader (grok exited) and
         # shutdown (Quit from one tab) both call this.
-        frame = json.dumps({"type": "ended"}).encode("utf-8")
+        frame = self._ended_frame()
         with self.lock:
             if self.ended_sent:
                 return
@@ -1602,6 +1606,12 @@ class Live:
         for client in clients:
             if client.alive:
                 client.queue.put((1, frame))
+
+    def _ended_frame(self):
+        msg = {"type": "ended"}
+        if self.end_reason:
+            msg["reason"] = self.end_reason
+        return json.dumps(msg).encode("utf-8")
 
     def attach(self, handler):
         client = _Client(handler)
@@ -1617,7 +1627,7 @@ class Live:
         client.queue.put((1, self._subagent_frame()))
         if late:
             # Attached after the ended frame went out (Quit raced this attach).
-            client.queue.put((1, json.dumps({"type": "ended"}).encode("utf-8")))
+            client.queue.put((1, self._ended_frame()))
         return client
 
     def detach(self, client):
@@ -1841,17 +1851,27 @@ class Live:
         in). Until it exists no other server knows the id; once it does,
         another server could resume it while unable to see this grok (a
         separate process view), so lock it, as a Resume would, until grok
-        exits. A folder that never appears keeps the old behaviour, logged.
+        exits. Polls every 0.02 s for the first seconds, then every second,
+        for as long as grok runs. If another process got the lock first,
+        that server has the session: stop this grok, as a Quit would, and
+        tell this server's pages why.
         """
-        deadline = time.time() + NEW_SESSION_LOCK_SECS
-        while time.time() < deadline and self.proc.poll() is None:
+        start = time.time()
+        while self.proc.poll() is None:
             try:
                 fds = acquire_session_lock(self.sid)
             except (SessionLockUnavailable, ValueError) as exc:
                 print("session lock: new session %s: %s" % (self.sid, exc), flush=True)
                 return
             if fds is None:
-                print("session lock: new session %s is locked by another process" % self.sid, flush=True)
+                print("session lock: new session %s was taken by another process; stopping this grok"
+                      % self.sid, flush=True)
+                self.end_reason = TAKEN_TEXT
+                self.shutdown()
+                if self.proc.poll() is not None:
+                    with LIVE_LOCK:
+                        if LIVE.get(self.sid) is self:
+                            LIVE.pop(self.sid, None)
                 return
             if fds:
                 with self.lock:
@@ -1859,10 +1879,7 @@ class Live:
                 if self.proc.poll() is not None:
                     self.release_lock()
                 return
-            time.sleep(0.1)
-        if self.proc.poll() is None:
-            print("session lock: new session %s made no folder within %d s; not locked"
-                  % (self.sid, NEW_SESSION_LOCK_SECS), flush=True)
+            time.sleep(0.02 if time.time() - start < NEW_SESSION_FAST_SECS else 1.0)
 
     def _release_on_exit(self):
         # grok outlived the kill: the entry stays (state stopping) and keeps
@@ -1895,9 +1912,7 @@ def open_live(sid, cmd, cwd, cols, rows):
             raise SessionBusy("stopping", "session is still stopping; try again in a moment")
         if live is not None:
             LIVE.pop(sid, None)
-            release = getattr(live, "release_lock", None)
-            if release:
-                release()
+            live.release_lock()
         no_lock = None
         try:
             fds = acquire_session_lock(sid)
@@ -1923,10 +1938,9 @@ def open_live(sid, cmd, cwd, cols, rows):
             live.lock_fds = fds
             LIVE[sid] = live
             live.start()
-            later = getattr(live, "lock_when_created", None)
-            if not fds and later:
+            if not fds:
                 # New session: lock its folder as soon as grok makes it.
-                threading.Thread(target=later, daemon=True).start()
+                threading.Thread(target=live.lock_when_created, daemon=True).start()
     # Log after release: a stalled log write must not block other launches.
     if no_lock is not None:
         # Refuse rather than risk two groks on one session.
@@ -4244,6 +4258,7 @@ function connect() {
         var msg = JSON.parse(ev.data);
         if (msg && msg.type === "ended") {
           showEnded();
+          if (typeof msg.reason === "string" && msg.reason) setStatus(msg.reason, false);
           return;
         }
         if (msg && msg.type === "session" && msg.id) {

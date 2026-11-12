@@ -486,6 +486,50 @@ def check_new_session_locked(erg):
     return None
 
 
+def session_folder(sid):
+    return os.path.join(HOME, ".grok", "sessions", CWD.replace("/", "%2F"), sid)
+
+
+def check_new_session_taken(erg):
+    # Another server locks a new session's folder the moment it appears,
+    # before this server's waiter does: this server stops its own grok and
+    # tells its pages why, so only one grok runs.
+    sid = "%08d-0000-4000-8000-000000000000" % 38
+    folder = session_folder(sid)
+    other = popen([sys.executable, "-c",
+                   "import fcntl,os,sys,time\n"
+                   "d=sys.argv[1]\n"
+                   "while not os.path.isdir(d): pass\n"
+                   "fd=os.open(d, os.O_RDONLY | os.O_DIRECTORY)\n"
+                   "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+                   "time.sleep(30)\n", folder])
+    time.sleep(0.3)
+    live, _ = erg.open_live(sid, [GROK, "-c", FAKE, "--session-id", sid], CWD, 80, 24)
+    tab = Tab()
+    live.attach(tab)
+    os.makedirs(folder)
+    stopped = wait_for(lambda: not groks_for(sid), 5)
+    told = wait_for(lambda: any(op == 1 and b"taken by another Ergosphere server" in p for op, p in tab.frames), 2)
+    os.kill(other.pid, signal.SIGKILL)
+    if not stopped or not told or sid in erg.LIVE:
+        return "new session taken: own grok stopped=%s, page told=%s, still listed=%s" % (stopped, told, sid in erg.LIVE)
+    return None
+
+
+def check_new_session_late_folder(erg):
+    # The folder may appear late (slow disk): the waiter keeps polling, more
+    # slowly, for as long as grok runs, and locks it when it comes.
+    sid = "%08d-0000-4000-8000-000000000000" % 39
+    erg.NEW_SESSION_FAST_SECS = 0.3  # switch to 1 s polling quickly
+    erg.open_live(sid, [GROK, "-c", FAKE, "--session-id", sid], CWD, 80, 24)
+    time.sleep(2.5)
+    os.makedirs(session_folder(sid))
+    locked = wait_for(lambda: lock_held(erg, sid), 3)
+    if not locked:
+        return "new session: a folder made 2.5 s after launch was never locked"
+    return None
+
+
 def check_cpu_callers_share(erg):
     # Two pollers close together both see a busy grok's CPU use.
     busy = popen([sys.executable, "-c", "while True: pass"])
@@ -507,7 +551,8 @@ def main():
               check_held_while_running_here, check_holder_labels, check_words, check_turn_without_inhibit,
               check_disjoint_envs, check_lock_writes_nothing, check_new_session_launch,
               check_one_proc_pass, check_lock_kept_while_grok_lives, check_cpu_callers_share,
-              check_orphan_race, check_bad_sid, check_stopping_until_exit, check_new_session_locked)
+              check_orphan_race, check_bad_sid, check_stopping_until_exit, check_new_session_locked,
+              check_new_session_taken, check_new_session_late_folder)
     failures = []
     try:
         for check in checks:
