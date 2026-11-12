@@ -134,6 +134,32 @@ else
   printf '%s\n' "$out" | tail -n 4
 fi
 
+# 0c. An ergosphere.service from another install in another user search path
+# ($XDG_DATA_HOME/systemd/user here) is never shadowed, started or stopped.
+foreign="$home/.local/share/systemd/user/ergosphere.service"
+mkdir -p "${foreign%/*}"
+printf '%s\n' "[Unit]" "Description=someone else's ergosphere" "[Service]" "ExecStart=/bin/sleep 300" >"$foreign"
+sum=$(sha256sum <"$foreign")
+sc daemon-reload
+sc start ergosphere.service
+fpid=$(sc show -p MainPID --value ergosphere.service)
+for flag in --service --no-service; do
+  out=$(run_install "$flag")
+  rc=$?
+  if [[ "$rc" -ne 0 ]] && grep -q '^failed at check' <<<"$out" && [[ ! -e "$unit" &&
+        "$(sha256sum <"$foreign")" == "$sum" && "$(sc show -p MainPID --value ergosphere.service)" == "$fpid" ]]; then
+    ok "foreign unit in another search path: $flag refused at check, unit untouched and still running"
+  else
+    bad "foreign unit, $flag: rc $rc, our unit present=$([[ -e "$unit" ]] && echo yes || echo no), foreign pid now $(sc show -p MainPID --value ergosphere.service) (was $fpid)"
+    printf '%s\n' "$out" | grep -E 'service|failed' | tail -n 3
+  fi
+done
+sc stop ergosphere.service
+rm -f -- "$foreign" "$unit"
+sc daemon-reload
+sc reset-failed ergosphere.service 2>/dev/null
+rm -rf -- "$home/app"
+
 # 1. --service: unit written, enabled, active (READY=1 seen), main pid serves /health.
 out=$(run_install --service)
 if ! grep -q '^Ergosphere is running' <<<"$out"; then

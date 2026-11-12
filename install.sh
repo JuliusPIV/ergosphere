@@ -286,11 +286,23 @@ unit_safe() {
 }
 
 # Sets UNIT_FILE and UNIT_STATE: none (no systemd user manager), absent,
-# ours (marker names this install dir) or foreign.
+# ours (marker names this install dir) or foreign (another install's file, or an
+# ergosphere.service the manager loads from another search path: UNIT_FOREIGN).
 read_unit() {
+  local frag
   UNIT_FILE="${XDG_CONFIG_HOME:-${HOME:-}/.config}/systemd/user/ergosphere.service"
+  UNIT_FOREIGN="" UNIT_DROPINS=""
   if ! user_systemd; then
     UNIT_STATE=none
+    return 0
+  fi
+  # The manager may load ergosphere.service from another search path
+  # (/etc/systemd/user, $XDG_DATA_HOME, $XDG_CONFIG_DIRS, ...). That one is
+  # someone else's: never shadow, start, stop or enable it.
+  frag=$(systemctl --user show -p FragmentPath --value ergosphere.service 2>/dev/null) || frag=""
+  UNIT_DROPINS=$(systemctl --user show -p DropInPaths --value ergosphere.service 2>/dev/null) || UNIT_DROPINS=""
+  if [[ -n "$frag" && "$frag" != "$UNIT_FILE" ]]; then
+    UNIT_STATE=foreign UNIT_FOREIGN=$frag
   elif [[ ! -e "$UNIT_FILE" ]]; then
     UNIT_STATE=absent
   elif grep -qxF "# ergosphere-install-dir: $DEST" "$UNIT_FILE" 2>/dev/null; then
@@ -314,7 +326,7 @@ check_unit() {
   WANT_UNIT=0
   case "$SERVICE:$UNIT_STATE" in
     1:none) row missing service "--service needs a systemd user manager (systemctl --user)" ;;
-    1:foreign) row invalid service "$UNIT_FILE belongs to another install; it was not touched" ;;
+    [01]:foreign) row invalid service "${UNIT_FOREIGN:-$UNIT_FILE} is an ergosphere.service from another install; it was not touched" ;;
     1:*|:ours) WANT_UNIT=1 ;;
     0:ours)
       main=$(unit_main_pid)
@@ -326,9 +338,12 @@ check_unit() {
         row ok service "$UNIT_FILE will be stopped, disabled and removed"
       fi
       ;;
-    *:foreign) row warn service "$UNIT_FILE is from another install; left alone" ;;
+    *:foreign) row warn service "${UNIT_FOREIGN:-$UNIT_FILE} is an ergosphere.service from another install; left alone" ;;
     *:absent) row ok service "no systemd unit (--service starts it at login and restarts it if it crashes or hangs)" ;;
   esac
+  if [[ "$WANT_UNIT" -eq 1 && -n "$UNIT_DROPINS" ]]; then
+    row warn service "drop-ins also change ergosphere.service: $UNIT_DROPINS"
+  fi
   if [[ "$WANT_UNIT" -eq 1 ]]; then
     if ! unit_safe "$DEST" || ! unit_safe "$PYTHON" || ! unit_safe "$CFG_FILE" || ! unit_safe "${GROK%/*}"; then
       row invalid service "a systemd unit needs install dir, python, grok and config paths made of letters, digits and / . _ : + @ - (no spaces)"
@@ -1088,7 +1103,7 @@ main() {
   AGENT="" AGENT_DIR="" CFG_FILE="" LEGACY_FILE="" CFG_AGENTS="(none)" CFG_NOTE="" SERVER_NOTE="" PID=""
   STAGE="" SRC="" STARTED_PID="" VERIFIED=0 PROBE="" PROBE_PID="" PROBE_DIGEST="" PROBE_AT=""
   PYTHON="" CURL="" GROK="" BLOCKERS=() CHANGED=()
-  SERVICE="" UNIT_FILE="" UNIT_STATE="" UNIT_TYPE=notify WANT_UNIT=0 UNIT_CHANGED=0 UNIT_STARTED=0 UNIT_WRITTEN=0 UNIT_HAD_FILE=0 UNIT_WAS_ACTIVE=0 CODE_UPDATED=0
+  SERVICE="" UNIT_FILE="" UNIT_FOREIGN="" UNIT_DROPINS="" UNIT_STATE="" UNIT_TYPE=notify WANT_UNIT=0 UNIT_CHANGED=0 UNIT_STARTED=0 UNIT_WRITTEN=0 UNIT_HAD_FILE=0 UNIT_WAS_ACTIVE=0 CODE_UPDATED=0
   export PYTHONDONTWRITEBYTECODE=1
   trap cleanup EXIT
   trap 'exit 130' INT
