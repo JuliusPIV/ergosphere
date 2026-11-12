@@ -79,7 +79,7 @@ With a terminal it asks `Automatic (recommended) or Manual? [A/m]`. **Automatic*
 
 <br>
 
-Manual mode asks for the install directory, port, listen address, an optional first agent and whether to start on boot:
+Manual mode asks for the install directory, port, listen address and an optional first agent:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JuliusPIV/ergosphere/main/install.sh | bash -s -- --manual
@@ -93,9 +93,6 @@ curl -fsSL https://raw.githubusercontent.com/JuliusPIV/ergosphere/main/install.s
 
 # Listen on one network address of this machine
 curl -fsSL https://raw.githubusercontent.com/JuliusPIV/ergosphere/main/install.sh | bash -s -- --bind 192.0.2.10 --yes
-
-# Start at login (and at boot with lingering), restart on crash or hang (systemd user unit)
-curl -fsSL https://raw.githubusercontent.com/JuliusPIV/ergosphere/main/install.sh | bash -s -- --service
 ```
 
 All options are in the [installer reference](#installer-options).
@@ -264,17 +261,15 @@ The grok sessions it started stop with it. Saved sessions stay in `~/.grok/sessi
 <details>
 <summary><b>Does it start at boot?</b></summary>
 
-Only if you ask for it. On Linux with a systemd user manager, install with `--service` (or answer yes in manual mode) and the installer writes and enables a user unit, `~/.config/systemd/user/ergosphere.service`. It starts Ergosphere when you log in and restarts it if it crashes or hangs: the server pings the systemd watchdog only while it can answer its own `/health`, so a hung server is killed and started again within a minute.
+No. Run the installer again to start it. A rerun reuses a running server and replaces only files that changed. Starting on boot is on the [roadmap](#-roadmap).
 
-To start it at boot, before you log in, turn on lingering once: `loginctl enable-linger $USER` (it may need `sudo`). The installer prints this line but does not run it.
-
-Without `--service`, run the installer again to start it after a reboot. A rerun reuses a running server and replaces only files that changed.
+If you run Ergosphere from your own systemd unit, it supports `Type=notify` and the systemd watchdog. It sends `READY=1` once it listens. With `WatchdogSec=` set, it pings only while it can answer its own `/health`, so with `Restart=always` a hung server is restarted, not just a crashed one. Without systemd nothing changes.
 </details>
 
 <details>
 <summary><b>How do I stop or remove it?</b></summary>
 
-The install summary prints the process ID and a `kill <pid>` command. With `--service` it prints `systemctl --user stop ergosphere` instead: under the unit, `kill` only restarts it. To remove the unit, rerun the installer with `--no-service`. To remove Ergosphere, stop it (and remove the unit) and delete the install directory.
+The install summary prints the process ID and a `kill <pid>` command. To remove Ergosphere, stop it and delete the install directory.
 </details>
 
 <details>
@@ -324,6 +319,7 @@ Plans, not promises. Items are ordered roughly by priority, and each one is tagg
 | --- | --- | --- |
 | **Local models** | ✨ Enhancement | Run sessions on local models, starting with llama.cpp, with a Cloud / Local choice in the new-session dialog. |
 | **Browser login** | 🔐 Security | Sign in to Ergosphere, so it can be reached without an SSH tunnel. |
+| **Start on boot** | 🛋️ Quality of life | Ergosphere comes back by itself after a reboot. |
 | **Disconnect or Quit** | 🧭 Usability | Leave a session running and close the page, or stop grok, from one clear dialog. |
 | **Takeover prompt** | 🧭 Usability | When a session is open in a terminal or another browser, a prompt offers to move it here. |
 | **Consistent theming** | 🧭 Usability | One consistent look across the list, the session page and Settings. |
@@ -352,12 +348,10 @@ Pass options after `| bash -s --`.
 | Option | Meaning |
 |---|---|
 | `--auto` | Automatic: no questions. Also the mode when there is no terminal. |
-| `--manual` | Ask for the install directory, port, listen address, an optional agent and, with a systemd user manager, whether to start on boot. |
+| `--manual` | Ask for the install directory, port, listen address and an optional agent. |
 | `--dir DIR` | Install directory. Default `~/.local/share/ergosphere`. |
 | `--port N` | Port. Default `ERGOSPHERE_PORT`, else the port saved in `ergosphere.json`, else `9241`. |
 | `--bind ADDR` | Listen address: an IPv4 address of this machine, `0.0.0.0`, or `localhost`. Default: the address saved in `ergosphere.json`, else `127.0.0.1`. |
-| `--service` | Run it as a systemd user unit, `ergosphere.service` (`Type=notify`, `WatchdogSec=60`, `Restart=always`, `RestartSec=5`, `WantedBy=default.target`), and enable it: it starts at login, at boot with `loginctl enable-linger`, and restarts if it crashes or hangs. A rerun without the flag keeps the unit and updates it when it differs. With a release that has no watchdog support (`--version` v0.1.3 or older) the unit is `Type=simple` without `WatchdogSec`: it restarts after a crash, not a hang, and the summary says so. Never touches system units or a unit from another install. |
-| `--no-service` | Stop, disable and remove that unit (only when it has no grok sessions open); Ergosphere then runs without systemd. |
 | `--yes` | Approve a listen address other than loopback without asking. |
 | `--version vA.B.C` | Install that release instead of the latest one (pin or roll back). The rerun command it prints keeps it. |
 | `--check` | Run the checks only. Change nothing. |
@@ -398,7 +392,7 @@ python3 ergosphere.py           # runs in the foreground; prints ERGOSPHERE_READ
 | Symptom | Fix |
 |---|---|
 | `grok not on PATH` | Install grok for this user, or start Ergosphere from a shell where `grok` works. |
-| Something went wrong and you want details | The log is `ergosphere.log` in the install directory. With `--service`, also `journalctl --user -u ergosphere`. |
+| Something went wrong and you want details | The log is `ergosphere.log` in the install directory. |
 | A permission mode does not start as expected | grok flags can change between versions. On grok 1.0.70, Ask is `--permission-mode default`, Auto is `--permission-mode auto` and Always approve is `--always-approve`. Check `grok --help` on newer versions. |
 
 ### Known limits
