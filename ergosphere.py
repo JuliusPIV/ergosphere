@@ -1304,6 +1304,10 @@ class SessionBusy(RuntimeError):
         self.state = state
 
 
+# A new session's folder appears about 0.2 s after grok starts.
+NEW_SESSION_LOCK_SECS = 15
+
+
 class SessionLockUnavailable(RuntimeError):
     """The session folder cannot be opened to lock it."""
 
@@ -1760,6 +1764,36 @@ class Live:
         except OSError:
             pass
 
+    def lock_when_created(self):
+        """Take the session-folder lock once grok has made the folder.
+
+        A new session has no folder at launch (grok writes it about 0.2 s
+        in). Until it exists no other server knows the id; once it does,
+        another server could resume it while unable to see this grok (a
+        separate process view), so lock it, as a Resume would, until grok
+        exits. A folder that never appears keeps the old behaviour, logged.
+        """
+        deadline = time.time() + NEW_SESSION_LOCK_SECS
+        while time.time() < deadline and self.proc.poll() is None:
+            try:
+                fds = acquire_session_lock(self.sid)
+            except (SessionLockUnavailable, ValueError) as exc:
+                print("session lock: new session %s: %s" % (self.sid, exc), flush=True)
+                return
+            if fds is None:
+                print("session lock: new session %s is locked by another process" % self.sid, flush=True)
+                return
+            if fds:
+                with self.lock:
+                    self.lock_fds.extend(fds)
+                if self.proc.poll() is not None:
+                    self.release_lock()
+                return
+            time.sleep(0.1)
+        if self.proc.poll() is None:
+            print("session lock: new session %s made no folder within %d s; not locked"
+                  % (self.sid, NEW_SESSION_LOCK_SECS), flush=True)
+
     def _release_on_exit(self):
         # grok outlived the kill: the entry stays (state stopping) and keeps
         # the lock until grok is gone; then leave LIVE as the reader would.
@@ -1819,6 +1853,10 @@ def open_live(sid, cmd, cwd, cols, rows):
             live.lock_fds = fds
             LIVE[sid] = live
             live.start()
+            later = getattr(live, "lock_when_created", None)
+            if not fds and later:
+                # New session: lock its folder as soon as grok makes it.
+                threading.Thread(target=later, daemon=True).start()
     # Log after release: a stalled log write must not block other launches.
     if no_lock is not None:
         # Refuse rather than risk two groks on one session.
