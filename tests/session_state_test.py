@@ -530,6 +530,29 @@ def check_new_session_late_folder(erg):
     return None
 
 
+def check_new_session_lock_error(erg):
+    # The waiter cannot lock the new folder (here: no read permission, as a
+    # transient EMFILE would also do). It must not leave this grok running
+    # unlocked: once the folder is readable again, a server that cannot see
+    # this grok would resume it and two groks would write one session.
+    sid = "%08d-0000-4000-8000-000000000000" % 40
+    folder = session_folder(sid)
+    live, _ = erg.open_live(sid, [GROK, "-c", FAKE, "--session-id", sid], CWD, 80, 24)
+    tab = Tab()
+    live.attach(tab)
+    os.makedirs(folder, mode=0o000)
+    time.sleep(0.5)
+    os.chmod(folder, 0o755)
+    stopped = wait_for(lambda: not groks_for(sid), 5)
+    told = any(op == 1 and b'"ended"' in p for op, p in tab.frames)
+    other = other_server(sid, blind=True)
+    n = len(groks_for(sid))
+    os.kill(other.pid, signal.SIGKILL)
+    if not stopped or not told or n != 1:
+        return "new session lock error: own grok stopped=%s, page told=%s; Resume from a blind server made %d groks" % (stopped, told, n)
+    return None
+
+
 def check_cpu_callers_share(erg):
     # Two pollers close together both see a busy grok's CPU use.
     busy = popen([sys.executable, "-c", "while True: pass"])
@@ -552,7 +575,7 @@ def main():
               check_disjoint_envs, check_lock_writes_nothing, check_new_session_launch,
               check_one_proc_pass, check_lock_kept_while_grok_lives, check_cpu_callers_share,
               check_orphan_race, check_bad_sid, check_stopping_until_exit, check_new_session_locked,
-              check_new_session_taken, check_new_session_late_folder)
+              check_new_session_taken, check_new_session_late_folder, check_new_session_lock_error)
     failures = []
     try:
         for check in checks:

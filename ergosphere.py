@@ -1378,6 +1378,7 @@ class SessionBusy(RuntimeError):
 # for this long, then once a second, while grok runs.
 NEW_SESSION_FAST_SECS = 5
 TAKEN_TEXT = "session was taken by another Ergosphere server"
+LOCK_FAILED_TEXT = "the session folder could not be locked; see the server log"
 
 
 class SessionLockUnavailable(RuntimeError):
@@ -1861,17 +1862,15 @@ class Live:
             try:
                 fds = acquire_session_lock(self.sid)
             except (SessionLockUnavailable, ValueError) as exc:
-                print("session lock: new session %s: %s" % (self.sid, exc), flush=True)
+                # Fail closed, as open_live does: an unlocked grok could be
+                # resumed by a server that cannot see it.
+                print("session lock: new session %s: %s; stopping this grok" % (self.sid, exc), flush=True)
+                self._stop_unlocked(LOCK_FAILED_TEXT)
                 return
             if fds is None:
                 print("session lock: new session %s was taken by another process; stopping this grok"
                       % self.sid, flush=True)
-                self.end_reason = TAKEN_TEXT
-                self.shutdown()
-                if self.proc.poll() is not None:
-                    with LIVE_LOCK:
-                        if LIVE.get(self.sid) is self:
-                            LIVE.pop(self.sid, None)
+                self._stop_unlocked(TAKEN_TEXT)
                 return
             if fds:
                 with self.lock:
@@ -1880,6 +1879,14 @@ class Live:
                     self.release_lock()
                 return
             time.sleep(0.02 if time.time() - start < NEW_SESSION_FAST_SECS else 1.0)
+
+    def _stop_unlocked(self, reason):
+        self.end_reason = reason
+        self.shutdown()
+        if self.proc.poll() is not None:
+            with LIVE_LOCK:
+                if LIVE.get(self.sid) is self:
+                    LIVE.pop(self.sid, None)
 
     def _release_on_exit(self):
         # grok outlived the kill: the entry stays (state stopping) and keeps
