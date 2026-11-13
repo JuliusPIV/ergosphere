@@ -353,6 +353,7 @@ def session_updates_path(sid):
 
 
 BUTTON_LABEL = "Quit that CLI and resume here"
+ORPHAN_BUTTON_LABEL = "Quit that grok and resume here"
 
 
 def read_proc_cmdline(pid):
@@ -381,22 +382,34 @@ def cmdline_contains_sid(raw, sid):
     return any(part in forms for part in raw.split(b"\0"))
 
 
-def proc_stat_ppid(pid):
-    """ppid from /proc/<pid>/stat. comm can contain spaces and parentheses."""
+def proc_stat_fields(pid):
+    """Fields after comm in /proc/<pid>/stat (state, ppid, pgrp, session, ...).
+
+    comm can contain spaces and parentheses, so split after the last ')'.
+    """
     try:
         raw = open("/proc/%s/stat" % int(pid), "rb").read()
     except (OSError, ValueError):
-        return None
+        return []
     cut = raw.rfind(b")")
     if cut < 0:
-        return None
-    fields = raw[cut + 2:].split()
-    if len(fields) < 2:
+        return []
+    return raw[cut + 2:].split()
+
+
+def proc_stat_int(pid, index):
+    fields = proc_stat_fields(pid)
+    if len(fields) <= index:
         return None
     try:
-        return int(fields[1])
+        return int(fields[index])
     except ValueError:
         return None
+
+
+def proc_stat_ppid(pid):
+    """ppid from /proc/<pid>/stat."""
+    return proc_stat_int(pid, 1)
 
 
 def is_ergosphere_server(pid):
@@ -407,31 +420,56 @@ def is_ergosphere_server(pid):
     return any(os.path.basename(arg) == b"ergosphere.py" for arg in args[1:])
 
 
-def holder_kind(pid):
-    """web when any ancestor is a python process running ergosphere.py, else cli.
+def is_orphan_grok(pid):
+    """A grok an Ergosphere server started and then left behind.
 
-    A wrapper on PATH can fork, so the real grok's parent is the shell,
-    not this server. Walk /proc/<pid>/stat ppid up to init. The walk is
-    bounded. A web ancestor is an Ergosphere server, not a terminal to quit.
+    The server starts grok as its own session leader (start_new_session).
+    When the server is killed, grok keeps running, re-parented to init or a
+    subreaper (systemd --user). A grok typed in a shell is not a session
+    leader: the shell is.
+    """
+    if proc_stat_int(pid, 3) != int(pid):
+        return False
+    ppid = proc_stat_ppid(pid)
+    if ppid == 1:
+        return True
+    args = [part for part in read_proc_cmdline(ppid).split(b"\0") if part] if ppid else []
+    return bool(args) and os.path.basename(args[0]) == b"systemd"
+
+
+def holder_kind(pid):
+    """web, orphan or cli for a grok that holds a session.
+
+    web: the nearest grok-or-server ancestor is a python process running
+    ergosphere.py, so another Ergosphere server runs it. A grok met first
+    means a shell inside a grok session started this one: that is a CLI,
+    even when an Ergosphere server is further up. A wrapper on PATH can
+    fork, so the real grok's parent is the shell, not the server; the walk
+    goes up to init and is bounded.
+    orphan: no server above it, and it is a session leader whose parent is
+    init or systemd: a grok its Ergosphere server left behind.
     """
     try:
         current = int(pid)
     except (TypeError, ValueError):
         return "cli"
+    start = current
     seen = set()
     for _ in range(64):
         if current in seen or current <= 0:
-            return "cli"
+            break
         seen.add(current)
         ppid = proc_stat_ppid(current)
         if ppid is None or ppid <= 0 or ppid == current or ppid in seen:
-            return "cli"
+            break
         if is_ergosphere_server(ppid):
             return "web"
-        if ppid <= 1:
+        if grok_cmdline(read_proc_cmdline(ppid)):
             return "cli"
+        if ppid <= 1:
+            break
         current = ppid
-    return "cli"
+    return "orphan" if is_orphan_grok(start) else "cli"
 
 
 def holder_can_quit(holder):
@@ -442,25 +480,106 @@ def holder_can_quit(holder):
     )
 
 
-def own_grok_pids():
+def holder_button(holder):
+    if isinstance(holder, dict) and holder.get("kind") == "orphan":
+        return ORPHAN_BUTTON_LABEL
+    return BUTTON_LABEL
+
+
+def holder_state(holder):
+    """M1 state name for a session another grok holds."""
+    if holder.get("kind") == "cli":
+        return "held-by-cli"
+    return "held-by-other-server"
+
+
+class ProcScan:
+    """One pass over /proc, shared by every session a list render looks at.
+
+    cmd: pid -> argv bytes, ppids: pid -> ppid, groks: sorted pids whose
+    argv[0] is grok (not this process). own and fd targets are filled on
+    first use. A single-session lookup builds its own.
+    """
+
+    def __init__(self):
+        self.cmd = {}
+        self.ppids = {}
+        try:
+            names = os.listdir("/proc")
+        except OSError:
+            names = []
+        me = os.getpid()
+        for name in names:
+            if not name.isdigit():
+                continue
+            pid = int(name)
+            ppid = proc_stat_ppid(pid)
+            if ppid is None:
+                continue
+            self.ppids[pid] = ppid
+            self.cmd[pid] = read_proc_cmdline(pid)
+        self.groks = sorted(pid for pid, raw in self.cmd.items() if pid != me and raw and grok_cmdline(raw))
+        self._own = None
+        self._fds = {}
+
+    def cmdline(self, pid):
+        raw = self.cmd.get(pid)
+        return read_proc_cmdline(pid) if raw is None else raw
+
+    def own(self):
+        if self._own is None:
+            self._own = own_grok_pids(self)
+        return self._own
+
+    def fd_targets(self, pid):
+        if pid not in self._fds:
+            out = []
+            fd_dir = "/proc/%d/fd" % pid
+            try:
+                names = os.listdir(fd_dir)
+            except OSError:
+                names = []
+            for name in names:
+                try:
+                    out.append((int(name), os.readlink(os.path.join(fd_dir, name))))
+                except (OSError, ValueError):
+                    continue
+            out.sort()
+            self._fds[pid] = out
+        return self._fds[pid]
+
+
+def live_roots():
+    # Caller holds LIVE_LOCK.
+    roots = []
+    for live in LIVE.values():
+        proc = getattr(live, "proc", None)
+        if proc is not None and proc.pid:
+            roots.append(proc.pid)
+    return roots
+
+
+def own_grok_pids(scan=None, roots=None):
     """PIDs of the grok terminals this server runs.
 
     Each tracked child, and when that child is a wrapper, the first grok
     under it. The walk stops at any grok and at any ergosphere.py server:
     a grok or an Ergosphere started from a web session's shell holds its
     own session, and Resume must still see it.
+    roots: this server's grok pids, when the caller already holds LIVE_LOCK.
     """
-    with LIVE_LOCK:
-        roots = []
-        for live in LIVE.values():
-            proc = getattr(live, "proc", None)
-            if proc is not None and proc.pid:
-                roots.append(proc.pid)
+    if roots is None:
+        with LIVE_LOCK:
+            roots = live_roots()
     own = set(roots)
+    if not roots:
+        return own
+    if scan is None:
+        scan = ProcScan()
     children = {}
-    for child, parent in _proc_ppid_map().items():
+    for child, parent in scan.ppids.items():
         children.setdefault(parent, []).append(child)
-    stack = [root for root in roots if not grok_cmdline(read_proc_cmdline(root))]
+    stack = [root for root in roots if not grok_cmdline(scan.cmdline(root))]
     seen = set()
     while stack and len(seen) < 4096:
         pid = stack.pop()
@@ -470,14 +589,14 @@ def own_grok_pids():
         for child in children.get(pid, ()):
             if is_ergosphere_server(child):
                 continue
-            if grok_cmdline(read_proc_cmdline(child)):
+            if grok_cmdline(scan.cmdline(child)):
                 own.add(child)
                 continue
             stack.append(child)
     return own
 
 
-def session_holder(sid):
+def session_holder(sid, scan=None):
     """Grok that already owns this session, or None.
 
     via=cmdline: the id is on that grok's command line (Ergosphere resume, or
@@ -490,37 +609,21 @@ def session_holder(sid):
     if not isinstance(sid, str) or not SID_TOKEN_RE.match(sid):
         return None
     marker = "/" + sid + "/"
-    own = own_grok_pids()
+    if scan is None:
+        scan = ProcScan()
+    own = scan.own()
     cmdline_pid = None
     file_pid = None
-    try:
-        pids = os.listdir("/proc")
-    except OSError:
-        return None
-    for pid_text in pids:
-        if not pid_text.isdigit():
-            continue
-        pid = int(pid_text)
+    for pid in scan.groks:
         if pid in own:
             continue
-        raw = read_proc_cmdline(pid)
-        if not raw or not grok_cmdline(raw):
-            continue
+        raw = scan.cmdline(pid)
         if cmdline_contains_sid(raw, sid):
             cmdline_pid = pid
             break
         if file_pid is not None:
             continue
-        fd_dir = "/proc/%s/fd" % pid
-        try:
-            names = os.listdir(fd_dir)
-        except OSError:
-            continue
-        for name in names:
-            try:
-                target = os.readlink(os.path.join(fd_dir, name))
-            except OSError:
-                continue
+        for _num, target in scan.fd_targets(pid):
             if marker in target:
                 file_pid = pid
                 break
@@ -531,8 +634,32 @@ def session_holder(sid):
     return None
 
 
-def busy_notice(sid, holder):
+def busy_notice(sid, holder, here=False):
+    text = _busy_text(sid, holder)
+    if here:
+        # Two groks on one session: this server's and the holder.
+        text += (
+            "This server is also running a grok on this session. "
+            "Quit the other one before using it here.\n"
+        )
+    return text
+
+
+def _busy_text(sid, holder):
     pid = holder["pid"]
+    if pid is None:
+        # Only the session-folder lock shows it (LOCK_HOLDER).
+        pid = "not visible from this server"
+    if holder.get("kind") == "orphan":
+        return (
+            "This session is open in a grok that an Ergosphere server left "
+            "running when it stopped. That grok has no terminal. "
+            "This page checks once a second and offers Resume when it exits. "
+            "A button can quit it and open the session here.\n"
+            "session id: %s\n"
+            "holder pid: %s\n"
+            "%s\n"
+        ) % (sid, pid, ORPHAN_BUTTON_LABEL)
     if holder.get("kind") == "web":
         return (
             "This session is already open in a web dashboard on this machine. "
@@ -1242,6 +1369,126 @@ def kill_all():
         live.shutdown()
 
 
+class SessionBusy(RuntimeError):
+    """A start refused because the session already has a grok (M1 state)."""
+
+    def __init__(self, state, message):
+        RuntimeError.__init__(self, message)
+        self.state = state
+
+
+# A new session's folder appears about 0.2 s after grok starts: poll fast
+# for this long, then once a second, while grok runs.
+NEW_SESSION_FAST_SECS = 5
+TAKEN_TEXT = "session was taken by another Ergosphere server"
+LOCK_FAILED_TEXT = "the session folder could not be locked; see the server log"
+
+
+class SessionLockUnavailable(RuntimeError):
+    """The session folder cannot be opened to lock it."""
+
+
+def acquire_session_lock(sid):
+    """Advisory flock on the session's own folder, held while this server's grok runs.
+
+    Every server that can resume a session reads the same folder under
+    ~/.grok/sessions, so they always meet on it, whatever their environment
+    (HOME caches, TMPDIR, private /tmp). The folder is opened read-only and
+    nothing is written into ~/.grok. flock works across processes, so a
+    second server cannot start the session in the window between its holder
+    check and its spawn (grok itself does not refuse a second open). Once
+    grok runs, a keeper process holds the fd until grok exits
+    (keep_lock_for), so the lock lives exactly as long as grok, even if
+    this server dies first.
+    Returns [fd]; [] for a new session whose folder grok has not made yet
+    (its fresh id is unknown to every other server until grok, already
+    running and visible to their holder scan, writes it); None when another
+    process holds the lock. Raises ValueError for an id that is not a
+    session id, SessionLockUnavailable when the folder cannot be opened.
+    """
+    if not isinstance(sid, str) or not SID_RE.match(sid):
+        raise ValueError("unknown session")
+    folder = session_dir_for(sid)
+    if folder is None:
+        return []
+    try:
+        fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        raise SessionLockUnavailable("cannot open %s: %s" % (folder, exc.strerror or exc))
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # A status probe (session_lock_busy) holds it for microseconds:
+            # only a lock still held a moment later is another grok's.
+            time.sleep(0.05)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    except OSError as exc:
+        os.close(fd)
+        raise SessionLockUnavailable("cannot lock %s: %s" % (folder, exc.strerror or exc))
+    return [fd]
+
+
+def close_fds(fds):
+    for fd in fds:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def session_lock_busy(sid):
+    """True when some process holds the session-folder lock (another server's grok).
+
+    A non-blocking try of the same flock open_live takes; on success it is
+    dropped at once. Only meaningful when this server runs no grok on sid
+    (its own grok holds the lock too). False for no folder or a lock error.
+    """
+    try:
+        fds = acquire_session_lock(sid)
+    except (SessionLockUnavailable, ValueError):
+        return False
+    if fds is None:
+        return True
+    close_fds(fds)
+    return False
+
+
+# Holds a session's lock fd until its grok exits (pidfd readable).
+LOCK_KEEPER = "import select,sys\nselect.select([int(sys.argv[1])], [], [])\n"
+
+
+def keep_lock_for(proc, fds):
+    """Hand the lock fds to a small process that exits when grok does; close ours.
+
+    The lock then lives exactly as long as grok, also when this server dies
+    first. Not grok itself: grok passes an inherited fd on to every child
+    (an MCP server, a background shell command), and one that outlives grok
+    would keep the session locked. Raises SessionLockUnavailable when the
+    keeper cannot be started.
+    """
+    try:
+        try:
+            pidfd = os.pidfd_open(proc.pid)
+        except ProcessLookupError:
+            return  # grok already gone: nothing to hold
+        try:
+            subprocess.Popen(
+                [sys.executable, "-I", "-S", "-c", LOCK_KEEPER, str(pidfd)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True, close_fds=True, pass_fds=tuple(fds) + (pidfd,),
+            )
+        finally:
+            os.close(pidfd)
+    except (OSError, AttributeError) as exc:
+        raise SessionLockUnavailable("cannot keep the lock: %s" % exc)
+    finally:
+        close_fds(fds)
+
+
 def spawn_grok(cmd, cwd, cols, rows):
     master, slave = pty.openpty()
     winsz = struct.pack("HHHH", rows, cols, 0, 0)
@@ -1315,6 +1562,9 @@ class Live:
         self.reader = None
         self.watcher = None
         self.closed = False
+        self.ended_sent = False
+        # Why this grok was ended, for the pages ("" for a plain exit or Quit).
+        self.end_reason = ""
         self.sub_state = {"rows": {}, "order": []}
         self.sub_lock = threading.Lock()
 
@@ -1396,12 +1646,23 @@ class Live:
                 client.queue.put((1, frame))
 
     def _publish_ended(self):
-        frame = json.dumps({"type": "ended"}).encode("utf-8")
+        # Every attached client, once: the reader (grok exited) and
+        # shutdown (Quit from one tab) both call this.
+        frame = self._ended_frame()
         with self.lock:
+            if self.ended_sent:
+                return
+            self.ended_sent = True
             clients = list(self.clients)
         for client in clients:
             if client.alive:
                 client.queue.put((1, frame))
+
+    def _ended_frame(self):
+        msg = {"type": "ended"}
+        if self.end_reason:
+            msg["reason"] = self.end_reason
+        return json.dumps(msg).encode("utf-8")
 
     def attach(self, handler):
         client = _Client(handler)
@@ -1413,7 +1674,11 @@ class Live:
             snap = self._replay()
             if snap:
                 self._enqueue(client, snap)
+            late = self.ended_sent
         client.queue.put((1, self._subagent_frame()))
+        if late:
+            # Attached after the ended frame went out (Quit raced this attach).
+            client.queue.put((1, self._ended_frame()))
         return client
 
     def detach(self, client):
@@ -1611,12 +1876,71 @@ class Live:
         return changed
 
     def shutdown(self):
+        # STOPPING until kill_proc returns: the entry stays in LIVE, so a
+        # Resume in that window is refused instead of starting a second grok.
         self.closed = True
         kill_proc(self.proc)
+        # The reader left its loop on `closed`, before grok exited, so it
+        # did not tell the other tabs. Do it here.
+        self._publish_ended()
+        if self.proc.poll() is None:
+            # grok outlived SIGKILL + 3 s: the entry stays until it is gone.
+            threading.Thread(target=self._release_on_exit, daemon=True).start()
         try:
             os.close(self.master)
         except OSError:
             pass
+
+    def lock_when_created(self):
+        """Take the session-folder lock once grok has made the folder.
+
+        A new session has no folder at launch (grok writes it about 0.2 s
+        in). Until it exists no other server knows the id; once it does,
+        another server could resume it while unable to see this grok (a
+        separate process view), so lock it, as a Resume would, until grok
+        exits (keep_lock_for). Polls every 0.02 s for the first seconds,
+        then every second, for as long as grok runs. If another process got the lock first,
+        that server has the session: stop this grok, as a Quit would, and
+        tell this server's pages why.
+        """
+        start = time.time()
+        while self.proc.poll() is None:
+            try:
+                fds = acquire_session_lock(self.sid)
+                if fds:
+                    keep_lock_for(self.proc, fds)
+                    return
+            except (SessionLockUnavailable, ValueError) as exc:
+                # Fail closed, as open_live does: an unlocked grok could be
+                # resumed by a server that cannot see it.
+                print("session lock: new session %s: %s; stopping this grok" % (self.sid, exc), flush=True)
+                self._stop_unlocked(LOCK_FAILED_TEXT)
+                return
+            if fds is None:
+                print("session lock: new session %s was taken by another process; stopping this grok"
+                      % self.sid, flush=True)
+                self._stop_unlocked(TAKEN_TEXT)
+                return
+            time.sleep(0.02 if time.time() - start < NEW_SESSION_FAST_SECS else 1.0)
+
+    def _stop_unlocked(self, reason):
+        self.end_reason = reason
+        self.shutdown()
+        if self.proc.poll() is not None:
+            with LIVE_LOCK:
+                if LIVE.get(self.sid) is self:
+                    LIVE.pop(self.sid, None)
+
+    def _release_on_exit(self):
+        # grok outlived the kill: the entry stays (state stopping) until grok
+        # is gone (its lock goes with it); then leave LIVE as the reader would.
+        try:
+            self.proc.wait()
+        except Exception:
+            return
+        with LIVE_LOCK:
+            if LIVE.get(self.sid) is self:
+                LIVE.pop(self.sid, None)
 
 
 class _Client:
@@ -1633,13 +1957,50 @@ def open_live(sid, cmd, cwd, cols, rows):
         live = LIVE.get(sid)
         if live is not None and live.alive():
             return live, True
+        if live is not None and live_state(live) == "stopping":
+            raise SessionBusy("stopping", "session is still stopping; try again in a moment")
         if live is not None:
             LIVE.pop(sid, None)
-        proc, master = spawn_grok(cmd, cwd, cols, rows)
-        live = Live(sid, proc, master, cwd)
-        LIVE[sid] = live
-        live.start()
+        no_lock = None
+        try:
+            fds = acquire_session_lock(sid)
+        except SessionLockUnavailable as exc:
+            no_lock = exc
+        if no_lock is None:
+            if fds is None:
+                raise SessionBusy("held-by-other-server", "session is open in another Ergosphere server")
+            # Recheck under the lock: a grok can hold the session with no lock
+            # (left by a killed server, or a CLI started after the caller looked).
+            scan = ProcScan()
+            scan._own = own_grok_pids(scan, live_roots())
+            holder = session_holder(sid, scan)
+            if holder:
+                close_fds(fds)
+                raise SessionBusy(holder_state(holder), "session is already open in another grok")
+            try:
+                proc, master = spawn_grok(cmd, cwd, cols, rows)
+            except Exception:
+                close_fds(fds)
+                raise
+            if fds:
+                try:
+                    keep_lock_for(proc, fds)
+                except SessionLockUnavailable as exc:
+                    no_lock = exc
+                    kill_proc(proc)
+                    os.close(master)
+        if no_lock is None:
+            live = Live(sid, proc, master, cwd)
+            LIVE[sid] = live
+            live.start()
+            if not fds:
+                # New session: lock its folder as soon as grok makes it.
+                threading.Thread(target=live.lock_when_created, daemon=True).start()
     # Log after release: a stalled log write must not block other launches.
+    if no_lock is not None:
+        # Refuse rather than risk two groks on one session.
+        print("session lock: %s" % no_lock, flush=True)
+        raise RuntimeError("cannot start: the session folder cannot be locked; see the server log")
     print("term pid=%s sid=%s cmd=%s" % (proc.pid, sid, " ".join(cmd)), flush=True)
     return live, False
 
@@ -1663,24 +2024,9 @@ def list_live():
 _TURN_MARK = b"agent turn in progress"
 
 
-def _proc_ppid_map():
-    ppids = {}
-    try:
-        names = os.listdir("/proc")
-    except OSError:
-        return ppids
-    for name in names:
-        if not name.isdigit():
-            continue
-        ppid = proc_stat_ppid(name)
-        if ppid is None:
-            continue
-        ppids[int(name)] = ppid
-    return ppids
-
-
-def _turn_in_children(pid, ppids):
+def _turn_in_children(pid, ppids, cmd=None):
     # Direct or deeper. The mark is on systemd-inhibit, not on grok itself.
+    cmd = cmd or {}
     children = {}
     for child, parent in ppids.items():
         children.setdefault(parent, []).append(child)
@@ -1691,11 +2037,215 @@ def _turn_in_children(pid, ppids):
         if child in seen or child == pid:
             continue
         seen.add(child)
-        raw = read_proc_cmdline(child)
+        raw = cmd.get(child)
+        if raw is None:
+            raw = read_proc_cmdline(child)
         if raw and _TURN_MARK in raw.replace(b"\0", b" "):
             return True
         stack.extend(children.get(child, []))
     return False
+
+
+_INHIBIT = {"works": None}
+_INHIBIT_LOCK = threading.Lock()
+
+
+def inhibit_works():
+    """True when systemd-inhibit can take a lock here (checked once).
+
+    With no system bus (containers, sandboxes, some WSL setups) it exits at
+    once, so grok's "agent turn in progress" child never shows.
+    """
+    with _INHIBIT_LOCK:
+        if _INHIBIT["works"] is None:
+            ok = False
+            binary = shutil.which("systemd-inhibit")
+            if binary:
+                try:
+                    ok = subprocess.run(
+                        [binary, "--what=idle", "--who=Ergosphere",
+                         "--why=availability check", "true"],
+                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL, timeout=5,
+                    ).returncode == 0
+                except (OSError, subprocess.SubprocessError):
+                    ok = False
+            _INHIBIT["works"] = ok
+        return _INHIBIT["works"]
+
+
+# Fallback turn signal without systemd-inhibit. A turn writes the session's
+# files (events, chat history, updates) and uses CPU; an idle grok does
+# neither (measured: no writes and 0-1% CPU when idle).
+TURN_WRITE_SECS = 8
+TURN_CPU_WRITE_SECS = 60
+TURN_CPU_PCT = 3.0
+# grok writes its session files while it starts (measured: within 0.5 s).
+TURN_START_SECS = 3
+_CPU_SEEN = {}
+_CPU_LOCK = threading.Lock()
+
+
+def _newest_write(sid):
+    folder = session_dir_for(sid)
+    if not folder:
+        return None
+    newest = None
+    try:
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                try:
+                    if entry.is_file():
+                        mtime = entry.stat().st_mtime
+                        if newest is None or mtime > newest:
+                            newest = mtime
+                except OSError:
+                    continue
+    except OSError:
+        return None
+    return newest
+
+
+CPU_BASE_SECS = 1.0
+
+
+def _cpu_pct(pid):
+    """Recent CPU percent of pid, or None before a first measurement.
+
+    Shared by every caller (list poll, chat polls): one baseline per pid,
+    renewed only once it is CPU_BASE_SECS old, and the last result is
+    returned to callers in between, so close calls do not reset each other.
+    """
+    fields = proc_stat_fields(pid)
+    if len(fields) < 13:
+        return None
+    try:
+        ticks = int(fields[11]) + int(fields[12])
+    except ValueError:
+        return None
+    now = time.time()
+    with _CPU_LOCK:
+        base_at, base_ticks, last = _CPU_SEEN.get(pid, (None, None, None))
+        if base_at is None or now - base_at > 120 or ticks < base_ticks:
+            last = None
+            _CPU_SEEN[pid] = (now, ticks, None)
+        elif now - base_at >= CPU_BASE_SECS:
+            last = 100.0 * (ticks - base_ticks) / os.sysconf("SC_CLK_TCK") / (now - base_at)
+            _CPU_SEEN[pid] = (now, ticks, last)
+        if len(_CPU_SEEN) > 512:
+            _CPU_SEEN.clear()
+    return last
+
+
+def proc_started(pid):
+    """Start time of pid in epoch seconds, or None."""
+    start = proc_stat_int(pid, 19)
+    if start is None:
+        return None
+    try:
+        with open("/proc/stat") as handle:
+            for line in handle:
+                if line.startswith("btime "):
+                    return int(line.split()[1]) + start / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _turn_without_inhibit(pid, sid):
+    # A write in the last few seconds; or CPU use while the session wrote
+    # within the last minute (a turn thinking between writes). CPU alone,
+    # for example typing into an idle session, is not a turn.
+    newest = _newest_write(sid)
+    cpu = _cpu_pct(pid)
+    if newest is None:
+        return False
+    started = proc_started(pid)
+    if started is not None and newest < started + TURN_START_SECS:
+        return False
+    age = time.time() - newest
+    if age <= TURN_WRITE_SECS:
+        return True
+    return cpu is not None and cpu >= TURN_CPU_PCT and age <= TURN_CPU_WRITE_SECS
+
+
+def grok_turn(pid, sid, scan=None):
+    """working or idle for a live grok."""
+    if scan is None:
+        scan = ProcScan()
+    if _turn_in_children(pid, scan.ppids, scan.cmd):
+        return "working"
+    if not inhibit_works() and _turn_without_inhibit(pid, sid):
+        return "working"
+    return "idle"
+
+
+def live_state(live):
+    """This server's own entry: starting, running, stopping, or None.
+
+    None: no entry, or grok already exited (the reader pops it).
+    stopping: Quit was asked (closed) and grok has not exited yet.
+    starting: grok runs and has printed nothing yet.
+    """
+    proc = getattr(live, "proc", None) if live is not None else None
+    if proc is None or proc.poll() is not None:
+        return None
+    if getattr(live, "closed", False):
+        return "stopping"
+    if not getattr(live, "buffer", b"x") and not getattr(live, "trimmed", False):
+        return "starting"
+    return "running"
+
+
+def session_state(sid, with_turn=True, scan=None):
+    """The one answer to "who runs this session", for every handler and page.
+
+    state: stopped, starting, running-idle, running-working, stopping,
+    held-by-cli or held-by-other-server. pid: the grok it names.
+    holder: another grok on this session (session_holder). Any holder makes
+    the state held-by-*, also when this server runs a grok on it too (two
+    groks on one session: pages refuse to resume or attach, show the holder
+    notice, and the list marks the row). here: this server's own grok is
+    starting or running. turn: working or idle for any state with a live
+    grok, when with_turn.
+    """
+    with LIVE_LOCK:
+        live = LIVE.get(sid)
+    here = live_state(live)
+    if scan is None:
+        scan = ProcScan()
+    holder = session_holder(sid, scan)
+    out = {"id": sid, "state": "stopped", "pid": None, "turn": None, "holder": holder,
+           "here": here in ("starting", "running")}
+    if here == "stopping":
+        out["state"] = "stopping"
+        out["pid"] = live.proc.pid
+        return out
+    if here and not holder:
+        out["pid"] = live.proc.pid
+        turn = grok_turn(live.proc.pid, sid, scan) if with_turn and here == "running" else "idle"
+        out["turn"] = turn
+        out["state"] = "starting" if here == "starting" else "running-" + turn
+        return out
+    if not holder and not here and session_lock_busy(sid):
+        # Locked by a grok this server cannot see (another PID namespace):
+        # the same lock open_live meets, so Resume and this agree.
+        holder = out["holder"] = dict(LOCK_HOLDER)
+    if holder:
+        out["state"] = holder_state(holder)
+        out["pid"] = holder["pid"]
+        if with_turn and holder["pid"] is not None:
+            out["turn"] = grok_turn(holder["pid"], sid, scan)
+    return out
+
+
+# A session-folder lock with no grok in view: another server's, pid unknown.
+LOCK_HOLDER = {"pid": None, "via": "lock", "kind": "web"}
+
+
+def running_here(state):
+    """This server's own grok is starting or running (alone, or beside a holder)."""
+    return bool(state.get("here"))
 
 
 def _cmdline_session(raw):
@@ -1714,25 +2264,11 @@ def _cmdline_session(raw):
     return None
 
 
-def _fd_session(pid):
+def _fd_session(pid, scan):
     # Lowest fd number, not lexical order. Other session files do not count.
     root = os.path.abspath(str(sessions_root()))
     prefix = root + os.sep
-    fd_dir = "/proc/%d/fd" % pid
-    try:
-        names = os.listdir(fd_dir)
-    except OSError:
-        return None
-    nums = []
-    for name in names:
-        if name.isdigit():
-            nums.append(int(name))
-    nums.sort()
-    for num in nums:
-        try:
-            target = os.readlink(os.path.join(fd_dir, str(num)))
-        except OSError:
-            continue
+    for _num, target in scan.fd_targets(pid):
         if not target.endswith("/events.jsonl") or not target.startswith(prefix):
             continue
         sid = os.path.basename(os.path.dirname(target))
@@ -1744,32 +2280,18 @@ def _fd_session(pid):
     return None
 
 
-def dashboard_owners():
-    """Session id -> {pid, state} for a live grok that owns it.
+def dashboard_owners(scan=None):
+    """Session id -> pid for a live grok that owns it (discovery only).
 
     Command-line session id wins and blocks every other file that grok has
     open. With no such argument, the session is the one in the lowest
-    events.jsonl fd under the sessions directory. Working means a child
-    command contains "agent turn in progress". Idle means the grok is alive
-    and no child has that mark. Does not start or signal a process, and does
-    not read environ.
+    events.jsonl fd under the sessions directory. The state of each comes
+    from session_state (list_states). Does not start or signal a process,
+    and does not read environ.
     """
-    try:
-        pid_names = os.listdir("/proc")
-    except OSError:
-        pid_names = []
-    groks = []
-    for pid_text in pid_names:
-        if not pid_text.isdigit():
-            continue
-        pid = int(pid_text)
-        if pid == os.getpid():
-            continue
-        raw = read_proc_cmdline(pid)
-        if not raw or not grok_cmdline(raw):
-            continue
-        groks.append((pid, raw))
-    groks.sort()
+    if scan is None:
+        scan = ProcScan()
+    groks = [(pid, scan.cmdline(pid)) for pid in scan.groks]
     owned = {}
     need_fd = []
     for pid, raw in groks:
@@ -1780,19 +2302,31 @@ def dashboard_owners():
             continue
         need_fd.append(pid)
     for pid in need_fd:
-        sid = _fd_session(pid)
+        sid = _fd_session(pid, scan)
         if not sid or sid in owned:
             continue
         owned[sid] = pid
-    ppids = _proc_ppid_map()
-    result = {}
-    for sid, pid in owned.items():
-        raw = read_proc_cmdline(pid)
-        if not raw or not grok_cmdline(raw):
-            continue
-        state = "working" if _turn_in_children(pid, ppids) else "idle"
-        result[sid] = {"pid": pid, "state": state}
-    return result
+    return owned
+
+
+def list_states(saved=()):
+    """Session id -> session_state for each session with a live grok here or on this host.
+
+    One /proc pass (ProcScan) serves every session in the list. A saved
+    session id (saved) with no grok in view counts too when its folder lock
+    is held: another server's grok this server cannot see.
+    """
+    scan = ProcScan()
+    sids = set(dashboard_owners(scan))
+    with LIVE_LOCK:
+        sids.update(LIVE)
+    sids.update(sid for sid in saved if sid not in sids and session_lock_busy(sid))
+    out = {}
+    for sid in sids:
+        state = session_state(sid, scan=scan)
+        if state["state"] != "stopped":
+            out[sid] = state
+    return out
 
 
 # summary.json updated_at is ISO-8601, for example
@@ -1862,7 +2396,16 @@ def dashboard_head(section):
     return '<div class="head" data-section="%s">%s</div>' % (section, "".join(buttons))
 
 
-def dashboard_session_row(section, seq, row, pid, hidden=False):
+def conflict_note(state):
+    """List marker for two groks on one session: this server's and a holder."""
+    if not state.get("here") or not state.get("holder"):
+        return ""
+    if state["holder"].get("kind") == "cli":
+        return "also open in a CLI"
+    return "also open in another Ergosphere server"
+
+
+def dashboard_session_row(section, seq, row, pid, hidden=False, note=""):
     title = row.get("title") if isinstance(row.get("title"), str) else ""
     sid = row.get("id") if isinstance(row.get("id"), str) else ""
     cwd = row.get("cwd") if isinstance(row.get("cwd"), str) else ""
@@ -1878,7 +2421,7 @@ def dashboard_session_row(section, seq, row, pid, hidden=False):
         '<span class="c-sid">%s</span><span class="c-cwd">%s</span>'
     ) % (
         html.escape(shown),
-        html.escape(title or "(no title)"),
+        html.escape(title or "(no title)") + (" [%s]" % html.escape(note) if note else ""),
         html.escape(sid),
         html.escape(cwd),
     )
@@ -1927,11 +2470,25 @@ def dashboard_cwd_choices(cwd_defaults):
     return choices
 
 
-def dashboard_page(sessions, agents, cwd_defaults):
-    # summary.json has updated_at, not Working or Idle. Those come from live
-    # grok processes. A session with no live owner stays under Older sessions.
-    # Every older summary is in the page. The script shows 20, then 50 more.
-    owners = dashboard_owners()
+def list_rows_tag(sessions, owners=None):
+    """Change tag of the list rows, from the same inputs, without the HTML."""
+    if owners is None:
+        owners = list_states([row["id"] for row in sessions])
+    key = [
+        sorted([sid, st["turn"] == "working", st["pid"], conflict_note(st)] for sid, st in owners.items()),
+        [[row.get(k) for k in ("id", "title", "cwd", "updated")] for row in sessions],
+    ]
+    text = json.dumps(key, default=str, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
+
+
+def dashboard_rows(sessions, owners=None):
+    # summary.json has updated_at, not Working or Idle. Those come from
+    # session_state of the live groks. A session with no live grok stays
+    # under Older sessions. Every older summary is in the page; the script
+    # shows 20, then 50 more. The page polls /list-rows for this HTML.
+    if owners is None:
+        owners = list_states([row["id"] for row in sessions])
     by_id = {}
     for row in sessions:
         by_id[row["id"]] = row
@@ -1950,10 +2507,11 @@ def dashboard_page(sessions, agents, cwd_defaults):
     for sid in owners:
         info = owners[sid]
         row = owned_row(sid)
-        if info["state"] == "working":
-            work.append((row, info["pid"]))
+        item = (row, info["pid"], conflict_note(info))
+        if info["turn"] == "working":
+            work.append(item)
         else:
-            idle.append((row, info["pid"]))
+            idle.append(item)
     work.sort(key=lambda item: dashboard_sort_key(item[0]))
     idle.sort(key=lambda item: dashboard_sort_key(item[0]))
     older = [row for row in sessions if row["id"] not in owners]
@@ -1961,21 +2519,21 @@ def dashboard_page(sessions, agents, cwd_defaults):
     blocks = [
         '<a class="row selected" href="#new-agent" data-kind="new">+ New Agent</a>',
         '<div class="bar"></div>',
-        '<h2 class="group" id="count-working">Active Sessions: %d</h2>' % len(work),
+        '<h2 class="group" id="count-working">Working now: %d</h2>' % len(work),
         dashboard_head("working"),
         '<div class="sec" id="sec-working">',
         '<div class="empty"%s>- none -</div>' % ("" if not work else " hidden"),
     ]
-    for seq, (row, pid) in enumerate(work):
-        blocks.append(dashboard_session_row("working", seq, row, pid))
+    for seq, (row, pid, note) in enumerate(work):
+        blocks.append(dashboard_session_row("working", seq, row, pid, note=note))
     blocks.append("</div>")
     blocks.append('<div class="bar"></div>')
     blocks.append('<h2 class="group" id="count-idle">Idle Sessions: %d</h2>' % len(idle))
     blocks.append(dashboard_head("idle"))
     blocks.append('<div class="sec" id="sec-idle">')
     blocks.append('<div class="empty"%s>- none -</div>' % ("" if not idle else " hidden"))
-    for seq, (row, pid) in enumerate(idle):
-        blocks.append(dashboard_session_row("idle", seq, row, pid))
+    for seq, (row, pid, note) in enumerate(idle):
+        blocks.append(dashboard_session_row("idle", seq, row, pid, note=note))
     blocks.append("</div>")
     blocks.append('<div class="bar"></div>')
     blocks.append('<h2 class="group">Older Sessions</h2>')
@@ -1991,6 +2549,11 @@ def dashboard_page(sessions, agents, cwd_defaults):
             '<a class="more" id="load-more" href="#load-more" data-kind="more">[load more]</a>'
         )
     blocks.append("</div>")
+    return "\n".join(blocks)
+
+
+def dashboard_page(sessions, agents, cwd_defaults):
+    rows_html = dashboard_rows(sessions)
     body = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2136,11 +2699,14 @@ function paint() {
       all[i].className = rowClass(all[i], all[i] === selectedEl);
     }
   }
-  if (selectedEl && selectedEl.scrollIntoView) {
+  if (selectedEl && selectedEl.scrollIntoView && !refreshing) {
     selectedEl.scrollIntoView({block: "nearest"});
   }
 }
 function sync() {
+  // swapRows sorts and filters the new rows in several steps: pick the
+  // selection once, after all of them, not while older rows are still hidden.
+  if (swapping) return;
   rows = visibleRows();
   var i, found = false;
   for (i = 0; i < rows.length; i++) {
@@ -2549,6 +3115,11 @@ function sortSection(section, col) {
     st.col = col;
     st.dir = col === "updated" ? "desc" : "asc";
   }
+  applySort(section);
+}
+function applySort(section) {
+  var st = sortState[section];
+  var col = st.col;
   var box = document.getElementById("sec-" + section);
   if (!box) return;
   var items = Array.prototype.slice.call(box.querySelectorAll("a.row"));
@@ -2629,7 +3200,7 @@ function revealOlder() {
   sync();
 }
 function paintCounts() {
-  var specs = [["working", "Active Sessions"], ["idle", "Idle Sessions"]];
+  var specs = [["working", "Working now"], ["idle", "Idle Sessions"]];
   var s, i, nodes, n, box, empty, el;
   for (s = 0; s < specs.length; s++) {
     box = document.getElementById("sec-" + specs[s][0]);
@@ -2660,6 +3231,53 @@ function applyFilter() {
   paintCounts();
   sync();
 }
+// The list refreshes itself: every few seconds it fetches the rows from the
+// server (the same session state the chat page and Settings read) and swaps
+// them in when they changed, keeping the selection, sort, filter and scroll.
+var refreshing = false;
+var swapping = false;
+var rowsTag = "";
+function swapRows(text) {
+  var keepSid = selectedEl ? selectedEl.getAttribute("data-sid") : null;
+  var keepKind = selectedEl ? selectedEl.getAttribute("data-kind") : null;
+  document.getElementById("rows").innerHTML = text;
+  var all = document.querySelectorAll("a.row, a.more");
+  var i;
+  selectedEl = null;
+  for (i = 0; i < all.length; i++) {
+    if (keepSid ? all[i].getAttribute("data-sid") === keepSid
+        : (keepKind && all[i].getAttribute("data-kind") === keepKind)) {
+      selectedEl = all[i];
+      break;
+    }
+  }
+  refreshing = true;
+  swapping = true;
+  try {
+    applySort("working");
+    applySort("idle");
+    applySort("older");
+    applyFilter();
+  } finally {
+    swapping = false;
+    sync();
+    refreshing = false;
+  }
+}
+function refreshRows() {
+  if (document.hidden || dialogOpen()) return;
+  fetch("/list-rows", {cache: "no-store", headers: {"X-Rows-Tag": rowsTag}}).then(function (resp) {
+    if (resp.status !== 200) return null;
+    var tag = resp.headers.get("X-Rows-Tag") || "";
+    return resp.text().then(function (text) { return {tag: tag, text: text}; });
+  }).then(function (res) {
+    if (!res || dialogOpen() || res.tag === rowsTag) return;
+    rowsTag = res.tag;
+    swapRows(res.text);
+  }).catch(function () {});
+}
+setInterval(refreshRows, 4000);
+refreshRows();
 document.addEventListener("keydown", function (ev) {
   var idx = -1;
   var i;
@@ -2799,7 +3417,7 @@ document.getElementById("new-form").addEventListener("submit", function (ev) {
         "OLDER_WINDOW": str(OLDER_WINDOW),
         "OLDER_STEP": str(OLDER_STEP),
         "VERSION": html.escape(VERSION),
-        "ROWS": "\n".join(blocks),
+        "ROWS": rows_html,
     }
     return re.sub(r"@@([A-Z_]+)@@", lambda m: values.get(m.group(1), m.group(0)), body)
 
@@ -2815,8 +3433,10 @@ def bind_choices():
 
 
 def running_sessions():
+    # Starting or running in this server (session_state's own part).
     with LIVE_LOCK:
-        return sum(1 for live in LIVE.values() if live.alive())
+        lives = list(LIVE.values())
+    return sum(1 for live in lives if live_state(live) in ("starting", "running"))
 
 
 def settings_overrides(args):
@@ -2981,7 +3601,7 @@ function renderAgents() {
   el("add").disabled = !free.length;
 }
 function renderRestart() {
-  say("sessions", "Grok sessions running in this server: " + state.sessions + ". Restart needs zero.");
+  say("sessions", "Running in this server: " + state.sessions + ". Restart needs zero.");
   el("restart").disabled = state.sessions !== 0;
 }
 function agentResult(res) {
@@ -3152,7 +3772,7 @@ def chat_page(resume="", holder=None, running=False, title=""):
         )
         term_css = "#term { flex: 0 0 0; height: 0; min-height: 0; overflow: hidden; }"
         status = "session is already running"
-        notice = busy_notice(sid_js, holder)
+        notice = busy_notice(sid_js, holder, here=running)
         visible_sid = sid_js
     else:
         busy_css = "#busy { display: none; padding: 0.8rem 1rem; white-space: pre-wrap; }"
@@ -3210,7 +3830,7 @@ html, body { height: 100%; margin: 0; background: #111; color: #ddd; font: 14px 
 <body>
 <div id="bar"><a href="/">← Session List</a> | <button id="stop" type="button">Quit</button> | <span id="status">@@STATUS@@</span> | <span id="title"@@TITLE_ATTR@@>@@TITLE@@</span><span id="title-gap"@@GAP_ATTR@@> | </span><span id="sid">Session ID: @@SID_TEXT@@</span></div>
 <div id="version">v@@VERSION@@</div>
-<div id="wrap"><div id="stage"><div id="resume-ask" hidden><div>Resume this session?</div><button type="button" id="resume-yes">Resume</button><button type="button" id="resume-no">Cancel</button></div><div id="busy"><div id="busy-text">@@NOTICE@@</div><button id="take" type="button"@@BUTTON_ATTR@@>Quit that CLI and resume here</button></div><div id="term"></div></div></div>
+<div id="wrap"><div id="stage"><div id="resume-ask" hidden><div>Resume this session?</div><button type="button" id="resume-yes">Resume</button><button type="button" id="resume-no">Cancel</button></div><div id="busy"><div id="busy-text">@@NOTICE@@</div><button id="take" type="button"@@BUTTON_ATTR@@>@@BUTTON_LABEL@@</button></div><div id="term"></div></div></div>
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
 <script>
@@ -3526,20 +4146,41 @@ function setTitle(text) {
   el.textContent = title;
   document.title = title + " - Ergosphere";
 }
+// Status from the server's session state: "Running" when idle, "Working
+// now" mid-turn. A grok that is gone (the ended frame was missed) ends the page.
+var runText = "Running";
+function applyState(data) {
+  if (!data || typeof data.state !== "string") return;
+  if (hold || ended || stopping || !sawOutput) return;
+  if (data.state === "stopped") {
+    showEnded();
+    return;
+  }
+  if (data.holder && data.holder.pid) {
+    setStatus("also open in another grok (pid " + data.holder.pid + ")", false);
+    return;
+  }
+  if (data.state === "running-working") runText = "Working now";
+  else if (data.state === "running-idle") runText = "Running";
+  else return;
+  setStatus(runText, true);
+}
 function pollTitle() {
   if (!sid) return;
   fetch("/session-info?id=" + encodeURIComponent(sid), {cache: "no-store"}).then(function (resp) {
     if (!resp.ok) return null;
     return resp.json();
   }).then(function (data) {
-    if (!data || typeof data.title !== "string") return;
+    if (!data) return;
+    applyState(data);
+    if (typeof data.title !== "string") return;
     setTitle(data.title);
   }).catch(function () {});
 }
 // The title poll runs only while the session is not Ended.
 var titleTimer = null;
 function startTitlePoll() {
-  if (!titleTimer) titleTimer = setInterval(pollTitle, 5000);
+  if (!titleTimer) titleTimer = setInterval(pollTitle, 3000);
 }
 function stopTitlePoll() {
   if (titleTimer) { clearInterval(titleTimer); titleTimer = null; }
@@ -3560,7 +4201,8 @@ function showEnded() {
   document.getElementById("status").style.color = "#808080";
   document.getElementById("stop").textContent = "Resume";
 }
-function resumeSession() {
+function resumeSession(tries) {
+  tries = tries || 0;
   ended = false;
   startTitlePoll();
   stopping = false;
@@ -3598,6 +4240,12 @@ function resumeSession() {
       connect();
       return;
     }
+    // The last grok has not exited yet: wait for it, never start a second.
+    if (data.stopping === true && tries < 40) {
+      setStatus("waiting for the last grok to exit", false);
+      setTimeout(function () { resumeSession(tries + 1); }, 250);
+      return;
+    }
     showEnded();
     setStatus(typeof data.error === "string" && data.error ? data.error : "could not resume", false);
   }).catch(function () {
@@ -3610,7 +4258,7 @@ function markOutput() {
   sawOutput = true;
   waitGen += 1;
   if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; }
-  if (!stopping) setStatus("Active", true);
+  if (!stopping) setStatus(runText, true);
 }
 function armOutputWait() {
   if (sawOutput || hold || waitTimer) return;
@@ -3673,7 +4321,7 @@ function connect() {
       current.send(JSON.stringify({type: "stop"}));
       return;
     }
-    if (sawOutput && !ended) setStatus("Active", true);
+    if (sawOutput && !ended) setStatus(runText, true);
     term.focus();
   };
   current.onmessage = function (ev) {
@@ -3683,6 +4331,7 @@ function connect() {
         var msg = JSON.parse(ev.data);
         if (msg && msg.type === "ended") {
           showEnded();
+          if (typeof msg.reason === "string" && msg.reason) setStatus(msg.reason, false);
           return;
         }
         if (msg && msg.type === "session" && msg.id) {
@@ -3817,7 +4466,8 @@ function pollHold() {
   }).then(function (data) {
     if (!hold || stopping || taking) return;
     if (!data || data.held !== false) return;
-    openAfterHolder(false);
+    // This server still runs it (the other grok was the extra one): attach.
+    openAfterHolder(data.here === true);
   }).catch(function () {});
 }
 setInterval(pollHold, 1000);
@@ -3836,6 +4486,8 @@ else if (!hold) { ensureTerm(); setSid(sid); showEnded(); }
     ).replace("@@SID_TEXT@@", html.escape(visible_sid)).replace(
         "@@NOTICE@@", html.escape(notice)
     ).replace("@@BUTTON_ATTR@@", button_attr).replace(
+        "@@BUTTON_LABEL@@", html.escape(holder_button(holder))
+    ).replace(
         "@@SID_JS@@", json.dumps(sid_js)
     ).replace("@@HOLD_JS@@", hold_js).replace("@@RUN_JS@@", run_js).replace(
         "@@TITLE@@", html.escape(title)
@@ -4008,6 +4660,27 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _list_rows(self):
+        # The list page polls this. Unchanged rows cost one short reply.
+        _total, sessions = load_sessions(None)
+        owners = list_states([row["id"] for row in sessions])
+        tag = list_rows_tag(sessions, owners)
+        if self.headers.get("X-Rows-Tag", "") == tag:
+            self.send_response(204)
+            self.send_header("X-Rows-Tag", tag)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        data = dashboard_rows(sessions, owners).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Rows-Tag", tag)
+        self.end_headers()
+        self.wfile.write(data)
+
     def _redirect(self, location):
         self.send_response(302)
         self.send_header("Location", location)
@@ -4123,6 +4796,9 @@ class Handler(BaseHTTPRequestHandler):
             _total, sessions = load_sessions(None)
             self._html(dashboard_page(sessions, list_agents(), self.server.cwd_defaults))
             return
+        if path == "/list-rows":
+            self._list_rows()
+            return
         if path == "/dashboard":
             self._redirect("/")
             return
@@ -4157,10 +4833,9 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(resume, str) or not SID_TOKEN_RE.match(resume):
                 self._html(chat_pick_page())
                 return
-            with LIVE_LOCK:
-                live = LIVE.get(resume)
-                running = live is not None and live.alive()
-            holder = None if running else session_holder(resume)
+            state = session_state(resume, with_turn=False)
+            running = running_here(state)
+            holder = state["holder"]
             saved = find_session(resume)
             page_title = saved.get("title") if isinstance(saved, dict) else ""
             if not isinstance(page_title, str):
@@ -4409,15 +5084,20 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(sid, str) or not SID_RE.match(sid):
             self._json(400, {"ok": False, "error": "unknown session"})
             return
-        with LIVE_LOCK:
-            live = LIVE.get(sid)
-            running = live is not None and live.alive()
-        # Reply after release: a slow client must not hold LIVE_LOCK.
-        if running:
-            self._json(200, {"ok": True, "id": sid})
+        # One state answers it (session_state). Reply after LIVE_LOCK is
+        # released: a slow client must not hold it.
+        state = session_state(sid, with_turn=False)
+        if state["holder"]:
+            # Another grok has it, even when this server runs it too.
+            self._json(409, {"ok": False, "held": True, "state": state["state"],
+                             "error": "session is already running"})
             return
-        if session_holder(sid):
-            self._json(409, {"ok": False, "held": True, "error": "session is already running"})
+        if state["state"] == "stopping":
+            self._json(409, {"ok": False, "stopping": True, "state": "stopping",
+                             "error": "session is still stopping; try again in a moment"})
+            return
+        if running_here(state):
+            self._json(200, {"ok": True, "id": sid})
             return
         row = find_session(sid)
         if row is None:
@@ -4430,6 +5110,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             cmd = grok_argv(None, None, cwd, sid)
             open_live(sid, cmd, cwd, 80, 24)
+        except SessionBusy as exc:
+            self._json(409, {"ok": False, "state": exc.state, "held": exc.state != "stopping",
+                             "stopping": exc.state == "stopping", "error": str(exc)})
+            return
         except (RuntimeError, OSError) as exc:
             self._json(400, {"ok": False, "error": str(exc)[:300]})
             return
@@ -4470,6 +5154,7 @@ class Handler(BaseHTTPRequestHandler):
         if saved is None and live_row is None:
             self._json(404, {"error": "not found"})
             return
+        state = session_state(want)
         if saved is None:
             body = dict(live_row)
             body["title"] = ""
@@ -4479,6 +5164,10 @@ class Handler(BaseHTTPRequestHandler):
                 body["pid"] = live_row.get("pid")
                 body["alive"] = live_row.get("alive")
                 body["started"] = live_row.get("started")
+        body["state"] = state["state"]
+        body["turn"] = state["turn"]
+        holder = state["holder"]
+        body["holder"] = {"pid": holder["pid"], "kind": holder.get("kind")} if holder else None
         self._json(200, body)
 
     def _holder(self):
@@ -4487,14 +5176,18 @@ class Handler(BaseHTTPRequestHandler):
         if not SID_TOKEN_RE.match(sid):
             self._json(400, {"ok": False, "error": "unknown session"})
             return
-        holder = session_holder(sid)
+        state = session_state(sid, with_turn=False)
+        holder = state["holder"]
+        here = running_here(state)
         if not holder:
-            self._json(200, {"ok": True, "held": False, "id": sid})
+            self._json(200, {"ok": True, "held": False, "id": sid, "state": state["state"], "here": here})
             return
         self._json(200, {
             "ok": True,
             "held": True,
             "id": sid,
+            "state": state["state"],
+            "here": here,
             "pid": holder["pid"],
             "via": holder["via"],
             "kind": holder.get("kind") or "cli",
@@ -4632,15 +5325,17 @@ class Handler(BaseHTTPRequestHandler):
         live = None
         client = None
         try:
-            with LIVE_LOCK:
-                existing = LIVE.get(sid)
-                have_live = existing is not None and existing.alive()
-            if have_live:
-                live = existing
+            state = session_state(sid, with_turn=False)
+            holder = state["holder"]
+            if running_here(state) and not holder:
+                with LIVE_LOCK:
+                    live = LIVE.get(sid)
+                if live is None:
+                    self._send_frame(1, json.dumps({"type": "ended", "id": sid}).encode("utf-8"))
+                    return
             else:
-                holder = session_holder(sid)
                 if holder:
-                    notice = busy_notice(sid, holder)
+                    notice = busy_notice(sid, holder, here=running_here(state))
                     can_quit = holder_can_quit(holder)
                     self._send_frame(2, notice.replace("\n", "\r\n").encode("utf-8"))
                     note = json.dumps({
@@ -4651,7 +5346,7 @@ class Handler(BaseHTTPRequestHandler):
                         "via": holder["via"],
                         "kind": holder.get("kind") or "cli",
                         "canQuit": can_quit,
-                        "button": BUTTON_LABEL if can_quit else "",
+                        "button": holder_button(holder) if can_quit else "",
                         "notice": notice,
                     })
                     self._send_frame(1, note.encode("utf-8"))
@@ -4737,9 +5432,12 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(msg, dict) and msg.get("type") == "stop":
             # Stop is the only client message that kills this PTY.
             live.shutdown()
-            with LIVE_LOCK:
-                if LIVE.get(live.sid) is live:
-                    LIVE.pop(live.sid, None)
+            # Pop only once grok is gone; a grok that outlived the kill stays
+            # in LIVE as stopping until _release_on_exit sees it exit.
+            if live.proc.poll() is not None:
+                with LIVE_LOCK:
+                    if LIVE.get(live.sid) is live:
+                        LIVE.pop(live.sid, None)
             print("term stop pid=%s sid=%s" % (live.proc.pid, live.sid), flush=True)
             raise EOFError("stopped")
         if isinstance(msg, dict) and msg.get("type") == "resize":
