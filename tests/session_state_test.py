@@ -155,13 +155,14 @@ def check_no_resume_while_stopping(erg):
     return None
 
 
-def other_server(sid, fake=None, at=0.0, blind=False):
+def other_server(sid, fake=None, at=0.0, blind=False, new=False):
     """A second Ergosphere process (same HOME, its own environment) that starts sid.
 
     It has XDG_RUNTIME_DIR and TMPDIR set and this one has neither, like a
     user unit next to a system unit: the lock must not depend on them.
     at: start time (epoch) for a race. blind: it cannot see this process's
-    groks (a separate process view, like another PID namespace).
+    groks (a separate process view, like another PID namespace). new: a new
+    session (grok gets --session-id; the caller makes its folder later).
     """
     env = dict(os.environ, XDG_RUNTIME_DIR=os.path.join(TMP, "run"), TMPDIR=os.path.join(TMP, "othertmp"))
     other = popen([sys.executable, "-B", "-c",
@@ -169,10 +170,12 @@ def other_server(sid, fake=None, at=0.0, blind=False):
                    "s=importlib.util.spec_from_file_location('e',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\n"
                    "if sys.argv[7] == '1': m.session_holder = lambda *a, **k: None\n"
                    "while time.time() < float(sys.argv[6]): time.sleep(0.001)\n"
-                   "try: m.open_live(sys.argv[2], [sys.argv[3], '-c', sys.argv[4], '--resume', sys.argv[2]], sys.argv[5], 80, 24)\n"
+                   "flag = '--session-id' if sys.argv[8] == '1' else '--resume'\n"
+                   "try: m.open_live(sys.argv[2], [sys.argv[3], '-c', sys.argv[4], flag, sys.argv[2]], sys.argv[5], 80, 24)\n"
                    "except Exception as exc: print('refused', exc, flush=True)\n"
                    "print('up', flush=True); time.sleep(30)\n",
-                   str(ROOT / "ergosphere.py"), sid, GROK, fake or FAKE, CWD, repr(at), "1" if blind else "0"],
+                   str(ROOT / "ergosphere.py"), sid, GROK, fake or FAKE, CWD, repr(at), "1" if blind else "0",
+                   "1" if new else "0"],
                   stdout=subprocess.PIPE, env=env)
     if not at:
         other.stdout.readline()
@@ -412,11 +415,14 @@ def lock_held(erg, sid):
     return False
 
 
+HARDY = "import signal,time\nsignal.signal(signal.SIGHUP, signal.SIG_IGN)\nwhile True: time.sleep(1)\n"
+
+
 def check_orphan_race(erg):
-    # Server 1 starts grok and dies (its lock goes, its grok stays): a start
-    # here must still see that grok and refuse.
+    # Server 1 starts grok and dies, its grok stays: a start here must still
+    # refuse (that grok is visible here, and it holds the lock).
     sid = new_sid(16)
-    hardy = "import signal,time\nsignal.signal(signal.SIGHUP, signal.SIG_IGN)\nwhile True: time.sleep(1)\n"
+    hardy = HARDY
     other = other_server(sid, hardy)
     os.kill(other.pid, signal.SIGKILL)
     other.wait()
@@ -553,6 +559,95 @@ def check_new_session_lock_error(erg):
     return None
 
 
+def check_lock_outlives_server(erg):
+    # Server 1 runs a session and is killed; its grok keeps running. A server
+    # that cannot see that grok (another PID namespace) must still find the
+    # session locked: the lock lives as long as grok, not its server. Both a
+    # resumed session and a new one (locked once grok made its folder).
+    out = []
+    for n, new in ((41, False), (42, True)):
+        sid = "%08d-0000-4000-8000-000000000000" % n
+        if not new:
+            new_sid(n)
+        first = other_server(sid, HARDY, new=new)
+        if new:
+            new_sid(n)  # grok writes its folder
+            wait_for(lambda: lock_held(erg, sid), 3)
+        os.kill(first.pid, signal.SIGKILL)
+        first.wait()
+        time.sleep(0.3)
+        locked = lock_held(erg, sid)
+        second = other_server(sid, blind=True)
+        count = len(groks_for(sid))
+        os.kill(second.pid, signal.SIGKILL)
+        for pid in groks_for(sid):
+            os.kill(pid, signal.SIGKILL)
+        if count != 1 or not locked:
+            out.append("%s session: after its server died, lock held=%s; a blind server made %d groks"
+                       % ("new" if new else "resumed", locked, count))
+    return "; ".join(out) or None
+
+
+def check_lock_ends_with_grok(erg):
+    # The lock goes when grok goes, killed or exiting by itself, also when a
+    # child of grok that got its fds (an MCP server, a background command)
+    # lives on.
+    child = ("import subprocess,sys,time\n"
+             "subprocess.Popen(['sleep', '31.25'], close_fds=False, start_new_session=True)\n"
+             "time.sleep(float(sys.argv[1]))\n")
+    out = []
+    for n, how in ((44, "killed"), (45, "exited")):
+        sid = new_sid(n)
+        live, _ = erg.open_live(sid, [GROK, "-c", child, "0.6" if how == "exited" else "60", "--resume", sid],
+                                CWD, 80, 24)
+        time.sleep(0.3)
+        held = lock_held(erg, sid)
+        if how == "killed":
+            os.kill(live.proc.pid, signal.SIGKILL)
+        freed = wait_for(lambda: not lock_held(erg, sid), 3)
+        if not held or not freed:
+            out.append("%s grok: lock held while it ran=%s, freed after=%s" % (how, held, freed))
+    subprocess.call(["pkill", "-U", str(os.getuid()), "-f", "^sleep 31.25$"])
+    return "; ".join(out) or None
+
+
+def check_state_reads_lock(erg):
+    # A server this one cannot see holds the session: only the folder lock
+    # shows it. Every status answer must say held, as Resume does.
+    sid = new_sid(43)
+    locker = popen([sys.executable, "-c",
+                    "import fcntl,os,sys,time\n"
+                    "fd=os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)\n"
+                    "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+                    "print('up', flush=True); time.sleep(30)\n", session_folder(sid)],
+                   stdout=subprocess.PIPE)
+    locker.stdout.readline()
+    got = {}
+
+    def ask(method, path):
+        handler = types.SimpleNamespace(path=path, _json=lambda code, obj: got.update({method: obj}))
+        getattr(erg.Handler, method)(handler)
+
+    state = erg.session_state(sid, with_turn=False)["state"]
+    ask("_holder", "/holder?id=" + sid)
+    ask("_session_info", "/session-info?id=" + sid)
+    _total, sessions = erg.load_sessions(None)
+    rows = erg.dashboard_rows(sessions)
+    row = [line for line in rows.split("\n") if 'data-sid="%s"' % sid in line]
+    listed = bool(row) and 'data-section="older"' not in row[0]
+    resume = reply_of(erg, "_resume", {"id": sid})
+    os.kill(locker.pid, signal.SIGKILL)
+    locker.wait()
+    after = erg.session_state(sid, with_turn=False)["state"]
+    if (state != "held-by-other-server" or not got["_holder"].get("held")
+            or got["_session_info"].get("state") != "held-by-other-server" or not listed
+            or resume.get("code") != 409 or after != "stopped"):
+        return ("status vs lock: state=%r /holder held=%r /session-info=%r listed live=%s /resume=%r; after release %r"
+                % (state, got["_holder"].get("held"), got["_session_info"].get("state"), listed,
+                   resume, after))
+    return None
+
+
 def check_cpu_callers_share(erg):
     # Two pollers close together both see a busy grok's CPU use.
     busy = popen([sys.executable, "-c", "while True: pass"])
@@ -575,7 +670,8 @@ def main():
               check_disjoint_envs, check_lock_writes_nothing, check_new_session_launch,
               check_one_proc_pass, check_lock_kept_while_grok_lives, check_cpu_callers_share,
               check_orphan_race, check_bad_sid, check_stopping_until_exit, check_new_session_locked,
-              check_new_session_taken, check_new_session_late_folder, check_new_session_lock_error)
+              check_new_session_taken, check_new_session_late_folder, check_new_session_lock_error,
+              check_lock_outlives_server, check_state_reads_lock, check_lock_ends_with_grok)
     failures = []
     try:
         for check in checks:
