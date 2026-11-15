@@ -4890,9 +4890,10 @@ def start_watchdog(httpd):
     # a slow miss or a busy LIVE_LOCK still ends in a ping before the deadline.
     retry = min(1.0, interval / 4)
     # One check (lock wait + /health) must fit well inside the deadline, even
-    # with a short WatchdogSec: each part gets at most a quarter interval.
-    lock_wait = max(0.1, min(2.0, interval / 4))
-    health_wait = max(0.2, min(1.0, interval / 4))
+    # with a short WatchdogSec: each part gets at most a quarter interval. No
+    # minimum here: a floor longer than that quarter eats the deadline's margin.
+    lock_wait = min(2.0, interval / 4)
+    health_wait = min(1.0, interval / 4)
 
     def loop():
         # Check and ping at once: READY=1 does not reset the watchdog timer, so

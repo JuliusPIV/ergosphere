@@ -196,6 +196,45 @@ def check_short_watchdog_lock_hold():
     return []
 
 
+def check_short_watchdog_transient_stall():
+    """WatchdogSec=0.5 (deadline 0.5 s) and /health hung for 0.375 s once: the
+    wait floors must not stretch the checks past a quarter interval each, so a
+    ping still lands within 0.5 s of the last good one (no restart)."""
+    spec = importlib.util.spec_from_file_location("ergosphere", ROOT / "ergosphere.py")
+    erg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(erg)
+    os.environ["NOTIFY_SOCKET"] = "@ergo-wd-test-unused"
+    os.environ["WATCHDOG_USEC"] = "500000"
+    os.environ.pop("WATCHDOG_PID", None)
+    stall_from = time.monotonic() + 0.3
+    stall_until = stall_from + 0.375
+    pings = []
+
+    def inspect(_host, _port, _tls, _token=None, timeout=1):
+        # A hung server: a request that starts during the stall blocks for the whole timeout.
+        if stall_from <= time.monotonic() < stall_until:
+            time.sleep(timeout)
+            return "reject"
+        return "match"
+
+    erg.inspect_health = inspect
+    erg.sd_notify = lambda msg: pings.append(time.monotonic()) or True
+    erg.print = lambda *a, **k: None
+    httpd = types.SimpleNamespace(server_address=("127.0.0.1", 1), tls=False, token=None)
+    thread = erg.start_watchdog(httpd)
+    time.sleep(1.5)
+    erg.STOP.set()
+    thread.join(5)
+    before = [p for p in pings if p < stall_from]
+    after = [p for p in pings if p >= stall_from]
+    if not before or not after:
+        return ["no ping on both sides of the 0.375 s stall (%d pings)" % len(pings)]
+    gap = after[0] - before[-1]
+    if gap >= 0.5:
+        return ["WatchdogSec=0.5 with a 0.375 s /health stall: next ping %.2fs after the last good one (deadline 0.5 s)" % gap]
+    return []
+
+
 def check_stop_with_lock_held():
     """A hung server (LIVE_LOCK held forever) must still stop: kill_all, run by
     the SIGTERM handler, may not wait for the lock without a limit."""
@@ -230,7 +269,8 @@ def check_stop_with_lock_held():
 
 def main():
     failures = (check_live_server() + check_lock_held_blocks_ping() + check_one_slow_miss_keeps_deadline()
-                + check_short_watchdog_lock_hold() + check_stop_with_lock_held())
+                + check_short_watchdog_lock_hold() + check_short_watchdog_transient_stall()
+                + check_stop_with_lock_held())
     for failure in failures:
         print("FAIL: " + failure)
     if failures:
