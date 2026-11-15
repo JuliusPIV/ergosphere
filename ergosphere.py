@@ -1170,15 +1170,19 @@ def kill_all():
     # short wait, stop the sessions from a snapshot taken without the lock.
     locked = LIVE_LOCK.acquire(timeout=2)
     try:
-        lives = []
         # Without the lock the dict can change while it is copied (RuntimeError);
-        # retry a few times, and never raise out of the signal handler.
+        # retry a few times, then fall back to a plain copy so the sessions still
+        # stop and this never raises out of the signal handler.
+        lives = None
         for _attempt in range(5):
             try:
                 lives = list(LIVE.values())
                 break
-            except RuntimeError:
-                lives = []
+            except RuntimeError as exc:
+                print("shutdown: session snapshot failed, retrying: %s" % exc, file=sys.stderr, flush=True)
+        if lives is None:
+            print("shutdown: session snapshot failed 5 times, stopping from a copy", file=sys.stderr, flush=True)
+            lives = list(LIVE.copy().values())
         if locked:
             LIVE.clear()
     finally:

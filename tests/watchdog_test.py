@@ -267,10 +267,36 @@ def check_stop_with_lock_held():
     return []
 
 
+def check_snapshot_failure_still_stops():
+    """If every snapshot attempt raises, kill_all must still stop the live
+    sessions (a silent skip would leave their processes running)."""
+    spec = importlib.util.spec_from_file_location("ergosphere", ROOT / "ergosphere.py")
+    erg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(erg)
+
+    class Stopped:
+        def __init__(self):
+            self.stopped = False
+
+        def shutdown(self):
+            self.stopped = True
+
+    class AlwaysChanging(dict):
+        def values(self):
+            raise RuntimeError("dictionary changed size during iteration")
+
+    live = Stopped()
+    erg.LIVE = AlwaysChanging({"s1": live})
+    erg.kill_all()
+    if not live.stopped:
+        return ["kill_all left a live session running after every snapshot attempt failed"]
+    return []
+
+
 def main():
     failures = (check_live_server() + check_lock_held_blocks_ping() + check_one_slow_miss_keeps_deadline()
                 + check_short_watchdog_lock_hold() + check_short_watchdog_transient_stall()
-                + check_stop_with_lock_held())
+                + check_stop_with_lock_held() + check_snapshot_failure_still_stops())
     for failure in failures:
         print("FAIL: " + failure)
     if failures:
