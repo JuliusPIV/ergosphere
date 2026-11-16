@@ -4975,6 +4975,10 @@ def listen(args, tls, token):
         return None
 
 
+# Deploy scripts grep for this line to know the code sends READY=1 and watchdog pings.
+SYSTEMD_NOTIFY = 1
+
+
 def sd_notify(message):
     """Send one systemd notification. False when NOTIFY_SOCKET is unset or the send failed.
 
