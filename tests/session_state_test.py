@@ -3,13 +3,14 @@
 Covers: every tab gets "ended" when one tab quits; no Resume while the last
 grok is still exiting; no start while another grok on this host (a CLI, another
 server's, one a stopped server left) holds the session; a session this server
-runs stays attachable beside such a grok; another user's grok is no holder;
-holder labels and which holders may be quit; the words on the pages; Settings
-counts a stopping grok, the list marks it, and Restart is refused until it has
-exited.
+runs stays attachable beside such a grok and is the grok its state names;
+the chat status keeps the holder warning; holder labels and which holders
+may be quit; the words on the pages; Settings counts a stopping grok, the
+list marks it, and Restart is refused until it has exited.
 
 Run: python3 -B tests/session_state_test.py
 Stdlib only, no network, no real grok: "grok" is python under that name.
+The chat status check runs the page script in node and is skipped without it.
 """
 import importlib.util
 import json
@@ -260,21 +261,65 @@ def check_held_session(erg):
     return None
 
 
-def check_other_users_grok(erg):
-    # /proc/<pid>/cmdline is world-readable: a process of another user that
-    # names itself grok and carries the id is not a holder.
-    sid = new_sid(42)
+def check_own_grok_named_beside_holder(erg):
+    # This server runs a session and a CLI opens it too: the state names
+    # this server's grok (pid, turn); the CLI shows only as the holder.
+    sid = new_sid(43)
+    erg.open_live(sid, fake_cmd(sid), CWD, 80, 24)
+    mine = erg.LIVE[sid].proc.pid
     popen([GROK, "-c", FAKE, "-r", sid])
     time.sleep(0.4)
-    mine = erg.session_holder(sid)
-    real = os.getuid
-    os.getuid = lambda: real() + 1  # the fake grok now belongs to someone else
+    st = erg.session_state(sid)
+    holder = st.get("holder") or {}
+    if st.get("pid") != mine or not holder.get("pid") or holder.get("pid") == mine:
+        return "own grok beside a CLI: state pid %r (own %r), holder %r" % (st.get("pid"), mine, holder)
+    return None
+
+
+def check_orphan_notice_needs_quit(erg):
+    # An orphan seen only through an open file cannot be quit: no button promised.
+    text = erg.busy_notice(sid_for(44), {"pid": os.getpid(), "via": "openfile", "kind": "orphan"})
+    if "A button can quit" in text or erg.ORPHAN_BUTTON_LABEL in text:
+        return "orphan notice promises a quit button for a holder that cannot be quit"
+    return None
+
+
+STATUS_JS = r"""
+var el = {textContent: "", style: {}};
+var document = {getElementById: function () { return el; }};
+var hold = false, ended = false, stopping = false, sawOutput = true, sessionReady = true;
+var waitGen = 0, waitTimer = null;
+function showEnded() { el.textContent = "Ended"; }
+%s
+%s
+var out = [];
+applyState({state: "held-by-cli", here: true, turn: "idle", holder: {pid: 7, kind: "cli"}});
+markOutput(); out.push(el.textContent);
+applyState({state: "running-idle", here: true, turn: "idle", holder: null});
+markOutput(); out.push(el.textContent);
+console.log(JSON.stringify(out));
+"""
+
+
+def check_status_keeps_warning(erg):
+    # Output frames must not wipe the "also open in another grok" warning;
+    # it goes when a state reply shows no holder.
+    node = shutil.which("node")
+    if not node:
+        print("note: no node, chat status check skipped")
+        return None
+    page = erg.chat_page(sid_for(45), None, True, "")
+    a = page[page.index("function setStatus"):page.index("function setTitle")]
+    b = page[page.index("var runText"):page.index("function pollTitle")]
+    c = page[page.index("function markOutput"):page.index("function armOutputWait")]
+    js = STATUS_JS % (a + b, c)
+    out = subprocess.run([node, "-e", js], capture_output=True, text=True, timeout=20)
     try:
-        theirs = erg.session_holder(sid)
-    finally:
-        os.getuid = real
-    if not mine or theirs:
-        return "uid: own CLI holder seen %s, another user's grok taken for a holder %s" % (bool(mine), bool(theirs))
+        got = json.loads(out.stdout)
+    except ValueError:
+        return "chat status: node failed: %s" % out.stderr.strip()[-300:]
+    if "also open in another grok" not in got[0] or got[1] != "Running":
+        return "chat status: after output with a holder %r, after the holder left %r" % tuple(got)
     return None
 
 
@@ -464,7 +509,8 @@ def main():
     erg.print = lambda *a, **k: None
     checks = (check_quit_tells_every_tab, check_no_resume_while_stopping, check_two_servers,
               check_conflict_everywhere,
-              check_held_session, check_other_users_grok, check_holder_labels, check_words,
+              check_held_session, check_own_grok_named_beside_holder,
+              check_orphan_notice_needs_quit, check_status_keeps_warning, check_holder_labels, check_words,
               check_new_session_launch, check_one_proc_pass,
               check_left_behind_grok, check_restart_counts_stopping, check_stopping_until_exit)
     failures = []

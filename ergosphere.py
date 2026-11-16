@@ -408,14 +408,6 @@ def proc_stat_ppid(pid):
     return proc_stat_int(pid, 1)
 
 
-def proc_uid(pid):
-    """Owner of /proc/<pid>: the user the process runs as, or None."""
-    try:
-        return os.stat("/proc/%d" % pid).st_uid
-    except OSError:
-        return None
-
-
 def is_ergosphere_server(pid):
     """True for a python process whose argv runs a script named ergosphere.py."""
     args = [part for part in read_proc_cmdline(pid).split(b"\0") if part]
@@ -500,11 +492,9 @@ def holder_state(holder):
 class ProcScan:
     """One pass over /proc, shared by every session a list render looks at.
 
-    cmd: pid -> argv bytes, ppids: pid -> ppid, groks: sorted pids of this
-    user whose argv[0] is grok (not this process). Command lines are
-    world-readable, so another user's process can carry any name and any
-    session id: it is not counted. own and fd targets are filled on first
-    use. A single-session lookup builds its own.
+    cmd: pid -> argv bytes, ppids: pid -> ppid, groks: sorted pids whose
+    argv[0] is grok (not this process). own and fd targets are filled on
+    first use. A single-session lookup builds its own.
     """
 
     def __init__(self):
@@ -524,10 +514,9 @@ class ProcScan:
                 continue
             self.ppids[pid] = ppid
             self.cmd[pid] = read_proc_cmdline(pid)
-        uid = os.getuid()
         self.groks = sorted(
             pid for pid, raw in self.cmd.items()
-            if pid != me and raw and grok_cmdline(raw) and proc_uid(pid) == uid
+            if pid != me and raw and grok_cmdline(raw)
         )
         self._own = None
         self._fds = {}
@@ -606,8 +595,7 @@ def session_holder(sid, scan=None):
     is not on its command line. kind is web, orphan or cli (holder_kind).
     Only a cmdline holder with no Ergosphere server above it may be
     signalled (holder_can_quit). This server's own PTY grok, including a
-    wrapper's child, is not a holder, and neither is another user's
-    process. Only a UUID-shaped session id is looked up.
+    wrapper's child, is not a holder. Only a UUID-shaped session id is looked up.
     """
     if not isinstance(sid, str) or not SID_TOKEN_RE.match(sid):
         return None
@@ -639,7 +627,7 @@ def session_holder(sid, scan=None):
 
 def busy_notice(sid, holder):
     pid = holder["pid"]
-    if holder.get("kind") == "orphan":
+    if holder.get("kind") == "orphan" and holder_can_quit(holder):
         return (
             "This session is open in a grok on this machine that has no terminal. "
             "This page checks once a second and offers Resume when it exits. "
@@ -1893,10 +1881,11 @@ def session_state(sid, with_turn=True, scan=None):
     held-by-cli or held-by-other-server. pid: the grok it names.
     holder: another grok on this session (session_holder). Any holder makes
     the state held-by-*, also when this server runs a grok on it too. here:
-    this server's own grok is starting or running. With here, pages attach
-    to that grok as usual and show the holder as a warning (chat status,
-    list row note); without it a holder refuses Resume. turn: working or
-    idle for any state with a live grok except stopping, when with_turn.
+    this server's own grok is starting or running. With here, pid and turn
+    are this server's grok, pages attach to it as usual and show the holder
+    only as a warning (chat status, list row note); without it pid and turn
+    are the holder's and it refuses Resume. turn: working or idle for any
+    state with a live grok except stopping, when with_turn.
     """
     with LIVE_LOCK:
         live = LIVE.get(sid)
@@ -1910,11 +1899,13 @@ def session_state(sid, with_turn=True, scan=None):
         out["state"] = "stopping"
         out["pid"] = live.proc.pid
         return out
-    if here and not holder:
+    if here:
         out["pid"] = live.proc.pid
         turn = grok_turn(live.proc.pid, scan) if with_turn and here == "running" else "idle"
         out["turn"] = turn
         out["state"] = "starting" if here == "starting" else "running-" + turn
+        if holder:
+            out["state"] = holder_state(holder)
         return out
     if holder:
         out["state"] = holder_state(holder)
@@ -3833,6 +3824,12 @@ function setTitle(text) {
 // Status from the server's session state: "Running" when idle, "Working
 // now" mid-turn. A grok that is gone (the ended frame was missed) ends the page.
 var runText = "Running";
+// "also open in another grok": kept until a state reply shows no holder.
+var holdWarn = "";
+function showRun() {
+  if (holdWarn) setStatus(holdWarn, false);
+  else setStatus(runText, true);
+}
 // connect() bumps this. A reply asked for before it can predate a Resume
 // and would end a session that runs again.
 var stateGen = 0;
@@ -3843,14 +3840,12 @@ function applyState(data) {
     showEnded();
     return;
   }
-  if (data.holder && data.holder.pid) {
-    setStatus("also open in another grok (pid " + data.holder.pid + ")", false);
-    return;
-  }
-  if (data.state === "running-working") runText = "Working now";
-  else if (data.state === "running-idle") runText = "Running";
-  else return;
-  setStatus(runText, true);
+  holdWarn = data.holder && data.holder.pid ? "also open in another grok (pid " + data.holder.pid + ")" : "";
+  var mine = data.here && data.state !== "starting";
+  if (mine && data.turn === "working") runText = "Working now";
+  else if (mine && data.turn === "idle") runText = "Running";
+  else if (!holdWarn) return;
+  showRun();
 }
 function pollTitle() {
   if (!sid) return;
@@ -3948,7 +3943,7 @@ function markOutput() {
   sawOutput = true;
   waitGen += 1;
   if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; }
-  if (!stopping) setStatus(runText, true);
+  if (!stopping) showRun();
 }
 function armOutputWait() {
   if (sawOutput || hold || waitTimer) return;
@@ -4012,7 +4007,7 @@ function connect() {
       current.send(JSON.stringify({type: "stop"}));
       return;
     }
-    if (sawOutput && !ended) setStatus(runText, true);
+    if (sawOutput && !ended) showRun();
     term.focus();
   };
   current.onmessage = function (ev) {
@@ -4863,6 +4858,7 @@ class Handler(BaseHTTPRequestHandler):
                 body["started"] = live_row.get("started")
         body["state"] = state["state"]
         body["turn"] = state["turn"]
+        body["here"] = state["here"]
         holder = state["holder"]
         body["holder"] = {"pid": holder["pid"], "kind": holder.get("kind")} if holder else None
         self._json(200, body)
