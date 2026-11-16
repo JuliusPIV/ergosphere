@@ -73,7 +73,7 @@ def check_live_server():
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     failures = []
     try:
-        # The interval is 10 s: a ping within 2 s of READY=1 is the immediate one.
+        # Pings come every 5 s (a quarter of WATCHDOG_USEC): one within 2 s of READY=1 is the immediate one.
         got, ready = recv_until(sock, "READY=1", time.time() + 15)
         if not ready:
             failures.append("no READY=1 within 15s (got %r)" % got)
@@ -132,7 +132,7 @@ def check_lock_held_blocks_ping():
 
 def check_one_slow_miss_keeps_deadline():
     """One self-check that fails slowly (like a LIVE_LOCK timeout) must not push
-    the next ping past systemd's deadline (2 intervals after the last good ping)."""
+    the next ping past systemd's deadline (WATCHDOG_USEC after the last good ping)."""
     spec = importlib.util.spec_from_file_location("ergosphere", ROOT / "ergosphere.py")
     erg = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(erg)
@@ -164,13 +164,15 @@ def check_one_slow_miss_keeps_deadline():
 
 
 def check_short_watchdog_lock_hold():
-    """WatchdogSec=2 (deadline 2 s) and LIVE_LOCK busy for 1.5 s once: the
-    check's own waits must fit, so a ping still lands within 2 s of the last."""
+    """WatchdogSec=4 (deadline 4 s, check every 1 s) and LIVE_LOCK busy for 2.5 s
+    once: the check's own waits must fit, so a ping still lands within 4 s of
+    the last. The hold ends at 6.1 s, just after the check that starts at 6.0 s,
+    so the expected gap is about 3.1 s."""
     spec = importlib.util.spec_from_file_location("ergosphere", ROOT / "ergosphere.py")
     erg = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(erg)
     os.environ["NOTIFY_SOCKET"] = "@ergo-wd-test-unused"
-    os.environ["WATCHDOG_USEC"] = "2000000"
+    os.environ["WATCHDOG_USEC"] = "4000000"
     os.environ.pop("WATCHDOG_PID", None)
     pings = []
     erg.inspect_health = lambda *a, **k: "match"
@@ -178,11 +180,11 @@ def check_short_watchdog_lock_hold():
     erg.print = lambda *a, **k: None
     httpd = types.SimpleNamespace(server_address=("127.0.0.1", 1), tls=False, token=None)
     thread = erg.start_watchdog(httpd)
-    time.sleep(1.6)  # just after a ping (every 0.5 s on the branch)
+    time.sleep(3.6)
 
     def hold():
         with erg.LIVE_LOCK:
-            time.sleep(1.5)
+            time.sleep(2.5)
 
     holder = threading.Thread(target=hold, daemon=True)
     holder.start()
@@ -190,24 +192,24 @@ def check_short_watchdog_lock_hold():
     erg.STOP.set()
     thread.join(5)
     gaps = [b - a for a, b in zip(pings, pings[1:])]
-    if not gaps or max(gaps) >= 2.0:
-        return ["WatchdogSec=2 with a 1.5 s LIVE_LOCK hold: longest gap between pings %.2fs (deadline 2 s)"
+    if not gaps or max(gaps) >= 4.0:
+        return ["WatchdogSec=4 with a 2.5 s LIVE_LOCK hold: longest gap between pings %.2fs (deadline 4 s)"
                 % (max(gaps) if gaps else 0)]
     return []
 
 
 def check_short_watchdog_transient_stall():
-    """WatchdogSec=0.5 (deadline 0.5 s) and /health hung for 0.375 s once: the
-    wait floors must not stretch the checks past a quarter interval each, so a
-    ping still lands within 0.5 s of the last good one (no restart)."""
+    """WatchdogSec=2 (deadline 2 s, check every 0.5 s) and /health hung for 1 s
+    once: the failed checks are retried soon enough that a ping still lands
+    within 2 s of the last good one (no restart). Expected gap about 1.25 s."""
     spec = importlib.util.spec_from_file_location("ergosphere", ROOT / "ergosphere.py")
     erg = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(erg)
     os.environ["NOTIFY_SOCKET"] = "@ergo-wd-test-unused"
-    os.environ["WATCHDOG_USEC"] = "500000"
+    os.environ["WATCHDOG_USEC"] = "2000000"
     os.environ.pop("WATCHDOG_PID", None)
-    stall_from = time.monotonic() + 0.3
-    stall_until = stall_from + 0.375
+    stall_from = time.monotonic() + 0.6
+    stall_until = stall_from + 1.0
     pings = []
 
     def inspect(_host, _port, _tls, _token=None, timeout=1):
@@ -222,16 +224,26 @@ def check_short_watchdog_transient_stall():
     erg.print = lambda *a, **k: None
     httpd = types.SimpleNamespace(server_address=("127.0.0.1", 1), tls=False, token=None)
     thread = erg.start_watchdog(httpd)
-    time.sleep(1.5)
+    time.sleep(2.5)
     erg.STOP.set()
     thread.join(5)
     before = [p for p in pings if p < stall_from]
     after = [p for p in pings if p >= stall_from]
     if not before or not after:
-        return ["no ping on both sides of the 0.375 s stall (%d pings)" % len(pings)]
+        return ["no ping on both sides of the 1 s stall (%d pings)" % len(pings)]
     gap = after[0] - before[-1]
-    if gap >= 0.5:
-        return ["WatchdogSec=0.5 with a 0.375 s /health stall: next ping %.2fs after the last good one (deadline 0.5 s)" % gap]
+    if gap >= 2.0:
+        return ["WatchdogSec=2 with a 1 s /health stall: next ping %.2fs after the last good one (deadline 2 s)" % gap]
+
+    # With a very short WatchdogSec the check's own waits must still be at most
+    # a quarter interval each. STOP is set, so the loop runs exactly one check.
+    os.environ["WATCHDOG_USEC"] = "500000"
+    waits = []
+    erg.can_serve = lambda _httpd, timeout, health_timeout: waits.append((timeout, health_timeout)) or True
+    erg.start_watchdog(httpd).join(5)
+    quarter = 0.5 / 4 / 4
+    if not waits or max(waits[0]) > quarter:
+        return ["WatchdogSec=0.5: self-check waits %r exceed a quarter interval (%.3fs)" % (waits, quarter)]
     return []
 
 
