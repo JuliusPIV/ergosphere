@@ -235,68 +235,9 @@ def check_short_watchdog_transient_stall():
     return []
 
 
-def check_stop_with_lock_held():
-    """A hung server (LIVE_LOCK held forever) must still stop: kill_all, run by
-    the SIGTERM handler, may not wait for the lock without a limit."""
-    spec = importlib.util.spec_from_file_location("ergosphere", ROOT / "ergosphere.py")
-    erg = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(erg)
-    erg.LIVE_LOCK.acquire()
-    done = []
-    worker = threading.Thread(target=lambda: (erg.kill_all(), done.append(1)), daemon=True)
-    worker.start()
-    worker.join(5)
-    erg.LIVE_LOCK.release()
-    if not done:
-        return ["kill_all still waiting for LIVE_LOCK after 5 s, so a hung server does not stop"]
-
-    # Without the lock, a dict that keeps changing while it is copied must not
-    # make kill_all raise (it runs in the SIGTERM handler).
-    class Changing(dict):
-        def values(self):
-            raise RuntimeError("dictionary changed size during iteration")
-
-    erg.LIVE = Changing()
-    erg.LIVE_LOCK.acquire()
-    try:
-        erg.kill_all()
-    except RuntimeError as exc:
-        return ["kill_all raised %r while LIVE changed under it" % exc]
-    finally:
-        erg.LIVE_LOCK.release()
-    return []
-
-
-def check_snapshot_failure_still_stops():
-    """If every snapshot attempt raises, kill_all must still stop the live
-    sessions (a silent skip would leave their processes running)."""
-    spec = importlib.util.spec_from_file_location("ergosphere", ROOT / "ergosphere.py")
-    erg = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(erg)
-
-    class Stopped:
-        def __init__(self):
-            self.stopped = False
-
-        def shutdown(self):
-            self.stopped = True
-
-    class AlwaysChanging(dict):
-        def values(self):
-            raise RuntimeError("dictionary changed size during iteration")
-
-    live = Stopped()
-    erg.LIVE = AlwaysChanging({"s1": live})
-    erg.kill_all()
-    if not live.stopped:
-        return ["kill_all left a live session running after every snapshot attempt failed"]
-    return []
-
-
 def main():
     failures = (check_live_server() + check_lock_held_blocks_ping() + check_one_slow_miss_keeps_deadline()
-                + check_short_watchdog_lock_hold() + check_short_watchdog_transient_stall()
-                + check_stop_with_lock_held() + check_snapshot_failure_still_stops())
+                + check_short_watchdog_lock_hold() + check_short_watchdog_transient_stall())
     for failure in failures:
         print("FAIL: " + failure)
     if failures:

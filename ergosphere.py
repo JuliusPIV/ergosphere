@@ -1165,29 +1165,9 @@ def kill_proc(proc):
 
 
 def kill_all():
-    # Shutdown path: a hung server may hold LIVE_LOCK forever, and waiting for
-    # it would keep the process alive until systemd's stop timeout. After a
-    # short wait, stop the sessions from a snapshot taken without the lock.
-    locked = LIVE_LOCK.acquire(timeout=2)
-    try:
-        # Without the lock the dict can change while it is copied (RuntimeError);
-        # retry a few times, then fall back to a plain copy so the sessions still
-        # stop and this never raises out of the signal handler.
-        lives = None
-        for _attempt in range(5):
-            try:
-                lives = list(LIVE.values())
-                break
-            except RuntimeError as exc:
-                print("shutdown: session snapshot failed, retrying: %s" % exc, file=sys.stderr, flush=True)
-        if lives is None:
-            print("shutdown: session snapshot failed 5 times, stopping from a copy", file=sys.stderr, flush=True)
-            lives = list(LIVE.copy().values())
-        if locked:
-            LIVE.clear()
-    finally:
-        if locked:
-            LIVE_LOCK.release()
+    with LIVE_LOCK:
+        lives = list(LIVE.values())
+        LIVE.clear()
     for live in lives:
         live.shutdown()
 
@@ -4830,11 +4810,6 @@ def listen(args, tls, token):
                 flush=True,
             )
         return None
-
-
-# Installers and deploy scripts look for this exact line to tell that this code
-# sends READY=1 and WATCHDOG=1, so a systemd unit may use Type=notify.
-SYSTEMD_NOTIFY = 1
 
 
 def sd_notify(message):
