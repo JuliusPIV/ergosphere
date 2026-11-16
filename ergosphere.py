@@ -1388,6 +1388,25 @@ class SessionLockUnavailable(RuntimeError):
     """The session folder cannot be opened to lock it."""
 
 
+# A status probe (session_lock_busy) holds the session flock for microseconds,
+# but a probe thread that is stalled (GIL, load) can hold it longer. Only a lock
+# still held after this window is another grok's.
+PROBE_WAIT_SECS = 1.0
+
+
+def _flock_past_probes(fd):
+    """Take the exclusive flock, waiting out a status probe; BlockingIOError if still held."""
+    end = time.time() + PROBE_WAIT_SECS
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.time() >= end:
+                raise
+            time.sleep(0.02)
+
+
 def acquire_session_lock(sid):
     """Advisory flock on the session's own folder, held while this server's grok runs.
 
@@ -1419,13 +1438,7 @@ def acquire_session_lock(sid):
     except OSError as exc:
         raise SessionLockUnavailable("cannot open %s: %s" % (folder, exc.strerror or exc))
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            # A status probe (session_lock_busy) holds it for microseconds:
-            # only a lock still held a moment later is another grok's.
-            time.sleep(0.05)
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _flock_past_probes(fd)
     except BlockingIOError:
         os.close(fd)
         return None
