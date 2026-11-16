@@ -1982,6 +1982,16 @@ def open_live(sid, cmd, cwd, cols, rows):
         live = LIVE.get(sid)
         if live is not None and live.alive():
             return live, True
+    # The /proc walk is slow on a busy box and LIVE_LOCK gates every launch,
+    # resume and reattach, so it runs outside the lock. The state is checked
+    # again under the lock below, since another launch may have started meanwhile.
+    scan = ProcScan()
+    with LIVE_LOCK:
+        if RESTART.is_set():
+            raise RuntimeError("Ergosphere is restarting")
+        live = LIVE.get(sid)
+        if live is not None and live.alive():
+            return live, True
         if live is not None and live_state(live) == "stopping":
             raise SessionBusy("stopping", "session is still stopping; try again in a moment")
         if live is not None:
@@ -1997,7 +2007,8 @@ def open_live(sid, cmd, cwd, cols, rows):
                 raise SessionBusy("held-by-other-server", "session is open in another Ergosphere server")
             # Recheck under the lock: a grok can hold the session with no lock
             # (left by a killed server, or a CLI started after the caller looked).
-            scan = ProcScan()
+            # The scan predates this lock by a moment; a grok started in that
+            # window is missed, the same as one started just after the check.
             scan._own = own_grok_pids(scan, live_roots())
             holder = session_holder(sid, scan)
             if holder:

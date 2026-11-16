@@ -145,10 +145,40 @@ def _open_live_quietly(erg, sid):
         pass  # the refusal is the expected result here
 
 
+def check_proc_scan_outside_lock(erg):
+    """The /proc walk (every process's stat and cmdline) is slow work: LIVE_LOCK must be free for it."""
+    held_during_scan = []
+    real_scan = erg.ProcScan
+
+    class TracingScan(real_scan):
+        def __init__(self):
+            got = erg.LIVE_LOCK.acquire(timeout=0)
+            if got:
+                erg.LIVE_LOCK.release()
+            else:
+                held_during_scan.append(True)
+            real_scan.__init__(self)
+
+    erg.ProcScan = TracingScan
+    erg.spawn_grok = lambda cmd, cwd, cols, rows: (FakeProc(), -1)
+    erg.Live = FakeLive
+    try:
+        erg.open_live("sid-scan", ["grok"], "/", 80, 24)
+    except RuntimeError:
+        pass
+    finally:
+        erg.ProcScan = real_scan
+        erg.LIVE.clear()
+    if held_during_scan:
+        return "proc scan: LIVE_LOCK was held while /proc was walked"
+    return None
+
+
 def main():
     erg = load_module()
     failures = [f for f in (check_open_live(erg), check_resume_reply(erg),
-                            check_failed_lock_kill(erg)) if f]
+                            check_failed_lock_kill(erg),
+                            check_proc_scan_outside_lock(erg)) if f]
     for failure in failures:
         print("FAIL: " + failure)
     if failures:
