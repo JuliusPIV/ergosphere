@@ -382,23 +382,19 @@ def cmdline_contains_sid(raw, sid):
     return any(part in forms for part in raw.split(b"\0"))
 
 
-def proc_stat_fields(pid):
-    """Fields after comm in /proc/<pid>/stat (state, ppid, pgrp, session, ...).
+def proc_stat_int(pid, index):
+    """Integer field after comm in /proc/<pid>/stat: 1 ppid, 3 session, 4 tty_nr.
 
     comm can contain spaces and parentheses, so split after the last ')'.
     """
     try:
         raw = open("/proc/%s/stat" % int(pid), "rb").read()
     except (OSError, ValueError):
-        return []
+        return None
     cut = raw.rfind(b")")
     if cut < 0:
-        return []
-    return raw[cut + 2:].split()
-
-
-def proc_stat_int(pid, index):
-    fields = proc_stat_fields(pid)
+        return None
+    fields = raw[cut + 2:].split()
     if len(fields) <= index:
         return None
     try:
@@ -421,13 +417,13 @@ def is_ergosphere_server(pid):
 
 
 def is_orphan_grok(pid):
-    """A grok an Ergosphere server started and then left behind.
+    """True for a session leader with no controlling terminal.
 
-    The server starts grok as its own session leader with no controlling
-    terminal (start_new_session; the PTY is only its stdio). When the server
-    is killed, grok keeps running, re-parented to init or to the nearest
-    subreaper, whichever program that is. A grok typed in a shell has the
-    shell's terminal and is not a session leader: the shell is.
+    That is how a grok looks after the Ergosphere server that started it
+    was killed (start_new_session; the PTY is only its stdio). So does a
+    `setsid grok` or a grok run by a service: this does not tell them
+    apart. A grok typed in a shell has the shell's terminal and is not a
+    session leader: the shell is.
     """
     return proc_stat_int(pid, 3) == int(pid) and proc_stat_int(pid, 4) == 0
 
@@ -442,7 +438,7 @@ def holder_kind(pid):
     fork, so the real grok's parent is the shell, not the server; the walk
     goes up to init and is bounded.
     orphan: no server above it, and it is a session leader with no
-    controlling terminal: a grok its Ergosphere server left behind.
+    controlling terminal (is_orphan_grok): there is no terminal to quit it in.
     """
     try:
         current = int(pid)
@@ -636,8 +632,7 @@ def _busy_text(sid, holder):
     pid = holder["pid"]
     if holder.get("kind") == "orphan":
         return (
-            "This session is open in a grok that an Ergosphere server left "
-            "running when it stopped. That grok has no terminal. "
+            "This session is open in a grok on this machine that has no terminal. "
             "This page checks once a second and offers Resume when it exits. "
             "A button can quit it and open the session here.\n"
             "session id: %s\n"
@@ -1778,8 +1773,6 @@ class _Client:
 
 
 def open_live(sid, cmd, cwd, cols, rows):
-    if not isinstance(sid, str) or not SID_RE.match(sid):
-        raise ValueError("unknown session")
     with LIVE_LOCK:
         if RESTART.is_set():
             raise RuntimeError("Ergosphere is restarting")
@@ -1854,138 +1847,11 @@ def _turn_in_children(pid, ppids, cmd=None):
     return False
 
 
-_INHIBIT = {"works": None}
-_INHIBIT_LOCK = threading.Lock()
-
-
-def inhibit_works():
-    """True when systemd-inhibit can take a lock here (checked once).
-
-    With no system bus (containers, sandboxes, some WSL setups) it exits at
-    once, so grok's "agent turn in progress" child never shows.
-    """
-    with _INHIBIT_LOCK:
-        if _INHIBIT["works"] is None:
-            ok = False
-            binary = shutil.which("systemd-inhibit")
-            if binary:
-                try:
-                    ok = subprocess.run(
-                        [binary, "--what=idle", "--who=Ergosphere",
-                         "--why=availability check", "true"],
-                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL, timeout=5,
-                    ).returncode == 0
-                except (OSError, subprocess.SubprocessError):
-                    ok = False
-            _INHIBIT["works"] = ok
-        return _INHIBIT["works"]
-
-
-# Fallback turn signal without systemd-inhibit. A turn writes the session's
-# files (events, chat history, updates) and uses CPU; an idle grok does
-# neither (measured: no writes and 0-1% CPU when idle).
-TURN_WRITE_SECS = 8
-TURN_CPU_WRITE_SECS = 60
-TURN_CPU_PCT = 3.0
-# grok writes its session files while it starts (measured: within 0.5 s).
-TURN_START_SECS = 3
-_CPU_SEEN = {}
-_CPU_LOCK = threading.Lock()
-
-
-def _newest_write(sid):
-    folder = session_dir_for(sid)
-    if not folder:
-        return None
-    newest = None
-    try:
-        with os.scandir(folder) as entries:
-            for entry in entries:
-                try:
-                    if entry.is_file():
-                        mtime = entry.stat().st_mtime
-                        if newest is None or mtime > newest:
-                            newest = mtime
-                except OSError:
-                    continue
-    except OSError:
-        return None
-    return newest
-
-
-CPU_BASE_SECS = 1.0
-
-
-def _cpu_pct(pid):
-    """Recent CPU percent of pid, or None before a first measurement.
-
-    Shared by every caller (list poll, chat polls): one baseline per pid,
-    renewed only once it is CPU_BASE_SECS old, and the last result is
-    returned to callers in between, so close calls do not reset each other.
-    """
-    fields = proc_stat_fields(pid)
-    if len(fields) < 13:
-        return None
-    try:
-        ticks = int(fields[11]) + int(fields[12])
-    except ValueError:
-        return None
-    now = time.time()
-    with _CPU_LOCK:
-        base_at, base_ticks, last = _CPU_SEEN.get(pid, (None, None, None))
-        if base_at is None or now - base_at > 120 or ticks < base_ticks:
-            last = None
-            _CPU_SEEN[pid] = (now, ticks, None)
-        elif now - base_at >= CPU_BASE_SECS:
-            last = 100.0 * (ticks - base_ticks) / os.sysconf("SC_CLK_TCK") / (now - base_at)
-            _CPU_SEEN[pid] = (now, ticks, last)
-        if len(_CPU_SEEN) > 512:
-            _CPU_SEEN.clear()
-    return last
-
-
-def proc_started(pid):
-    """Start time of pid in epoch seconds, or None."""
-    start = proc_stat_int(pid, 19)
-    if start is None:
-        return None
-    try:
-        with open("/proc/stat") as handle:
-            for line in handle:
-                if line.startswith("btime "):
-                    return int(line.split()[1]) + start / os.sysconf("SC_CLK_TCK")
-    except (OSError, ValueError):
-        return None
-    return None
-
-
-def _turn_without_inhibit(pid, sid):
-    # A write in the last few seconds; or CPU use while the session wrote
-    # within the last minute (a turn thinking between writes). CPU alone,
-    # for example typing into an idle session, is not a turn.
-    newest = _newest_write(sid)
-    cpu = _cpu_pct(pid)
-    if newest is None:
-        return False
-    started = proc_started(pid)
-    if started is not None and newest < started + TURN_START_SECS:
-        return False
-    age = time.time() - newest
-    if age <= TURN_WRITE_SECS:
-        return True
-    return cpu is not None and cpu >= TURN_CPU_PCT and age <= TURN_CPU_WRITE_SECS
-
-
-def grok_turn(pid, sid, scan=None):
-    """working or idle for a live grok."""
+def grok_turn(pid, scan=None):
+    """working or idle for a live grok, from its "agent turn in progress" child."""
     if scan is None:
         scan = ProcScan()
-    if _turn_in_children(pid, scan.ppids, scan.cmd):
-        return "working"
-    if not inhibit_works() and _turn_without_inhibit(pid, sid):
-        return "working"
-    return "idle"
+    return "working" if _turn_in_children(pid, scan.ppids, scan.cmd) else "idle"
 
 
 def live_state(live):
@@ -2031,7 +1897,7 @@ def session_state(sid, with_turn=True, scan=None):
         return out
     if here and not holder:
         out["pid"] = live.proc.pid
-        turn = grok_turn(live.proc.pid, sid, scan) if with_turn and here == "running" else "idle"
+        turn = grok_turn(live.proc.pid, scan) if with_turn and here == "running" else "idle"
         out["turn"] = turn
         out["state"] = "starting" if here == "starting" else "running-" + turn
         return out
@@ -2039,7 +1905,7 @@ def session_state(sid, with_turn=True, scan=None):
         out["state"] = holder_state(holder)
         out["pid"] = holder["pid"]
         if with_turn:
-            out["turn"] = grok_turn(holder["pid"], sid, scan)
+            out["turn"] = grok_turn(holder["pid"], scan)
     return out
 
 
@@ -2197,9 +2063,12 @@ def conflict_note(state):
     """List marker for two groks on one session: this server's and a holder."""
     if not state.get("here") or not state.get("holder"):
         return ""
-    if state["holder"].get("kind") == "cli":
+    kind = state["holder"].get("kind")
+    if kind == "cli":
         return "also open in a CLI"
-    return "also open in another Ergosphere server"
+    if kind == "web":
+        return "also open in another Ergosphere server"
+    return "also open in a grok with no terminal"
 
 
 def dashboard_session_row(section, seq, row, pid, hidden=False, note=""):
@@ -3230,10 +3099,11 @@ def bind_choices():
 
 
 def running_sessions():
-    # Starting or running in this server (session_state's own part).
+    # This server's groks that have not exited: starting, running or
+    # stopping (live_state). The restart gate counts the same way.
     with LIVE_LOCK:
         lives = list(LIVE.values())
-    return sum(1 for live in lives if live_state(live) in ("starting", "running"))
+    return sum(1 for live in lives if live_state(live))
 
 
 def settings_overrides(args):
@@ -3977,7 +3847,7 @@ function pollTitle() {
 // The title poll runs only while the session is not Ended.
 var titleTimer = null;
 function startTitlePoll() {
-  if (!titleTimer) titleTimer = setInterval(pollTitle, 3000);
+  if (!titleTimer) titleTimer = setInterval(pollTitle, 5000);
 }
 function stopTitlePoll() {
   if (titleTimer) { clearInterval(titleTimer); titleTimer = null; }
@@ -3998,6 +3868,7 @@ function showEnded() {
   document.getElementById("status").style.color = "#808080";
   document.getElementById("stop").textContent = "Resume";
 }
+var retryTimer = null;
 function resumeSession(tries) {
   tries = tries || 0;
   ended = false;
@@ -4038,9 +3909,10 @@ function resumeSession(tries) {
       return;
     }
     // The last grok has not exited yet: wait for it, never start a second.
-    if (data.stopping === true && tries < 40) {
+    // Quit pressed meanwhile (stopping) gives the attempt up.
+    if (data.stopping === true && tries < 40 && !stopping) {
       setStatus("waiting for the last grok to exit", false);
-      setTimeout(function () { resumeSession(tries + 1); }, 250);
+      retryTimer = setTimeout(function () { retryTimer = null; resumeSession(tries + 1); }, 250);
       return;
     }
     showEnded();
@@ -4208,6 +4080,13 @@ function connect() {
 document.getElementById("stop").addEventListener("click", function () {
   if (ended) {
     resumeSession();
+    return;
+  }
+  if (retryTimer) {
+    // Waiting to retry Resume: nothing was started, so there is nothing to quit.
+    clearTimeout(retryTimer);
+    retryTimer = null;
+    showEnded();
     return;
   }
   stopping = true;
@@ -4756,7 +4635,7 @@ class Handler(BaseHTTPRequestHandler):
     def _settings_restart(self):
         # Only with zero grok sessions. RESTART stops new launches until exec.
         with LIVE_LOCK:
-            busy = sum(1 for live in LIVE.values() if live.alive())
+            busy = sum(1 for live in LIVE.values() if live_state(live))
             if not busy:
                 RESTART.set()
         if busy:

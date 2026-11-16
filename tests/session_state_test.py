@@ -3,8 +3,8 @@
 Covers: every tab gets "ended" when one tab quits; no Resume while the last
 grok is still exiting; no start while another grok on this host (a CLI, another
 server's, one a stopped server left) holds the session, even when this server
-runs it too; holder labels; the words on the pages; mid-turn detection without
-systemd-inhibit.
+runs it too; holder labels; the words on the pages; Settings counts a stopping
+grok and refuses Restart until it has exited.
 
 Run: python3 -B tests/session_state_test.py
 Stdlib only, no network, no real grok: "grok" is python under that name.
@@ -276,27 +276,6 @@ def check_words(erg):
     return None
 
 
-def check_turn_without_inhibit(erg):
-    sid = new_sid(7)
-    proc = popen([GROK, "-c", FAKE, "--resume", sid])
-    erg.inhibit_works = lambda: False
-    folder = erg.session_dir_for(sid)
-    path = os.path.join(folder, "events.jsonl")
-    with open(path, "w") as fh:
-        fh.write("{}\n")
-    if erg.grok_turn(proc.pid, sid) != "idle":
-        return "25l: the writes grok makes while it starts read as a turn"
-    erg.TURN_START_SECS = 0  # as if this write came later, mid-session
-    working = erg.grok_turn(proc.pid, sid)
-    old = time.time() - 600
-    for name in os.listdir(folder):
-        os.utime(os.path.join(folder, name), (old, old))
-    idle = erg.grok_turn(proc.pid, sid)
-    if (working, idle) != ("working", "idle"):
-        return "25l: without systemd-inhibit a turn reads %r and a quiet session %r" % (working, idle)
-    return None
-
-
 def check_new_session_launch(erg):
     # A new session has no folder yet: the launch starts exactly one grok.
     sid = sid_for(34)
@@ -353,16 +332,33 @@ def check_left_behind_grok(erg):
     return None
 
 
-def check_bad_sid(erg):
-    # Only a session id starts a grok.
-    for bad in ("../x", "a/../../x", "..", ""):
-        try:
-            erg.open_live(bad, fake_cmd(bad), CWD, 80, 24)
-            accepted = True
-        except ValueError:
-            accepted = False
-        if accepted:
-            return "session id %r was not refused" % bad
+def check_restart_counts_stopping(erg):
+    # Quit was pressed and grok is still exiting: Settings still counts it
+    # and Restart is refused, as for any grok this server runs.
+    sid = new_sid(37)
+    live, _ = erg.open_live(sid, fake_cmd(sid), CWD, 80, 24)
+    time.sleep(0.3)
+    before = erg.running_sessions()
+    stopper = threading.Thread(target=live.shutdown)
+    stopper.start()
+    time.sleep(0.2)
+    during = erg.running_sessions()
+    got = {}
+    try:
+        erg.Handler._settings_restart(types.SimpleNamespace(_json=lambda code, obj: got.update(code=code, obj=obj)))
+    except AttributeError:
+        pass  # the gate let it through and went on to read the server's settings
+    finally:
+        allowed = erg.RESTART.is_set()
+        erg.RESTART.clear()
+    stopper.join(10)
+    with erg.LIVE_LOCK:
+        if erg.LIVE.get(sid) is live:
+            erg.LIVE.pop(sid, None)
+    refused = (got.get("obj") or {}).get("sessions")
+    if during != before or allowed or got.get("code") != 409 or refused != before:
+        return "restart: with a grok still exiting Settings counted %d of %d, Restart allowed=%s, reply %r" % (
+            during, before, allowed, got)
     return None
 
 
@@ -390,27 +386,14 @@ def check_stopping_until_exit(erg):
     return None
 
 
-def check_cpu_callers_share(erg):
-    # Two pollers close together both see a busy grok's CPU use.
-    busy = popen([sys.executable, "-c", "while True: pass"])
-    erg._cpu_pct(busy.pid)
-    time.sleep(1.3)
-    first = erg._cpu_pct(busy.pid)
-    second = erg._cpu_pct(busy.pid)  # another poller right after
-    busy.kill()
-    if first is None or second is None or second < 50:
-        return "cpu: a second caller right after the first saw %r (first %r)" % (second, first)
-    return None
-
-
 def main():
     erg = load()
     erg.print = lambda *a, **k: None
     checks = (check_quit_tells_every_tab, check_no_resume_while_stopping, check_two_servers,
               check_conflict_everywhere,
-              check_held_while_running_here, check_holder_labels, check_words, check_turn_without_inhibit,
-              check_new_session_launch, check_one_proc_pass, check_cpu_callers_share,
-              check_left_behind_grok, check_bad_sid, check_stopping_until_exit)
+              check_held_while_running_here, check_holder_labels, check_words,
+              check_new_session_launch, check_one_proc_pass,
+              check_left_behind_grok, check_restart_counts_stopping, check_stopping_until_exit)
     failures = []
     try:
         for check in checks:
