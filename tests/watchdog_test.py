@@ -235,9 +235,44 @@ def check_short_watchdog_transient_stall():
     return []
 
 
+def check_sessions_do_not_inherit_notify_env():
+    """The notify variables are for the server only: a grok session that
+    inherited them could ping the watchdog or report READY=1 as the server."""
+    spec = importlib.util.spec_from_file_location("ergosphere", ROOT / "ergosphere.py")
+    erg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(erg)
+    names = ("NOTIFY_SOCKET", "WATCHDOG_USEC", "WATCHDOG_PID")
+    os.environ.update({"NOTIFY_SOCKET": "@ergo-wd-test-unused", "WATCHDOG_USEC": "2000000",
+                       "WATCHDOG_PID": str(os.getpid())})
+    try:
+        proc, master = erg.spawn_grok([shutil.which("env")], "/", 80, 24)
+    finally:
+        for name in names:
+            os.environ.pop(name, None)
+    out = b""
+    try:
+        while True:
+            chunk = os.read(master, 65536)
+            if not chunk:
+                break
+            out += chunk
+    except OSError:
+        pass  # EIO: the child closed its side of the pty
+    os.close(master)
+    proc.wait(5)
+    text = out.decode("utf-8", "replace")
+    if "TERM=xterm-256color" not in text:
+        return ["could not read the session environment (got %r)" % text[-200:]]
+    leaked = [name for name in names if name + "=" in text]
+    if leaked:
+        return ["a spawned session inherits %s from the server" % ", ".join(leaked)]
+    return []
+
+
 def main():
     failures = (check_live_server() + check_lock_held_blocks_ping() + check_one_slow_miss_keeps_deadline()
-                + check_short_watchdog_lock_hold() + check_short_watchdog_transient_stall())
+                + check_short_watchdog_lock_hold() + check_short_watchdog_transient_stall()
+                + check_sessions_do_not_inherit_notify_env())
     for failure in failures:
         print("FAIL: " + failure)
     if failures:

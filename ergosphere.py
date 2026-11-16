@@ -1182,6 +1182,10 @@ def spawn_grok(cmd, cwd, cols, rows):
         # would nest this TUI in the parent's session instead of a new one.
         env.pop("GROK_SESSION_ID", None)
         env.pop("GROK_AGENT", None)
+        # systemd's notify variables are for this server only: a session that
+        # inherited them could send READY=1 or WATCHDOG=1 in its place.
+        for name in ("NOTIFY_SOCKET", "WATCHDOG_USEC", "WATCHDOG_PID"):
+            env.pop(name, None)
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
         env["COLUMNS"] = str(cols)
