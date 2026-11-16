@@ -2255,6 +2255,17 @@ def session_state(sid, with_turn=True, scan=None):
     if scan is None:
         scan = ProcScan()
     holder = session_holder(sid, scan)
+    if not holder and not here and session_lock_busy(sid):
+        # Locked by a grok this server cannot see (another PID namespace):
+        # the same lock open_live meets, so Resume and this agree. open_live
+        # takes that lock and inserts LIVE in one LIVE_LOCK hold, so the LIVE
+        # read above can predate it while this probe finds its keeper: read
+        # LIVE again before calling the lock another server's.
+        with LIVE_LOCK:
+            live = LIVE.get(sid)
+        here = live_state(live)
+        if not here:
+            holder = dict(LOCK_HOLDER)
     out = {"id": sid, "state": "stopped", "pid": None, "turn": None, "holder": holder,
            "here": here in ("starting", "running")}
     if here == "stopping":
@@ -2267,10 +2278,6 @@ def session_state(sid, with_turn=True, scan=None):
         out["turn"] = turn
         out["state"] = "starting" if here == "starting" else "running-" + turn
         return out
-    if not holder and not here and session_lock_busy(sid):
-        # Locked by a grok this server cannot see (another PID namespace):
-        # the same lock open_live meets, so Resume and this agree.
-        holder = out["holder"] = dict(LOCK_HOLDER)
     if holder:
         out["state"] = holder_state(holder)
         out["pid"] = holder["pid"]

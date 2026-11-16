@@ -659,6 +659,31 @@ def check_state_reads_lock(erg):
     return None
 
 
+def check_own_grok_not_other(erg):
+    # session_state reads LIVE, then open_live (a Resume) takes the lock and
+    # inserts LIVE, then the flock probe finds our own keeper. That must read
+    # as this server's grok, not as a server this one cannot see.
+    sid = new_sid(99)
+    real_holder = erg.session_holder
+    started = []
+
+    def racing_holder(s, scan=None):
+        if not started:
+            started.append(True)  # open_live calls session_holder itself
+            erg.open_live(s, [GROK, "-c", "import time\ntime.sleep(30)\n", "--resume", s], CWD, 80, 24)
+        return real_holder(s, scan)
+
+    erg.session_holder = racing_holder
+    try:
+        state = erg.session_state(sid, with_turn=False)
+    finally:
+        erg.session_holder = real_holder
+    if state["state"] == "held-by-other-server" or not state["here"]:
+        return "own grok read as another server: state=%r here=%r holder=%r" % (
+            state["state"], state["here"], state["holder"])
+    return None
+
+
 def check_cpu_callers_share(erg):
     # Two pollers close together both see a busy grok's CPU use.
     busy = popen([sys.executable, "-c", "while True: pass"])
@@ -682,7 +707,8 @@ def main():
               check_one_proc_pass, check_lock_kept_while_grok_lives, check_cpu_callers_share,
               check_orphan_race, check_bad_sid, check_stopping_until_exit, check_new_session_locked,
               check_new_session_taken, check_new_session_late_folder, check_new_session_lock_error,
-              check_lock_outlives_server, check_state_reads_lock, check_lock_ends_with_grok)
+              check_lock_outlives_server, check_state_reads_lock, check_lock_ends_with_grok,
+              check_own_grok_not_other)
     failures = []
     try:
         for check in checks:
