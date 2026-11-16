@@ -1458,7 +1458,13 @@ def session_lock_busy(sid):
 
 
 # Holds a session's lock fd until its grok exits (pidfd readable).
-LOCK_KEEPER = "import select,sys\nselect.select([int(sys.argv[1])], [], [])\n"
+# poll, not select: select() raises for any fd >= 1024, which would drop the lock silently.
+LOCK_KEEPER = (
+    "import select,sys\n"
+    "p = select.poll()\n"
+    "p.register(int(sys.argv[1]), select.POLLIN)\n"
+    "p.poll()\n"
+)
 # Python < 3.9 has no os.pidfd_open: poll the pid instead. A reaped grok reads
 # as gone (the session reader reaps it); a reused pid only holds the lock longer.
 LOCK_KEEPER_POLL = (

@@ -59,7 +59,9 @@ def check_mode(erg, label, folder):
         proc.wait()
         return "%s: keep_lock_for refused: %s" % (label, exc)
     try:
-        if not wait_until(lambda: lock_held(folder), 1):
+        # Sustained, not momentary: a keeper that dies at once still holds the lock for a few ms.
+        time.sleep(1)
+        if not lock_held(folder):
             return "%s: the lock was not held while grok runs" % label
         proc.kill()
         proc.wait()
@@ -72,6 +74,22 @@ def check_mode(erg, label, folder):
     return None
 
 
+def check_high_fd(erg, folder):
+    """The keeper must work when its pidfd number is at or above 1024 (select() limit)."""
+    held = []
+    try:
+        while True:
+            fd = os.open(os.devnull, os.O_RDONLY)
+            if fd >= 1030:
+                os.close(fd)
+                break
+            held.append(fd)
+        return check_mode(erg, "pidfd_open at fd >= 1024", folder)
+    finally:
+        for fd in held:
+            os.close(fd)
+
+
 def main():
     erg = load_module()
     folder = tempfile.mkdtemp(prefix="ergo-keep-")
@@ -79,6 +97,8 @@ def main():
     failures = []
     try:
         failures.append(check_mode(erg, "pidfd_open", folder))
+        if real is not None:
+            failures.append(check_high_fd(erg, folder))
         if real is not None:
             del os.pidfd_open  # emulate Python < 3.9
         failures.append(check_mode(erg, "no pidfd_open", folder))
