@@ -1,12 +1,14 @@
-"""No log write or HTTP reply happens while LIVE_LOCK is held.
+"""No log write, HTTP reply or /proc read happens while LIVE_LOCK is held.
 
-A stalled stdout (log on a slow disk) or a slow client must not hold the
-lock that every launch, resume and reattach needs.
+A stalled stdout (log on a slow disk), a slow client or a /proc walk on a
+busy box must not hold the lock that every launch, resume and reattach needs.
 
 Run: python3 -B tests/live_lock_io_test.py
 Stdlib only, no network, no grok, no server.
 """
+import contextlib
 import importlib.util
+import io
 import sys
 import threading
 import types
@@ -33,12 +35,28 @@ class FakeLive:
     def __init__(self, sid, proc, master, cwd):
         self.sid = sid
         self.proc = proc
+        self.buffer = bytearray(b"output")
+        self.trimmed = False
+        self.closed = False
 
     def alive(self):
         return True
 
     def start(self):
         pass
+
+
+@contextlib.contextmanager
+def fake_grok(erg):
+    """open_live starts no process; the real spawn_grok and Live come back after."""
+    saved = (erg.spawn_grok, erg.Live)
+    erg.spawn_grok = lambda cmd, cwd, cols, rows: (FakeProc(), -1)
+    erg.Live = FakeLive
+    try:
+        yield
+    finally:
+        erg.spawn_grok, erg.Live = saved
+        erg.LIVE.clear()
 
 
 def lock_free_during(erg, label, block_event, release_event, target):
@@ -72,17 +90,15 @@ def check_open_live(erg):
         def flush(self):
             pass
 
-    erg.spawn_grok = lambda cmd, cwd, cols, rows: (FakeProc(), -1)
-    erg.Live = FakeLive
     real = sys.stdout
-    sys.stdout = SlowStdout()
-    try:
-        return lock_free_during(
-            erg, "open_live log line", entered, release,
-            lambda: erg.open_live("sid-open", ["grok"], "/", 80, 24))
-    finally:
-        sys.stdout = real
-        erg.LIVE.clear()
+    with fake_grok(erg):
+        sys.stdout = SlowStdout()
+        try:
+            return lock_free_during(
+                erg, "open_live log line", entered, release,
+                lambda: erg.open_live("sid-open", ["grok"], "/", 80, 24))
+        finally:
+            sys.stdout = real
 
 
 def check_resume_reply(erg):
@@ -106,14 +122,45 @@ def check_resume_reply(erg):
         erg.LIVE.clear()
 
 
+def check_proc_reads_outside_lock(erg):
+    """open_live looks for another grok on the session by reading /proc: not under LIVE_LOCK."""
+    held = []
+    real_scan = erg.ProcScan
+
+    class TracingScan(real_scan):
+        def __init__(self):
+            if erg.LIVE_LOCK.locked():
+                held.append("/proc")
+            real_scan.__init__(self)
+            self.groks = [1]  # pid 1 stands in for a grok, so its open files are looked at
+            self.cmd[1] = b"grok\0"
+
+        def fd_targets(self, pid):
+            if erg.LIVE_LOCK.locked():
+                held.append("/proc/%d/fd" % pid)
+            return real_scan.fd_targets(self, pid)
+
+    erg.ProcScan = TracingScan
+    try:
+        with fake_grok(erg), contextlib.redirect_stdout(io.StringIO()):
+            # A UUID-shaped id: session_holder only looks up those.
+            erg.open_live("0f8e1d2c-1111-4222-8333-444455556666", ["grok"], "/", 80, 24)
+    finally:
+        erg.ProcScan = real_scan
+    if held:
+        return "holder check: LIVE_LOCK was held while %s was read" % ", ".join(sorted(set(held)))
+    return None
+
+
 def main():
     erg = load_module()
-    failures = [f for f in (check_open_live(erg), check_resume_reply(erg)) if f]
+    failures = [f for f in (check_open_live(erg), check_resume_reply(erg),
+                            check_proc_reads_outside_lock(erg)) if f]
     for failure in failures:
         print("FAIL: " + failure)
     if failures:
         return 1
-    print("PASS: LIVE_LOCK stays free while log and reply writes block")
+    print("PASS: LIVE_LOCK stays free while log and reply writes block and /proc is read")
     return 0
 
 
