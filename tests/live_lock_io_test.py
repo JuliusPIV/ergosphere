@@ -1,12 +1,14 @@
-"""No log write or HTTP reply happens while LIVE_LOCK is held.
+"""No log write, HTTP reply or grok kill wait happens while LIVE_LOCK is held.
 
-A stalled stdout (log on a slow disk) or a slow client must not hold the
-lock that every launch, resume and reattach needs.
+A stalled stdout (log on a slow disk), a slow client or a kill that waits
+for grok to exit must not hold the lock that every launch, resume and
+reattach needs.
 
 Run: python3 -B tests/live_lock_io_test.py
 Stdlib only, no network, no grok, no server.
 """
 import importlib.util
+import os
 import sys
 import threading
 import types
@@ -109,14 +111,49 @@ def check_resume_reply(erg):
         erg.LIVE.clear()
 
 
+def check_failed_lock_kill(erg):
+    """A grok stopped because its lock could not be kept is killed outside LIVE_LOCK."""
+    entered = threading.Event()
+    release = threading.Event()
+    devnull = os.open(os.devnull, os.O_RDONLY)
+
+    def refuse(proc, fds):
+        raise erg.SessionLockUnavailable("test: keeper cannot start")
+
+    def slow_kill(proc):
+        entered.set()
+        release.wait(10)
+
+    saved = (erg.acquire_session_lock, erg.keep_lock_for, erg.kill_proc, erg.spawn_grok)
+    erg.acquire_session_lock = lambda sid: [devnull]
+    erg.keep_lock_for = refuse
+    erg.kill_proc = slow_kill
+    erg.spawn_grok = lambda cmd, cwd, cols, rows: (FakeProc(), os.open(os.devnull, os.O_RDONLY))
+    try:
+        return lock_free_during(
+            erg, "stop after lock failure", entered, release,
+            lambda: _open_live_quietly(erg, "sid-orphan"))
+    finally:
+        erg.acquire_session_lock, erg.keep_lock_for, erg.kill_proc, erg.spawn_grok = saved
+        erg.LIVE.clear()
+
+
+def _open_live_quietly(erg, sid):
+    try:
+        erg.open_live(sid, ["grok"], "/", 80, 24)
+    except RuntimeError:
+        pass  # the refusal is the expected result here
+
+
 def main():
     erg = load_module()
-    failures = [f for f in (check_open_live(erg), check_resume_reply(erg)) if f]
+    failures = [f for f in (check_open_live(erg), check_resume_reply(erg),
+                            check_failed_lock_kill(erg)) if f]
     for failure in failures:
         print("FAIL: " + failure)
     if failures:
         return 1
-    print("PASS: LIVE_LOCK stays free while log and reply writes block")
+    print("PASS: LIVE_LOCK stays free while log, reply and kill waits block")
     return 0
 
 

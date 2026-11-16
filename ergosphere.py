@@ -1459,6 +1459,18 @@ def session_lock_busy(sid):
 
 # Holds a session's lock fd until its grok exits (pidfd readable).
 LOCK_KEEPER = "import select,sys\nselect.select([int(sys.argv[1])], [], [])\n"
+# Python < 3.9 has no os.pidfd_open: poll the pid instead. A reaped grok reads
+# as gone (the session reader reaps it); a reused pid only holds the lock longer.
+LOCK_KEEPER_POLL = (
+    "import os,sys,time\n"
+    "pid = int(sys.argv[1])\n"
+    "while True:\n"
+    "    try:\n"
+    "        os.kill(pid, 0)\n"
+    "    except ProcessLookupError:\n"
+    "        break\n"
+    "    time.sleep(0.5)\n"
+)
 
 
 def keep_lock_for(proc, fds):
@@ -1471,22 +1483,29 @@ def keep_lock_for(proc, fds):
     keeper cannot be started.
     """
     try:
-        try:
-            pidfd = os.pidfd_open(proc.pid)
-        except ProcessLookupError:
-            return  # grok already gone: nothing to hold
-        try:
-            subprocess.Popen(
-                [sys.executable, "-I", "-S", "-c", LOCK_KEEPER, str(pidfd)],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True, close_fds=True, pass_fds=tuple(fds) + (pidfd,),
-            )
-        finally:
-            os.close(pidfd)
-    except (OSError, AttributeError) as exc:
+        if hasattr(os, "pidfd_open"):
+            try:
+                pidfd = os.pidfd_open(proc.pid)
+            except ProcessLookupError:
+                return  # grok already gone: nothing to hold
+            try:
+                spawn_keeper(LOCK_KEEPER, str(pidfd), fds, (pidfd,))
+            finally:
+                os.close(pidfd)
+        else:
+            spawn_keeper(LOCK_KEEPER_POLL, str(proc.pid), fds, ())
+    except OSError as exc:
         raise SessionLockUnavailable("cannot keep the lock: %s" % exc)
     finally:
         close_fds(fds)
+
+
+def spawn_keeper(code, arg, fds, extra_fds):
+    subprocess.Popen(
+        [sys.executable, "-I", "-S", "-c", code, arg],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True, close_fds=True, pass_fds=tuple(fds) + tuple(extra_fds),
+    )
 
 
 def spawn_grok(cmd, cwd, cols, rows):
@@ -1962,6 +1981,7 @@ def open_live(sid, cmd, cwd, cols, rows):
         if live is not None:
             LIVE.pop(sid, None)
         no_lock = None
+        orphan = None  # (proc, master) to kill once LIVE_LOCK is released
         try:
             fds = acquire_session_lock(sid)
         except SessionLockUnavailable as exc:
@@ -1987,8 +2007,7 @@ def open_live(sid, cmd, cwd, cols, rows):
                     keep_lock_for(proc, fds)
                 except SessionLockUnavailable as exc:
                     no_lock = exc
-                    kill_proc(proc)
-                    os.close(master)
+                    orphan = (proc, master)
         if no_lock is None:
             live = Live(sid, proc, master, cwd)
             LIVE[sid] = live
@@ -1996,6 +2015,10 @@ def open_live(sid, cmd, cwd, cols, rows):
             if not fds:
                 # New session: lock its folder as soon as grok makes it.
                 threading.Thread(target=live.lock_when_created, daemon=True).start()
+    if orphan is not None:
+        # Outside LIVE_LOCK: kill_proc can wait up to 6 s for grok to exit.
+        kill_proc(orphan[0])
+        os.close(orphan[1])
     # Log after release: a stalled log write must not block other launches.
     if no_lock is not None:
         # Refuse rather than risk two groks on one session.
