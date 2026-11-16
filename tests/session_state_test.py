@@ -323,6 +323,67 @@ def check_status_keeps_warning(erg):
     return None
 
 
+FOCUS_JS = r"""
+// A stand-in for the list: setting innerHTML replaces every control with a
+// new object and drops focus, as a browser does.
+function mk(tag, attrs, parent) {
+  var n = {tagName: tag, parentNode: parent || null, getAttribute: function (k) {
+    return attrs.hasOwnProperty(k) ? attrs[k] : null; }};
+  n.focus = function () { document.activeElement = n; };
+  return n;
+}
+function build() {
+  var head = mk("DIV", {"data-section": "idle"});
+  return [mk("BUTTON", {"data-col": "title"}, head),
+          mk("A", {"data-kind": "session", "data-sid": "s1"}),
+          mk("A", {"data-kind": "session", "data-sid": "s2"}),
+          mk("A", {"data-kind": "more"})];
+}
+var nodes = build();
+var rows = {contains: function (n) { return nodes.indexOf(n) !== -1; }};
+Object.defineProperty(rows, "innerHTML", {set: function () {
+  if (rows.contains(document.activeElement)) document.activeElement = null;
+  nodes = build(); }});
+var document = {activeElement: null,
+  getElementById: function () { return rows; },
+  querySelectorAll: function () { return nodes; }};
+var selectedEl = null;
+function applySort() {} function applyFilter() {} function sync() {}
+%s
+var out = [];
+[0, 2, 3].forEach(function (i) {
+  var was = nodes[i];
+  was.focus();
+  swapRows("x");
+  out.push(document.activeElement === nodes[i] && nodes[i] !== was);
+});
+var outside = mk("A", {});
+document.activeElement = outside;
+swapRows("x");
+out.push(document.activeElement === outside);
+console.log(JSON.stringify(out));
+"""
+
+
+def check_refresh_keeps_focus(erg):
+    # The 4 s list refresh replaces the rows; keyboard focus on a sort button,
+    # a session link or "load more" must land on its replacement.
+    node = shutil.which("node")
+    if not node:
+        print("note: no node, list focus check skipped")
+        return None
+    page = erg.dashboard_page([], [], {})
+    js = FOCUS_JS % page[page.index("var refreshing = false;"):page.index("function refreshRows")]
+    out = subprocess.run([node, "-e", js], capture_output=True, text=True, timeout=20)
+    try:
+        got = json.loads(out.stdout)
+    except ValueError:
+        return "list focus: node failed: %s" % out.stderr.strip()[-300:]
+    if got != [True, True, True, True]:
+        return "list focus: after a refresh, focus kept on [sort button, session, load more, outside] = %r" % got
+    return None
+
+
 def check_holder_labels(erg):
     sid = new_sid(5)
     stub = os.path.join(TMP, "srv", "ergosphere.py")
@@ -510,7 +571,7 @@ def main():
     checks = (check_quit_tells_every_tab, check_no_resume_while_stopping, check_two_servers,
               check_conflict_everywhere,
               check_held_session, check_own_grok_named_beside_holder,
-              check_orphan_notice_needs_quit, check_status_keeps_warning, check_holder_labels, check_words,
+              check_orphan_notice_needs_quit, check_status_keeps_warning, check_refresh_keeps_focus, check_holder_labels, check_words,
               check_new_session_launch, check_one_proc_pass,
               check_left_behind_grok, check_restart_counts_stopping, check_stopping_until_exit)
     failures = []

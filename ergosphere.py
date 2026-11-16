@@ -2911,9 +2911,38 @@ function applyFilter() {
 var refreshing = false;
 var swapping = false;
 var rowsTag = "";
+// Replacing the rows drops keyboard focus from a sort button or link inside
+// them, so swapRows notes which control had it and focuses its replacement.
+function focusKey() {
+  var el = document.activeElement;
+  if (!el || !el.getAttribute || !document.getElementById("rows").contains(el)) return null;
+  return {
+    tag: el.tagName,
+    col: el.getAttribute("data-col"),
+    section: el.parentNode ? el.parentNode.getAttribute("data-section") : null,
+    sid: el.getAttribute("data-sid"),
+    kind: el.getAttribute("data-kind")
+  };
+}
+function restoreFocus(key) {
+  if (!key) return;
+  var nodes = document.querySelectorAll("#rows button, #rows a");
+  var i, n;
+  for (i = 0; i < nodes.length; i++) {
+    n = nodes[i];
+    if (n.tagName !== key.tag) continue;
+    if (key.col ? (n.getAttribute("data-col") === key.col &&
+                   n.parentNode.getAttribute("data-section") === key.section)
+        : (n.getAttribute("data-sid") === key.sid && n.getAttribute("data-kind") === key.kind)) {
+      n.focus();
+      return;
+    }
+  }
+}
 function swapRows(text) {
   var keepSid = selectedEl ? selectedEl.getAttribute("data-sid") : null;
   var keepKind = selectedEl ? selectedEl.getAttribute("data-kind") : null;
+  var keepFocus = focusKey();
   document.getElementById("rows").innerHTML = text;
   var all = document.querySelectorAll("a.row, a.more");
   var i;
@@ -2937,6 +2966,8 @@ function swapRows(text) {
     sync();
     refreshing = false;
   }
+  // After the sort: moving a row in the document drops its focus too.
+  restoreFocus(keepFocus);
 }
 function refreshRows() {
   if (document.hidden || dialogOpen()) return;
