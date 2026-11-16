@@ -592,14 +592,20 @@ def check_lock_ends_with_grok(erg):
     # The lock goes when grok goes, killed or exiting by itself, also when a
     # child of grok that got its fds (an MCP server, a background command)
     # lives on.
+    # The child writes its sleep's pid to a file so cleanup kills only that
+    # sleep, never another sleep 31.25 the user runs.
     child = ("import subprocess,sys,time\n"
-             "subprocess.Popen(['sleep', '31.25'], close_fds=False, start_new_session=True)\n"
-             "time.sleep(float(sys.argv[1]))\n")
+             "p=subprocess.Popen(['sleep', '31.25'], close_fds=False, start_new_session=True)\n"
+             "open(sys.argv[1],'w').write(str(p.pid))\n"
+             "time.sleep(float(sys.argv[2]))\n")
     out = []
+    sleeps = []
     for n, how in ((44, "killed"), (45, "exited")):
         sid = new_sid(n)
-        live, _ = erg.open_live(sid, [GROK, "-c", child, "0.6" if how == "exited" else "60", "--resume", sid],
-                                CWD, 80, 24)
+        pidfile = os.path.join(TMP, "sleep-%d.pid" % n)
+        sleeps.append(pidfile)
+        live, _ = erg.open_live(sid, [GROK, "-c", child, pidfile, "0.6" if how == "exited" else "60",
+                                      "--resume", sid], CWD, 80, 24)
         time.sleep(0.3)
         held = lock_held(erg, sid)
         if how == "killed":
@@ -607,7 +613,12 @@ def check_lock_ends_with_grok(erg):
         freed = wait_for(lambda: not lock_held(erg, sid), 3)
         if not held or not freed:
             out.append("%s grok: lock held while it ran=%s, freed after=%s" % (how, held, freed))
-    subprocess.call(["pkill", "-U", str(os.getuid()), "-f", "^sleep 31.25$"])
+    for pidfile in sleeps:
+        try:
+            with open(pidfile) as fh:
+                os.kill(int(fh.read()), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
     return "; ".join(out) or None
 
 
