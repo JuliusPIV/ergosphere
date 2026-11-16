@@ -408,6 +408,14 @@ def proc_stat_ppid(pid):
     return proc_stat_int(pid, 1)
 
 
+def proc_uid(pid):
+    """Owner of /proc/<pid>: the user the process runs as, or None."""
+    try:
+        return os.stat("/proc/%d" % pid).st_uid
+    except OSError:
+        return None
+
+
 def is_ergosphere_server(pid):
     """True for a python process whose argv runs a script named ergosphere.py."""
     args = [part for part in read_proc_cmdline(pid).split(b"\0") if part]
@@ -428,46 +436,51 @@ def is_orphan_grok(pid):
     return proc_stat_int(pid, 3) == int(pid) and proc_stat_int(pid, 4) == 0
 
 
+def proc_ancestors(pid):
+    """Parent pids from /proc/<pid>/stat, nearest first, up to init. Bounded."""
+    seen = {pid}
+    for _ in range(64):
+        pid = proc_stat_ppid(pid)
+        if pid is None or pid <= 0 or pid in seen:
+            return
+        yield pid
+        seen.add(pid)
+
+
 def holder_kind(pid):
-    """web, orphan or cli for a grok that holds a session.
+    """web, orphan or cli for a grok that holds a session: the name it is shown under.
 
     web: the nearest grok-or-server ancestor is a python process running
     ergosphere.py, so another Ergosphere server runs it. A grok met first
-    means a shell inside a grok session started this one: that is a CLI,
-    even when an Ergosphere server is further up. A wrapper on PATH can
-    fork, so the real grok's parent is the shell, not the server; the walk
-    goes up to init and is bounded.
-    orphan: no server above it, and it is a session leader with no
+    means a grok session started this one (from its shell, or directly):
+    that is named a CLI, even when an Ergosphere server is further up. A
+    wrapper on PATH can fork, so the real grok's parent is the shell, not
+    the server.
+    orphan: no grok or server above it, and it is a session leader with no
     controlling terminal (is_orphan_grok): there is no terminal to quit it in.
     """
-    try:
-        current = int(pid)
-    except (TypeError, ValueError):
-        return "cli"
-    start = current
-    seen = set()
-    for _ in range(64):
-        if current in seen or current <= 0:
-            break
-        seen.add(current)
-        ppid = proc_stat_ppid(current)
-        if ppid is None or ppid <= 0 or ppid == current or ppid in seen:
-            break
+    for ppid in proc_ancestors(pid):
         if is_ergosphere_server(ppid):
             return "web"
         if grok_cmdline(read_proc_cmdline(ppid)):
             return "cli"
-        if ppid <= 1:
-            break
-        current = ppid
-    return "orphan" if is_orphan_grok(start) else "cli"
+    return "orphan" if is_orphan_grok(pid) else "cli"
+
+
+def under_server(pid):
+    """True when any ancestor is an Ergosphere server, however far up.
+
+    Such a grok is part of a web session (the session's own grok, or one
+    started inside it) and is never quit from another page.
+    """
+    return any(is_ergosphere_server(ppid) for ppid in proc_ancestors(pid))
 
 
 def holder_can_quit(holder):
     return bool(
         isinstance(holder, dict)
         and holder.get("via") == "cmdline"
-        and holder.get("kind") != "web"
+        and not under_server(holder["pid"])
     )
 
 
@@ -487,9 +500,11 @@ def holder_state(holder):
 class ProcScan:
     """One pass over /proc, shared by every session a list render looks at.
 
-    cmd: pid -> argv bytes, ppids: pid -> ppid, groks: sorted pids whose
-    argv[0] is grok (not this process). own and fd targets are filled on
-    first use. A single-session lookup builds its own.
+    cmd: pid -> argv bytes, ppids: pid -> ppid, groks: sorted pids of this
+    user whose argv[0] is grok (not this process). Command lines are
+    world-readable, so another user's process can carry any name and any
+    session id: it is not counted. own and fd targets are filled on first
+    use. A single-session lookup builds its own.
     """
 
     def __init__(self):
@@ -509,7 +524,11 @@ class ProcScan:
                 continue
             self.ppids[pid] = ppid
             self.cmd[pid] = read_proc_cmdline(pid)
-        self.groks = sorted(pid for pid, raw in self.cmd.items() if pid != me and raw and grok_cmdline(raw))
+        uid = os.getuid()
+        self.groks = sorted(
+            pid for pid, raw in self.cmd.items()
+            if pid != me and raw and grok_cmdline(raw) and proc_uid(pid) == uid
+        )
         self._own = None
         self._fds = {}
 
@@ -584,10 +603,11 @@ def session_holder(sid, scan=None):
 
     via=cmdline: the id is on that grok's command line (Ergosphere resume, or
     `grok -r <id>`). via=openfile: a grok has `<session>/` open and the id
-    is not on its command line. kind=web when any ancestor is a python
-    process running ergosphere.py, otherwise kind=cli. Only a cmdline cli holder may be
-    signalled. This server's own PTY grok, including a wrapper's child, is
-    not a holder. Only a UUID-shaped session id is looked up.
+    is not on its command line. kind is web, orphan or cli (holder_kind).
+    Only a cmdline holder with no Ergosphere server above it may be
+    signalled (holder_can_quit). This server's own PTY grok, including a
+    wrapper's child, is not a holder, and neither is another user's
+    process. Only a UUID-shaped session id is looked up.
     """
     if not isinstance(sid, str) or not SID_TOKEN_RE.match(sid):
         return None
@@ -617,18 +637,7 @@ def session_holder(sid, scan=None):
     return None
 
 
-def busy_notice(sid, holder, here=False):
-    text = _busy_text(sid, holder)
-    if here:
-        # Two groks on one session: this server's and the holder.
-        text += (
-            "This server is also running a grok on this session. "
-            "Quit the other one before using it here.\n"
-        )
-    return text
-
-
-def _busy_text(sid, holder):
+def busy_notice(sid, holder):
     pid = holder["pid"]
     if holder.get("kind") == "orphan":
         return (
@@ -647,7 +656,7 @@ def _busy_text(sid, holder):
             "session id: %s\n"
             "holder pid: %s\n"
         ) % (sid, pid)
-    if holder["via"] == "cmdline":
+    if holder_can_quit(holder):
         return (
             "This session is open in a Grok CLI on this machine. "
             "This page checks once a second and offers Resume when that CLI exits. "
@@ -656,14 +665,20 @@ def _busy_text(sid, holder):
             "holder pid: %s\n"
             "%s\n"
         ) % (sid, pid, BUTTON_LABEL)
+    if holder["via"] == "cmdline":
+        why = "That CLI was started inside a web dashboard session"
+    else:
+        why = (
+            "The holder was detected from an open file, and its command line "
+            "does not contain the session id"
+        )
     return (
         "This session is open in a Grok CLI on this machine. "
         "This page checks once a second and offers Resume when that CLI exits. "
-        "The holder was detected from an open file, and its command line "
-        "does not contain the session id, so this page will not quit it.\n"
+        "%s, so this page will not quit it.\n"
         "session id: %s\n"
         "holder pid: %s\n"
-    ) % (sid, pid)
+    ) % (why, sid, pid)
 
 
 def pid_gone(pid):
@@ -675,11 +690,12 @@ def pid_gone(pid):
 
 
 def release_holder(sid):
-    """SIGTERM a cmdline cli holder and wait until that pid is gone.
+    """SIGTERM a cmdline holder (a CLI or an orphan) and wait until that pid is gone.
 
-    Returns (ok, info). Does not signal a web holder, an open-file holder,
-    a non-grok process, or a pid whose command line no longer contains the
-    session id. A web holder is refused even when the id is on its command line.
+    Returns (ok, info). Does not signal a holder with an Ergosphere server
+    anywhere above it (under_server: a web session's grok, or a grok
+    started inside one), an open-file holder, a non-grok process, or a pid
+    whose command line no longer contains the session id.
     """
     holder = session_holder(sid)
     if not holder:
@@ -688,9 +704,9 @@ def release_holder(sid):
     if pid <= 1 or pid == os.getpid():
         return False, {"ok": False, "error": "refusing that pid", "pid": pid}
     raw = read_proc_cmdline(pid)
-    if holder.get("kind") == "web" and not pid_gone(pid):
+    if under_server(pid) and not pid_gone(pid):
         print(
-            "take refuse pid=%s sid=%s via=%s kind=web" % (pid, sid, holder["via"]),
+            "take refuse pid=%s sid=%s via=%s under a server" % (pid, sid, holder["via"]),
             flush=True,
         )
         return False, {
@@ -698,7 +714,7 @@ def release_holder(sid):
             "error": "web session is not quit",
             "pid": pid,
             "via": holder["via"],
-            "kind": "web",
+            "kind": holder["kind"],
         }
     if pid_gone(pid):
         return True, {"ok": True, "pid": pid, "already": "gone"}
@@ -1861,12 +1877,11 @@ def live_state(live):
     stopping: Quit was asked (closed) and grok has not exited yet.
     starting: grok runs and has printed nothing yet.
     """
-    proc = getattr(live, "proc", None) if live is not None else None
-    if proc is None or proc.poll() is not None:
+    if live is None or live.proc.poll() is not None:
         return None
-    if getattr(live, "closed", False):
+    if live.closed:
         return "stopping"
-    if not getattr(live, "buffer", b"x") and not getattr(live, "trimmed", False):
+    if not live.buffer and not live.trimmed:
         return "starting"
     return "running"
 
@@ -1877,11 +1892,11 @@ def session_state(sid, with_turn=True, scan=None):
     state: stopped, starting, running-idle, running-working, stopping,
     held-by-cli or held-by-other-server. pid: the grok it names.
     holder: another grok on this session (session_holder). Any holder makes
-    the state held-by-*, also when this server runs a grok on it too (two
-    groks on one session: pages refuse to resume or attach, show the holder
-    notice, and the list marks the row). here: this server's own grok is
-    starting or running. turn: working or idle for any state with a live
-    grok, when with_turn.
+    the state held-by-*, also when this server runs a grok on it too. here:
+    this server's own grok is starting or running. With here, pages attach
+    to that grok as usual and show the holder as a warning (chat status,
+    list row note); without it a holder refuses Resume. turn: working or
+    idle for any state with a live grok except stopping, when with_turn.
     """
     with LIVE_LOCK:
         live = LIVE.get(sid)
@@ -2060,7 +2075,9 @@ def dashboard_head(section):
 
 
 def conflict_note(state):
-    """List marker for two groks on one session: this server's and a holder."""
+    """List marker: a stopping session, or two groks on one session (this server's and a holder)."""
+    if state["state"] == "stopping":
+        return "stopping"
     if not state.get("here") or not state.get("holder"):
         return ""
     kind = state["holder"].get("kind")
@@ -3439,7 +3456,7 @@ def chat_page(resume="", holder=None, running=False, title=""):
         )
         term_css = "#term { flex: 0 0 0; height: 0; min-height: 0; overflow: hidden; }"
         status = "session is already running"
-        notice = busy_notice(sid_js, holder, here=running)
+        notice = busy_notice(sid_js, holder)
         visible_sid = sid_js
     else:
         busy_css = "#busy { display: none; padding: 0.8rem 1rem; white-space: pre-wrap; }"
@@ -3816,6 +3833,9 @@ function setTitle(text) {
 // Status from the server's session state: "Running" when idle, "Working
 // now" mid-turn. A grok that is gone (the ended frame was missed) ends the page.
 var runText = "Running";
+// connect() bumps this. A reply asked for before it can predate a Resume
+// and would end a session that runs again.
+var stateGen = 0;
 function applyState(data) {
   if (!data || typeof data.state !== "string") return;
   if (hold || ended || stopping || !sawOutput) return;
@@ -3834,12 +3854,13 @@ function applyState(data) {
 }
 function pollTitle() {
   if (!sid) return;
+  var gen = stateGen;
   fetch("/session-info?id=" + encodeURIComponent(sid), {cache: "no-store"}).then(function (resp) {
     if (!resp.ok) return null;
     return resp.json();
   }).then(function (data) {
     if (!data) return;
-    applyState(data);
+    if (gen === stateGen) applyState(data);
     if (typeof data.title !== "string") return;
     setTitle(data.title);
   }).catch(function () {});
@@ -3971,6 +3992,7 @@ function connect() {
   try { fit.fit(); } catch (err) {}
   sessionReady = false;
   failText = "";
+  stateGen += 1;
   armOutputWait();
   var cols = term.cols || 80;
   var rows = term.rows || 24;
@@ -4510,7 +4532,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             state = session_state(resume, with_turn=False)
             running = running_here(state)
-            holder = state["holder"]
+            holder = None if running else state["holder"]
             saved = find_session(resume)
             page_title = saved.get("title") if isinstance(saved, dict) else ""
             if not isinstance(page_title, str):
@@ -4762,17 +4784,16 @@ class Handler(BaseHTTPRequestHandler):
         # One state answers it (session_state). Reply after LIVE_LOCK is
         # released: a slow client must not hold it.
         state = session_state(sid, with_turn=False)
-        if state["holder"]:
-            # Another grok has it, even when this server runs it too.
-            self._json(409, {"ok": False, "held": True, "state": state["state"],
-                             "error": "session is already running"})
+        if running_here(state):
+            self._json(200, {"ok": True, "id": sid})
             return
         if state["state"] == "stopping":
             self._json(409, {"ok": False, "stopping": True, "state": "stopping",
                              "error": "session is still stopping; try again in a moment"})
             return
-        if running_here(state):
-            self._json(200, {"ok": True, "id": sid})
+        if state["holder"]:
+            self._json(409, {"ok": False, "held": True, "state": state["state"],
+                             "error": "session is already running"})
             return
         row = find_session(sid)
         if row is None:
@@ -4796,8 +4817,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _take(self):
         # The button posts this. It does not run on connect. Quit only a
-        # cmdline cli holder. A grok with an ergosphere.py ancestor is a web
-        # session and is not signalled. The page then posts /resume.
+        # cmdline holder (a CLI or an orphan). A grok with an ergosphere.py
+        # ancestor belongs to a web session and is not signalled. The page
+        # then posts /resume.
         # Only a UUID-shaped id with a session directory on disk is taken.
         self._drain_body()
         qs = parse_qs(urlparse(self.path).query, keep_blank_values=False)
@@ -5002,7 +5024,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             state = session_state(sid, with_turn=False)
             holder = state["holder"]
-            if running_here(state) and not holder:
+            if running_here(state):
                 with LIVE_LOCK:
                     live = LIVE.get(sid)
                 if live is None:
@@ -5010,7 +5032,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
             else:
                 if holder:
-                    notice = busy_notice(sid, holder, here=running_here(state))
+                    notice = busy_notice(sid, holder)
                     can_quit = holder_can_quit(holder)
                     self._send_frame(2, notice.replace("\n", "\r\n").encode("utf-8"))
                     note = json.dumps({

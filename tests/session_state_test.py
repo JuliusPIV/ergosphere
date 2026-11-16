@@ -2,9 +2,11 @@
 
 Covers: every tab gets "ended" when one tab quits; no Resume while the last
 grok is still exiting; no start while another grok on this host (a CLI, another
-server's, one a stopped server left) holds the session, even when this server
-runs it too; holder labels; the words on the pages; Settings counts a stopping
-grok and refuses Restart until it has exited.
+server's, one a stopped server left) holds the session; a session this server
+runs stays attachable beside such a grok; another user's grok is no holder;
+holder labels and which holders may be quit; the words on the pages; Settings
+counts a stopping grok, the list marks it, and Restart is refused until it has
+exited.
 
 Run: python3 -B tests/session_state_test.py
 Stdlib only, no network, no real grok: "grok" is python under that name.
@@ -207,14 +209,72 @@ def check_conflict_everywhere(erg):
     return None
 
 
-def check_held_while_running_here(erg):
+def term_frames(erg, sid):
+    """What a fresh tab's /term is sent, up to where it would read input."""
+    frames = []
+
+    def nothing(*args, **kwargs):
+        return None
+
+    handler = types.SimpleNamespace(
+        _resolve_attach=lambda: (sid, 80, 24),
+        headers={"Sec-WebSocket-Key": "k", "Sec-WebSocket-Version": "13"},
+        send_response=nothing, send_header=nothing, end_headers=nothing, _json=nothing,
+        connection=types.SimpleNamespace(settimeout=nothing, setsockopt=nothing, shutdown=nothing),
+        _send_frame=lambda opcode, payload: frames.append((opcode, payload)),
+        _read_input=nothing,
+    )
+    erg.Handler._term(handler)
+    return frames
+
+
+def chat_html(erg, sid):
+    got = []
+    handler = types.SimpleNamespace(path="/chat?resume=" + sid, _guard=lambda *a: True, _html=got.append)
+    erg.Handler.do_GET(handler)
+    return got[0]
+
+
+def check_held_session(erg):
+    # A stopped session that a CLI `grok -r <id>` holds: Resume starts nothing.
     sid = new_sid(4)
-    erg.open_live(sid, fake_cmd(sid), CWD, 80, 24)
-    popen([GROK, "-c", FAKE, "-r", sid])  # grok -r <id> typed in a shell
+    popen([GROK, "-c", FAKE, "-r", sid])
     time.sleep(0.4)
     got = reply_of(erg, "_resume", {"id": sid})
-    if got.get("code") != 409 or not got["obj"].get("held"):
+    if got.get("code") != 409 or not got["obj"].get("held") or len(groks_for(sid)) != 1:
         return "SM-4: Resume while a CLI holds the session was not refused: %r" % got
+    # This server runs a session and a CLI opens it too: a fresh tab still
+    # attaches to this server's grok (to use it or Quit it) and Resume
+    # answers as for any session running here. No third grok.
+    sid = new_sid(41)
+    erg.open_live(sid, fake_cmd(sid), CWD, 80, 24)
+    popen([GROK, "-c", FAKE, "-r", sid])
+    time.sleep(0.4)
+    got = reply_of(erg, "_resume", {"id": sid})
+    attached = any(op == 1 and b'"session"' in p for op, p in term_frames(erg, sid))
+    page = chat_html(erg, sid)
+    connects = "var running = true;" in page and "var hold = false;" in page
+    if got.get("code") != 200 or not attached or not connects or len(groks_for(sid)) != 2:
+        return "own grok beside a CLI: /resume %r, /term attached %s, chat page connects %s, groks %d" % (
+            got.get("code"), attached, connects, len(groks_for(sid)))
+    return None
+
+
+def check_other_users_grok(erg):
+    # /proc/<pid>/cmdline is world-readable: a process of another user that
+    # names itself grok and carries the id is not a holder.
+    sid = new_sid(42)
+    popen([GROK, "-c", FAKE, "-r", sid])
+    time.sleep(0.4)
+    mine = erg.session_holder(sid)
+    real = os.getuid
+    os.getuid = lambda: real() + 1  # the fake grok now belongs to someone else
+    try:
+        theirs = erg.session_holder(sid)
+    finally:
+        os.getuid = real
+    if not mine or theirs:
+        return "uid: own CLI holder seen %s, another user's grok taken for a holder %s" % (bool(mine), bool(theirs))
     return None
 
 
@@ -235,6 +295,14 @@ def check_holder_labels(erg):
     kind = erg.holder_kind(inner)
     if kind != "cli":
         return "SM-10a: a CLI grok started inside a web session's shell is labelled %r" % kind
+    # It is named a CLI, but an Ergosphere server is above it: the page
+    # offers no button for it and /take does not signal it.
+    holder = erg.session_holder(sid)
+    offered = erg.holder_can_quit(holder)
+    quit_ok, _info = erg.release_holder(sid)
+    if offered or quit_ok or inner not in groks_for(sid):
+        return "take: a grok under another server's grok was offered for quitting %s, /take quit it %s" % (
+            offered, quit_ok)
     # A grok its server left behind: session leader, no terminal, re-parented
     # to init or to whatever subreaper is nearest (here: one that is not systemd).
     for n, reaper in ((6, False), (8, True)):
@@ -378,11 +446,16 @@ def check_stopping_until_exit(erg):
     finally:
         erg.kill_proc = real
     during = erg.session_state(sid, with_turn=False)["state"]
+    rows = erg.dashboard_rows([{"id": sid, "title": "t", "cwd": CWD, "updated": ""}])
+    row = [line for line in rows.split("\n") if 'data-sid="%s"' % sid in line]
+    marked = bool(row) and "[stopping]" in row[0]
     os.kill(live.proc.pid, signal.SIGKILL)
     gone = wait_for(lambda: sid not in erg.LIVE, 5)
     after = erg.session_state(sid, with_turn=False)["state"]
     if during != "stopping" or not gone or after != "stopped":
         return "stop: while grok outlived the kill state=%r, after exit LIVE cleared=%s state=%r" % (during, gone, after)
+    if not marked:
+        return "stop: the list row of a stopping session is not marked [stopping]: %r" % row
     return None
 
 
@@ -391,7 +464,7 @@ def main():
     erg.print = lambda *a, **k: None
     checks = (check_quit_tells_every_tab, check_no_resume_while_stopping, check_two_servers,
               check_conflict_everywhere,
-              check_held_while_running_here, check_holder_labels, check_words,
+              check_held_session, check_other_users_grok, check_holder_labels, check_words,
               check_new_session_launch, check_one_proc_pass,
               check_left_behind_grok, check_restart_counts_stopping, check_stopping_until_exit)
     failures = []

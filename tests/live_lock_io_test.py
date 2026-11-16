@@ -35,6 +35,9 @@ class FakeLive:
     def __init__(self, sid, proc, master, cwd):
         self.sid = sid
         self.proc = proc
+        self.buffer = bytearray(b"output")
+        self.trimmed = False
+        self.closed = False
 
     def alive(self):
         return True
