@@ -1398,8 +1398,11 @@ def acquire_session_lock(sid):
     second server cannot start the session in the window between its holder
     check and its spawn (grok itself does not refuse a second open). Once
     grok runs, a keeper process holds the fd until grok exits
-    (keep_lock_for), so the lock lives exactly as long as grok, even if
-    this server dies first.
+    (keep_lock_for), so the lock lives as long as grok, even if this
+    server dies first. The one exception is a new session (fds []): its
+    folder appears only after grok starts, so until lock_when_created
+    locks it, the session is unlocked and a server crash in that window
+    leaves that grok unlocked.
     Returns [fd]; [] for a new session whose folder grok has not made yet
     (its fresh id is unknown to every other server until grok, already
     running and visible to their holder scan, writes it); None when another
@@ -1482,8 +1485,8 @@ LOCK_KEEPER_POLL = (
 def keep_lock_for(proc, fds):
     """Hand the lock fds to a small process that exits when grok does; close ours.
 
-    The lock then lives exactly as long as grok, also when this server dies
-    first. Not grok itself: grok passes an inherited fd on to every child
+    The lock then lives as long as grok, also when this server dies first
+    (but not for a new session's folder; see acquire_session_lock). Not grok itself: grok passes an inherited fd on to every child
     (an MCP server, a background shell command), and one that outlives grok
     would keep the session locked. Raises SessionLockUnavailable when the
     keeper cannot be started.
@@ -1929,7 +1932,9 @@ class Live:
         exits (keep_lock_for). Polls every 0.02 s for the first seconds,
         then every second, for as long as grok runs. If another process got the lock first,
         that server has the session: stop this grok, as a Quit would, and
-        tell this server's pages why.
+        tell this server's pages why. Known gap: if this server dies before
+        this lock is taken, nothing locks the folder and grok runs unlocked.
+        Closing it needs grok started under a keeper, which is a larger change.
         """
         start = time.time()
         while self.proc.poll() is None:
