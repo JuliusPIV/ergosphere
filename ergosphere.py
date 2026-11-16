@@ -1507,11 +1507,14 @@ def keep_lock_for(proc, fds):
 
 
 def spawn_keeper(code, arg, fds, extra_fds):
-    subprocess.Popen(
+    keeper = subprocess.Popen(
         [sys.executable, "-I", "-S", "-c", code, arg],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True, close_fds=True, pass_fds=tuple(fds) + tuple(extra_fds),
     )
+    # Nothing else waits on the keeper. Without this thread it stays a zombie child of
+    # the server until some later Popen reaps it, and dropping it warns ResourceWarning.
+    threading.Thread(target=keeper.wait, daemon=True).start()
 
 
 def spawn_grok(cmd, cwd, cols, rows):

@@ -38,6 +38,22 @@ def lock_held(folder):
     return False
 
 
+def zombie_children():
+    """Pids of this process's children that have exited but were never reaped."""
+    found = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open("/proc/%s/stat" % pid) as f:
+                fields = f.read().rsplit(")", 1)[1].split()
+        except OSError:
+            continue
+        if fields[0] == "Z" and int(fields[1]) == os.getpid():
+            found.append(int(pid))
+    return found
+
+
 def wait_until(pred, secs):
     end = time.time() + secs
     while time.time() < end:
@@ -67,6 +83,9 @@ def check_mode(erg, label, folder):
         proc.wait()
         if not wait_until(lambda: not lock_held(folder), 3):
             return "%s: the lock was not released after grok exited" % label
+        # The keeper exits with grok; nothing may leave it as a zombie child of this server.
+        if not wait_until(lambda: not zombie_children(), 3):
+            return "%s: exited keeper left as zombie child %s" % (label, zombie_children())
     finally:
         if proc.poll() is None:
             proc.kill()
