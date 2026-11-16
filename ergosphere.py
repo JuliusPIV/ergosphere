@@ -423,18 +423,13 @@ def is_ergosphere_server(pid):
 def is_orphan_grok(pid):
     """A grok an Ergosphere server started and then left behind.
 
-    The server starts grok as its own session leader (start_new_session).
-    When the server is killed, grok keeps running, re-parented to init or a
-    subreaper (systemd --user). A grok typed in a shell is not a session
-    leader: the shell is.
+    The server starts grok as its own session leader with no controlling
+    terminal (start_new_session; the PTY is only its stdio). When the server
+    is killed, grok keeps running, re-parented to init or to the nearest
+    subreaper, whichever program that is. A grok typed in a shell has the
+    shell's terminal and is not a session leader: the shell is.
     """
-    if proc_stat_int(pid, 3) != int(pid):
-        return False
-    ppid = proc_stat_ppid(pid)
-    if ppid == 1:
-        return True
-    args = [part for part in read_proc_cmdline(ppid).split(b"\0") if part] if ppid else []
-    return bool(args) and os.path.basename(args[0]) == b"systemd"
+    return proc_stat_int(pid, 3) == int(pid) and proc_stat_int(pid, 4) == 0
 
 
 def holder_kind(pid):
@@ -446,8 +441,8 @@ def holder_kind(pid):
     even when an Ergosphere server is further up. A wrapper on PATH can
     fork, so the real grok's parent is the shell, not the server; the walk
     goes up to init and is bounded.
-    orphan: no server above it, and it is a session leader whose parent is
-    init or systemd: a grok its Ergosphere server left behind.
+    orphan: no server above it, and it is a session leader with no
+    controlling terminal: a grok its Ergosphere server left behind.
     """
     try:
         current = int(pid)

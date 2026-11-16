@@ -235,20 +235,30 @@ def check_holder_labels(erg):
     kind = erg.holder_kind(inner)
     if kind != "cli":
         return "SM-10a: a CLI grok started inside a web session's shell is labelled %r" % kind
-    sid = new_sid(6)
-    # A grok its server left behind: session leader, re-parented to init.
-    popen([sys.executable, "-B", "-c",
-           "import os,sys\n"
-           "if os.fork() == 0:\n"
-           "    os.setsid(); os.execv(sys.argv[1], sys.argv[1:])\n",
-           GROK, "-c", FAKE, "--resume", sid]).wait()
-    wait_for(lambda: groks_for(sid), 5)
-    pid = groks_for(sid)[0]
-    holder = erg.session_holder(sid)
-    kind = holder and holder.get("kind")
-    os.kill(pid, signal.SIGKILL)
-    if kind != "orphan":
-        return "SM-10b: a grok left by a stopped server is labelled %r" % kind
+    # A grok its server left behind: session leader, no terminal, re-parented
+    # to init or to whatever subreaper is nearest (here: one that is not systemd).
+    for n, reaper in ((6, False), (8, True)):
+        sid = new_sid(n)
+        left = popen([sys.executable, "-B", "-c",
+                      "import ctypes,os,sys,time\n"
+                      "reaper = sys.argv[1] == '1'\n"
+                      "if reaper: ctypes.CDLL(None).prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER\n"
+                      "if os.fork() == 0:\n"
+                      "    if os.fork() == 0:\n"
+                      "        os.setsid(); os.execv(sys.argv[2], sys.argv[2:])\n"
+                      "    os._exit(0)\n"
+                      "os.wait()\n"
+                      "if reaper: time.sleep(30)\n",
+                      "1" if reaper else "0", GROK, "-c", FAKE, "--resume", sid])
+        wait_for(lambda: groks_for(sid), 5)
+        pid = groks_for(sid)[0]
+        adopted = wait_for(lambda: (erg.proc_stat_ppid(pid) == left.pid) == reaper, 5)
+        holder = erg.session_holder(sid)
+        kind = holder and holder.get("kind")
+        os.kill(pid, signal.SIGKILL)
+        if not adopted or kind != "orphan":
+            return "SM-10b: a grok left by a stopped server (under a plain subreaper: %s, adopted as set up: %s) is labelled %r" % (
+                reaper, adopted, kind)
     return None
 
 
