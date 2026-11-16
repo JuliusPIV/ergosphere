@@ -3524,6 +3524,14 @@ html, body { height: 100%; margin: 0; background: #111; color: #ddd; font: 14px 
 #busy button { font: 14px/1.45 ui-monospace, monospace; color: #fff; background: #000; border: 1px solid #fff; padding: 0 0.5rem; cursor: pointer; margin-top: 0.6rem; }
 #busy button:hover, #busy button:focus { background: #fff; color: #000; outline: none; }
 @@TERM_CSS@@
+/* grok draws on the alternate screen, which has no scrollback: xterm's
+   scroll bar can never move, and the page itself must never scroll. */
+html, body { overflow: hidden; overscroll-behavior: none; }
+#wrap { height: calc(100dvh - 28px); }
+#term .xterm-viewport { overflow-y: hidden; }
+/* Touch drags on the terminal are grok scrolling, not page panning. The
+   script only acts on one finger; two-finger touches are left untouched. */
+#term { touch-action: none; }
 @media (max-width: 40rem) {
 #bar { height: 56px; flex-wrap: wrap; align-content: center; column-gap: 0.6rem; row-gap: 0.2rem; padding-right: 0.6rem; white-space: nowrap; overflow: hidden; font-size: 0; }
 #bar > * { font-size: 14px; }
@@ -3533,7 +3541,7 @@ html, body { height: 100%; margin: 0; background: #111; color: #ddd; font: 14px 
 #title { flex: 1 1 0; min-width: 7.5rem; }
 #title::before { content: "| "; }
 #version, #sid, #title-gap { display: none; }
-#wrap { height: calc(100vh - 56px); }
+#wrap { height: calc(100vh - 56px); height: calc(100dvh - 56px); }
 }
 </style>
 </head>
@@ -3544,7 +3552,12 @@ html, body { height: 100%; margin: 0; background: #111; color: #ddd; font: 14px 
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
 <script>
-var term = new Terminal({cursorBlink: true, fontFamily: "monospace", fontSize: 14, scrollback: 5000});
+// scrollback 0: grok runs on the alternate screen, and every wheel and touch
+// scroll goes to grok, so xterm's own scrollback can never be shown. It also
+// makes the fit addon reserve no scroll bar width: with scrollback on it
+// subtracts viewport.scrollBarWidth, which xterm 5.5 sets to 15 when the
+// hidden bar takes no width ("offsetWidth - scrollArea.offsetWidth || 15").
+var term = new Terminal({cursorBlink: true, fontFamily: "monospace", fontSize: 14, scrollback: 0});
 // Ctrl+V is xterm's clipboard chord (byte 0x16). Returning false skips that
 // and leaves the event so the browser paste, the same path as Ctrl+Shift+V,
 // supplies text/plain. clipboard.read is refused on this HTTP page. A frozen
@@ -3757,6 +3770,105 @@ document.getElementById("term").addEventListener("wheel", function (ev) {
   var cell = wheelCell(ev);
   sock.send(new TextEncoder().encode(wheelReport(ev.deltaY, cell.col, cell.row, ev.ctrlKey, ev.altKey, ev.shiftKey)));
 }, {capture: true, passive: false});
+// Touch: xterm 5.5 scrolls only its own scrollback on touch, and grok's
+// alternate screen has none. A vertical drag becomes the same SGR wheel
+// reports a mouse wheel sends. A move under TOUCH_SLOP stays a tap, so the
+// click that focuses the terminal (and opens the keyboard) still happens.
+var TOUCH_SLOP = 10;
+var TOUCH_ROWS_PER_REPORT = 3;
+// Fling speed kept per 16 ms frame. 0.95 stopped too soon.
+var FLING_DECAY = 0.975;
+var touch = null;
+var fling = null;
+function rowPx() {
+  var screen = document.querySelector("#term .xterm-screen");
+  var rows = term.rows || 24;
+  if (screen) {
+    var rect = screen.getBoundingClientRect();
+    if (rect.height > 0) return rect.height / rows;
+  }
+  return 17;
+}
+function sendWheelSteps(steps, cell) {
+  if (!steps || ended || !sock || sock.readyState !== 1) return;
+  var one = wheelReport(steps < 0 ? -1 : 1, cell.col, cell.row, false, false, false);
+  var out = "";
+  for (var i = 0; i < Math.abs(steps); i++) out += one;
+  sock.send(new TextEncoder().encode(out));
+}
+// px > 0 means the finger moved up: show later lines (wheel down).
+function touchScrollBy(state, px) {
+  state.acc += px / (rowPx() * TOUCH_ROWS_PER_REPORT);
+  var steps = state.acc < 0 ? Math.ceil(state.acc) : Math.floor(state.acc);
+  state.acc -= steps;
+  sendWheelSteps(steps, state.cell);
+}
+function stopFling() {
+  if (fling) fling.stopped = true;
+  fling = null;
+}
+var termBox = document.getElementById("term");
+// xterm's DOM renderer replaces the row a finger started on as soon as grok
+// redraws. Touch events keep going to that detached node and no longer reach
+// #term, so the move and end listeners sit on the touch target itself.
+function endTouch() {
+  if (touch && touch.target) {
+    touch.target.removeEventListener("touchmove", onTouchMove, {passive: false});
+    touch.target.removeEventListener("touchend", onTouchEnd, {passive: false});
+    touch.target.removeEventListener("touchcancel", endTouch, {passive: true});
+  }
+  touch = null;
+}
+termBox.addEventListener("touchstart", function (ev) {
+  stopFling();
+  endTouch();
+  if (ev.touches.length !== 1) return;
+  var t = ev.touches[0];
+  var target = ev.target;
+  touch = {target: target, y0: t.clientY, y: t.clientY, scrolling: false, acc: 0, v: 0, t: Date.now(), cell: wheelCell(t)};
+  target.addEventListener("touchmove", onTouchMove, {passive: false});
+  target.addEventListener("touchend", onTouchEnd, {passive: false});
+  target.addEventListener("touchcancel", endTouch, {passive: true});
+}, {capture: true, passive: true});
+function onTouchMove(ev) {
+  if (!touch || ev.touches.length !== 1) return;
+  var y = ev.touches[0].clientY;
+  if (!touch.scrolling) {
+    if (Math.abs(y - touch.y0) < TOUCH_SLOP) return;
+    touch.scrolling = true;
+    touch.y = y;
+  }
+  ev.preventDefault();
+  ev.stopPropagation();
+  var now = Date.now();
+  var dy = touch.y - y;
+  var dt = Math.max(1, now - touch.t);
+  touch.v = 0.8 * (dy / dt) + 0.2 * touch.v;
+  touch.y = y;
+  touch.t = now;
+  touchScrollBy(touch, dy);
+}
+function onTouchEnd(ev) {
+  var done = touch;
+  endTouch();
+  if (!done || !done.scrolling) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  // Momentum: keep scrolling at the release speed, decaying each frame.
+  if (Date.now() - done.t > 80 || Math.abs(done.v) < 0.3) return;
+  var state = {v: done.v, acc: done.acc, cell: done.cell, last: performance.now(), stopped: false};
+  fling = state;
+  function step(now) {
+    if (state.stopped) return;
+    var dt = now - state.last;
+    state.last = now;
+    touchScrollBy(state, state.v * dt);
+    state.v *= Math.pow(FLING_DECAY, dt / 16);
+    if (Math.abs(state.v) < 0.05) { fling = null; return; }
+    requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
 window.addEventListener("resize", function () {
   if (!termOpened) return;
   try { fit.fit(); } catch (err) {}
