@@ -684,6 +684,41 @@ def check_own_grok_not_other(erg):
     return None
 
 
+def check_list_probes_once(erg):
+    # The list polls every 4 s. A saved session locked by another server must
+    # cost one lock probe per poll, not two (list_states, then session_state).
+    sids = [new_sid(n) for n in range(60, 66)]
+    lockers = []
+    for sid in sids[:2]:
+        locker = popen([sys.executable, "-c",
+                        "import fcntl,os,sys,time\n"
+                        "fd=os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)\n"
+                        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+                        "print('up', flush=True); time.sleep(30)\n", session_folder(sid)],
+                       stdout=subprocess.PIPE)
+        locker.stdout.readline()
+        lockers.append(locker)
+    real = erg.session_lock_busy
+    probes = []
+
+    def counting(sid):
+        probes.append(sid)
+        return real(sid)
+    erg.session_lock_busy = counting
+    try:
+        states = erg.list_states(saved=sids)
+    finally:
+        erg.session_lock_busy = real
+        for locker in lockers:
+            os.kill(locker.pid, signal.SIGKILL)
+            locker.wait()
+    held = [sid for sid in sids[:2] if sid in states]
+    if len(probes) != len(sids) or len(held) != 2:
+        return "probes: %d lock probes for %d saved sessions; %d of 2 locked ones listed" % (
+            len(probes), len(sids), len(held))
+    return None
+
+
 def check_cpu_callers_share(erg):
     # Two pollers close together both see a busy grok's CPU use.
     busy = popen([sys.executable, "-c", "while True: pass"])
@@ -708,7 +743,7 @@ def main():
               check_orphan_race, check_bad_sid, check_stopping_until_exit, check_new_session_locked,
               check_new_session_taken, check_new_session_late_folder, check_new_session_lock_error,
               check_lock_outlives_server, check_state_reads_lock, check_lock_ends_with_grok,
-              check_own_grok_not_other)
+              check_own_grok_not_other, check_list_probes_once)
     failures = []
     try:
         for check in checks:

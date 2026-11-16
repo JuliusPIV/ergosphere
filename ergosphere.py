@@ -2237,7 +2237,7 @@ def live_state(live):
     return "running"
 
 
-def session_state(sid, with_turn=True, scan=None):
+def session_state(sid, with_turn=True, scan=None, locked=None):
     """The one answer to "who runs this session", for every handler and page.
 
     state: stopped, starting, running-idle, running-working, stopping,
@@ -2255,7 +2255,8 @@ def session_state(sid, with_turn=True, scan=None):
     if scan is None:
         scan = ProcScan()
     holder = session_holder(sid, scan)
-    if not holder and not here and session_lock_busy(sid):
+    # locked: the caller already probed this lock (list_states); skip the second probe.
+    if not holder and not here and (session_lock_busy(sid) if locked is None else locked):
         # Locked by a grok this server cannot see (another PID namespace):
         # the same lock open_live meets, so Resume and this agree. open_live
         # takes that lock and inserts LIVE in one LIVE_LOCK hold, so the LIVE
@@ -2367,10 +2368,11 @@ def list_states(saved=()):
     sids = set(dashboard_owners(scan))
     with LIVE_LOCK:
         sids.update(LIVE)
-    sids.update(sid for sid in saved if sid not in sids and session_lock_busy(sid))
+    busy = {sid for sid in saved if sid not in sids and session_lock_busy(sid)}
+    sids.update(busy)
     out = {}
     for sid in sids:
-        state = session_state(sid, scan=scan)
+        state = session_state(sid, scan=scan, locked=True if sid in busy else None)
         if state["state"] != "stopped":
             out[sid] = state
     return out
