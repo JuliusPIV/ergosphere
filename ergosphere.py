@@ -549,28 +549,20 @@ class ProcScan:
         return self._fds[pid]
 
 
-def live_roots():
-    # Caller holds LIVE_LOCK.
-    roots = []
-    for live in LIVE.values():
-        proc = getattr(live, "proc", None)
-        if proc is not None and proc.pid:
-            roots.append(proc.pid)
-    return roots
-
-
-def own_grok_pids(scan=None, roots=None):
+def own_grok_pids(scan=None):
     """PIDs of the grok terminals this server runs.
 
     Each tracked child, and when that child is a wrapper, the first grok
     under it. The walk stops at any grok and at any ergosphere.py server:
     a grok or an Ergosphere started from a web session's shell holds its
     own session, and Resume must still see it.
-    roots: this server's grok pids, when the caller already holds LIVE_LOCK.
     """
-    if roots is None:
-        with LIVE_LOCK:
-            roots = live_roots()
+    with LIVE_LOCK:
+        roots = []
+        for live in LIVE.values():
+            proc = getattr(live, "proc", None)
+            if proc is not None and proc.pid:
+                roots.append(proc.pid)
     own = set(roots)
     if not roots:
         return own
@@ -647,9 +639,6 @@ def busy_notice(sid, holder, here=False):
 
 def _busy_text(sid, holder):
     pid = holder["pid"]
-    if pid is None:
-        # Only the session-folder lock shows it (LOCK_HOLDER).
-        pid = "not visible from this server"
     if holder.get("kind") == "orphan":
         return (
             "This session is open in a grok that an Ergosphere server left "
@@ -1377,162 +1366,6 @@ class SessionBusy(RuntimeError):
         self.state = state
 
 
-# A new session's folder appears about 0.2 s after grok starts: poll fast
-# for this long, then once a second, while grok runs.
-NEW_SESSION_FAST_SECS = 5
-TAKEN_TEXT = "session was taken by another Ergosphere server"
-LOCK_FAILED_TEXT = "the session folder could not be locked; see the server log"
-
-
-class SessionLockUnavailable(RuntimeError):
-    """The session folder cannot be opened to lock it."""
-
-
-# A status probe (session_lock_busy) holds the session flock for microseconds,
-# but a probe thread that is stalled (GIL, load) can hold it longer. Only a lock
-# still held after this window is another grok's.
-PROBE_WAIT_SECS = 1.0
-
-
-def _flock_past_probes(fd):
-    """Take the exclusive flock, waiting out a status probe; BlockingIOError if still held."""
-    end = time.time() + PROBE_WAIT_SECS
-    while True:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return
-        except BlockingIOError:
-            if time.time() >= end:
-                raise
-            time.sleep(0.02)
-
-
-def acquire_session_lock(sid):
-    """Advisory flock on the session's own folder, held while this server's grok runs.
-
-    Every server that can resume a session reads the same folder under
-    ~/.grok/sessions, so they always meet on it, whatever their environment
-    (HOME caches, TMPDIR, private /tmp). The folder is opened read-only and
-    nothing is written into ~/.grok. flock works across processes, so a
-    second server cannot start the session in the window between its holder
-    check and its spawn (grok itself does not refuse a second open). Once
-    grok runs, a keeper process holds the fd until grok exits
-    (keep_lock_for), so the lock lives as long as grok, even if this
-    server dies first. The one exception is a new session (fds []): its
-    folder appears only after grok starts, so until lock_when_created
-    locks it, the session is unlocked and a server crash in that window
-    leaves that grok unlocked.
-    Returns [fd]; [] for a new session whose folder grok has not made yet
-    (its fresh id is unknown to every other server until grok, already
-    running and visible to their holder scan, writes it); None when another
-    process holds the lock. Raises ValueError for an id that is not a
-    session id, SessionLockUnavailable when the folder cannot be opened.
-    """
-    if not isinstance(sid, str) or not SID_RE.match(sid):
-        raise ValueError("unknown session")
-    folder = session_dir_for(sid)
-    if folder is None:
-        return []
-    try:
-        fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-    except OSError as exc:
-        raise SessionLockUnavailable("cannot open %s: %s" % (folder, exc.strerror or exc))
-    try:
-        _flock_past_probes(fd)
-    except BlockingIOError:
-        os.close(fd)
-        return None
-    except OSError as exc:
-        os.close(fd)
-        raise SessionLockUnavailable("cannot lock %s: %s" % (folder, exc.strerror or exc))
-    return [fd]
-
-
-def close_fds(fds):
-    for fd in fds:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-
-
-def session_lock_busy(sid):
-    """True when some process holds the session-folder lock (another server's grok).
-
-    A non-blocking try of the same flock open_live takes; on success it is
-    dropped at once. Only meaningful when this server runs no grok on sid
-    (its own grok holds the lock too). False for no folder or a lock error.
-    """
-    try:
-        fds = acquire_session_lock(sid)
-    except (SessionLockUnavailable, ValueError):
-        return False
-    if fds is None:
-        return True
-    close_fds(fds)
-    return False
-
-
-# Holds a session's lock fd until its grok exits (pidfd readable).
-# poll, not select: select() raises for any fd >= 1024, which would drop the lock silently.
-LOCK_KEEPER = (
-    "import select,sys\n"
-    "p = select.poll()\n"
-    "p.register(int(sys.argv[1]), select.POLLIN)\n"
-    "p.poll()\n"
-)
-# Python < 3.9 has no os.pidfd_open: poll the pid instead. A reaped grok reads
-# as gone (the session reader reaps it); a reused pid only holds the lock longer.
-LOCK_KEEPER_POLL = (
-    "import os,sys,time\n"
-    "pid = int(sys.argv[1])\n"
-    "while True:\n"
-    "    try:\n"
-    "        os.kill(pid, 0)\n"
-    "    except ProcessLookupError:\n"
-    "        break\n"
-    "    time.sleep(0.5)\n"
-)
-
-
-def keep_lock_for(proc, fds):
-    """Hand the lock fds to a small process that exits when grok does; close ours.
-
-    The lock then lives as long as grok, also when this server dies first
-    (but not for a new session's folder; see acquire_session_lock). Not grok itself: grok passes an inherited fd on to every child
-    (an MCP server, a background shell command), and one that outlives grok
-    would keep the session locked. Raises SessionLockUnavailable when the
-    keeper cannot be started.
-    """
-    try:
-        if hasattr(os, "pidfd_open"):
-            try:
-                pidfd = os.pidfd_open(proc.pid)
-            except ProcessLookupError:
-                return  # grok already gone: nothing to hold
-            try:
-                spawn_keeper(LOCK_KEEPER, str(pidfd), fds, (pidfd,))
-            finally:
-                os.close(pidfd)
-        else:
-            spawn_keeper(LOCK_KEEPER_POLL, str(proc.pid), fds, ())
-    except OSError as exc:
-        raise SessionLockUnavailable("cannot keep the lock: %s" % exc)
-    finally:
-        close_fds(fds)
-
-
-def spawn_keeper(code, arg, fds, extra_fds):
-    keeper = subprocess.Popen(
-        [sys.executable, "-I", "-S", "-c", code, arg],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=True, close_fds=True, pass_fds=tuple(fds) + tuple(extra_fds),
-    )
-    # Nothing else waits on the keeper. Without this thread it stays a zombie child of
-    # the server until some later Popen reaps it, and dropping it warns ResourceWarning.
-    threading.Thread(target=keeper.wait, daemon=True).start()
-
-
 def spawn_grok(cmd, cwd, cols, rows):
     master, slave = pty.openpty()
     winsz = struct.pack("HHHH", rows, cols, 0, 0)
@@ -1607,8 +1440,6 @@ class Live:
         self.watcher = None
         self.closed = False
         self.ended_sent = False
-        # Why this grok was ended, for the pages ("" for a plain exit or Quit).
-        self.end_reason = ""
         self.sub_state = {"rows": {}, "order": []}
         self.sub_lock = threading.Lock()
 
@@ -1703,10 +1534,7 @@ class Live:
                 client.queue.put((1, frame))
 
     def _ended_frame(self):
-        msg = {"type": "ended"}
-        if self.end_reason:
-            msg["reason"] = self.end_reason
-        return json.dumps(msg).encode("utf-8")
+        return json.dumps({"type": "ended"}).encode("utf-8")
 
     def attach(self, handler):
         client = _Client(handler)
@@ -1935,51 +1763,9 @@ class Live:
         except OSError:
             pass
 
-    def lock_when_created(self):
-        """Take the session-folder lock once grok has made the folder.
-
-        A new session has no folder at launch (grok writes it about 0.2 s
-        in). Until it exists no other server knows the id; once it does,
-        another server could resume it while unable to see this grok (a
-        separate process view), so lock it, as a Resume would, until grok
-        exits (keep_lock_for). Polls every 0.02 s for the first seconds,
-        then every second, for as long as grok runs. If another process got the lock first,
-        that server has the session: stop this grok, as a Quit would, and
-        tell this server's pages why. Known gap: if this server dies before
-        this lock is taken, nothing locks the folder and grok runs unlocked.
-        Closing it needs grok started under a keeper, which is a larger change.
-        """
-        start = time.time()
-        while self.proc.poll() is None:
-            try:
-                fds = acquire_session_lock(self.sid)
-                if fds:
-                    keep_lock_for(self.proc, fds)
-                    return
-            except (SessionLockUnavailable, ValueError) as exc:
-                # Fail closed, as open_live does: an unlocked grok could be
-                # resumed by a server that cannot see it.
-                print("session lock: new session %s: %s; stopping this grok" % (self.sid, exc), flush=True)
-                self._stop_unlocked(LOCK_FAILED_TEXT)
-                return
-            if fds is None:
-                print("session lock: new session %s was taken by another process; stopping this grok"
-                      % self.sid, flush=True)
-                self._stop_unlocked(TAKEN_TEXT)
-                return
-            time.sleep(0.02 if time.time() - start < NEW_SESSION_FAST_SECS else 1.0)
-
-    def _stop_unlocked(self, reason):
-        self.end_reason = reason
-        self.shutdown()
-        if self.proc.poll() is not None:
-            with LIVE_LOCK:
-                if LIVE.get(self.sid) is self:
-                    LIVE.pop(self.sid, None)
-
     def _release_on_exit(self):
         # grok outlived the kill: the entry stays (state stopping) until grok
-        # is gone (its lock goes with it); then leave LIVE as the reader would.
+        # is gone; then leave LIVE as the reader would.
         try:
             self.proc.wait()
         except Exception:
@@ -1997,22 +1783,20 @@ class _Client:
 
 
 def open_live(sid, cmd, cwd, cols, rows):
+    if not isinstance(sid, str) or not SID_RE.match(sid):
+        raise ValueError("unknown session")
     with LIVE_LOCK:
         if RESTART.is_set():
             raise RuntimeError("Ergosphere is restarting")
         live = LIVE.get(sid)
         if live is not None and live.alive():
             return live, True
-    # The /proc walk is slow on a busy box and LIVE_LOCK gates every launch,
-    # resume and reattach, so it runs outside the lock. The state is checked
-    # again under the lock below, since another launch may have started meanwhile.
-    scan = ProcScan()
-    # Read every grok's open files now too: session_holder reads them, and
-    # reading them under LIVE_LOCK would make the lock wait on /proc. They are
-    # a snapshot from about the same moment as the scan, so a grok that opens
-    # the session folder after this point is missed, like one started after the scan.
-    for pid in scan.groks:
-        scan.fd_targets(pid)
+    # A grok can hold the session without this server knowing: a CLI, another
+    # server's, or one a killed server left. Looking for it reads /proc, which
+    # is slow on a busy box, and LIVE_LOCK gates every launch, resume and
+    # reattach, so it runs before the lock is taken. A grok started after this
+    # look is missed.
+    holder = session_holder(sid)
     with LIVE_LOCK:
         if RESTART.is_set():
             raise RuntimeError("Ergosphere is restarting")
@@ -2021,53 +1805,15 @@ def open_live(sid, cmd, cwd, cols, rows):
             return live, True
         if live is not None and live_state(live) == "stopping":
             raise SessionBusy("stopping", "session is still stopping; try again in a moment")
+        if holder:
+            raise SessionBusy(holder_state(holder), "session is already open in another grok")
         if live is not None:
             LIVE.pop(sid, None)
-        no_lock = None
-        orphan = None  # (proc, master) to kill once LIVE_LOCK is released
-        try:
-            fds = acquire_session_lock(sid)
-        except SessionLockUnavailable as exc:
-            no_lock = exc
-        if no_lock is None:
-            if fds is None:
-                raise SessionBusy("held-by-other-server", "session is open in another Ergosphere server")
-            # Recheck under the lock: a grok can hold the session with no lock
-            # (left by a killed server, or a CLI started after the caller looked).
-            # The scan predates this lock by a moment; a grok started in that
-            # window is missed, the same as one started just after the check.
-            scan._own = own_grok_pids(scan, live_roots())
-            holder = session_holder(sid, scan)
-            if holder:
-                close_fds(fds)
-                raise SessionBusy(holder_state(holder), "session is already open in another grok")
-            try:
-                proc, master = spawn_grok(cmd, cwd, cols, rows)
-            except Exception:
-                close_fds(fds)
-                raise
-            if fds:
-                try:
-                    keep_lock_for(proc, fds)
-                except SessionLockUnavailable as exc:
-                    no_lock = exc
-                    orphan = (proc, master)
-        if no_lock is None:
-            live = Live(sid, proc, master, cwd)
-            LIVE[sid] = live
-            live.start()
-            if not fds:
-                # New session: lock its folder as soon as grok makes it.
-                threading.Thread(target=live.lock_when_created, daemon=True).start()
-    if orphan is not None:
-        # Outside LIVE_LOCK: kill_proc can wait up to 6 s for grok to exit.
-        kill_proc(orphan[0])
-        os.close(orphan[1])
+        proc, master = spawn_grok(cmd, cwd, cols, rows)
+        live = Live(sid, proc, master, cwd)
+        LIVE[sid] = live
+        live.start()
     # Log after release: a stalled log write must not block other launches.
-    if no_lock is not None:
-        # Refuse rather than risk two groks on one session.
-        print("session lock: %s" % no_lock, flush=True)
-        raise RuntimeError("cannot start: the session folder cannot be locked; see the server log")
     print("term pid=%s sid=%s cmd=%s" % (proc.pid, sid, " ".join(cmd)), flush=True)
     return live, False
 
@@ -2264,7 +2010,7 @@ def live_state(live):
     return "running"
 
 
-def session_state(sid, with_turn=True, scan=None, locked=None):
+def session_state(sid, with_turn=True, scan=None):
     """The one answer to "who runs this session", for every handler and page.
 
     state: stopped, starting, running-idle, running-working, stopping,
@@ -2282,18 +2028,6 @@ def session_state(sid, with_turn=True, scan=None, locked=None):
     if scan is None:
         scan = ProcScan()
     holder = session_holder(sid, scan)
-    # locked: the caller already probed this lock (list_states); skip the second probe.
-    if not holder and not here and (session_lock_busy(sid) if locked is None else locked):
-        # Locked by a grok this server cannot see (another PID namespace):
-        # the same lock open_live meets, so Resume and this agree. open_live
-        # takes that lock and inserts LIVE in one LIVE_LOCK hold, so the LIVE
-        # read above can predate it while this probe finds its keeper: read
-        # LIVE again before calling the lock another server's.
-        with LIVE_LOCK:
-            live = LIVE.get(sid)
-        here = live_state(live)
-        if not here:
-            holder = dict(LOCK_HOLDER)
     out = {"id": sid, "state": "stopped", "pid": None, "turn": None, "holder": holder,
            "here": here in ("starting", "running")}
     if here == "stopping":
@@ -2309,13 +2043,9 @@ def session_state(sid, with_turn=True, scan=None, locked=None):
     if holder:
         out["state"] = holder_state(holder)
         out["pid"] = holder["pid"]
-        if with_turn and holder["pid"] is not None:
+        if with_turn:
             out["turn"] = grok_turn(holder["pid"], sid, scan)
     return out
-
-
-# A session-folder lock with no grok in view: another server's, pid unknown.
-LOCK_HOLDER = {"pid": None, "via": "lock", "kind": "web"}
 
 
 def running_here(state):
@@ -2384,22 +2114,18 @@ def dashboard_owners(scan=None):
     return owned
 
 
-def list_states(saved=()):
+def list_states():
     """Session id -> session_state for each session with a live grok here or on this host.
 
-    One /proc pass (ProcScan) serves every session in the list. A saved
-    session id (saved) with no grok in view counts too when its folder lock
-    is held: another server's grok this server cannot see.
+    One /proc pass (ProcScan) serves every session in the list.
     """
     scan = ProcScan()
     sids = set(dashboard_owners(scan))
     with LIVE_LOCK:
         sids.update(LIVE)
-    busy = {sid for sid in saved if sid not in sids and session_lock_busy(sid)}
-    sids.update(busy)
     out = {}
     for sid in sids:
-        state = session_state(sid, scan=scan, locked=True if sid in busy else None)
+        state = session_state(sid, scan=scan)
         if state["state"] != "stopped":
             out[sid] = state
     return out
@@ -2549,7 +2275,7 @@ def dashboard_cwd_choices(cwd_defaults):
 def list_rows_tag(sessions, owners=None):
     """Change tag of the list rows, from the same inputs, without the HTML."""
     if owners is None:
-        owners = list_states([row["id"] for row in sessions])
+        owners = list_states()
     key = [
         sorted([sid, st["turn"] == "working", st["pid"], conflict_note(st)] for sid, st in owners.items()),
         [[row.get(k) for k in ("id", "title", "cwd", "updated")] for row in sessions],
@@ -2564,7 +2290,7 @@ def dashboard_rows(sessions, owners=None):
     # under Older sessions. Every older summary is in the page; the script
     # shows 20, then 50 more. The page polls /list-rows for this HTML.
     if owners is None:
-        owners = list_states([row["id"] for row in sessions])
+        owners = list_states()
     by_id = {}
     for row in sessions:
         by_id[row["id"]] = row
@@ -4407,7 +4133,6 @@ function connect() {
         var msg = JSON.parse(ev.data);
         if (msg && msg.type === "ended") {
           showEnded();
-          if (typeof msg.reason === "string" && msg.reason) setStatus(msg.reason, false);
           return;
         }
         if (msg && msg.type === "session" && msg.id) {
@@ -4739,7 +4464,7 @@ class Handler(BaseHTTPRequestHandler):
     def _list_rows(self):
         # The list page polls this. Unchanged rows cost one short reply.
         _total, sessions = load_sessions(None)
-        owners = list_states([row["id"] for row in sessions])
+        owners = list_states()
         tag = list_rows_tag(sessions, owners)
         if self.headers.get("X-Rows-Tag", "") == tag:
             self.send_response(204)
