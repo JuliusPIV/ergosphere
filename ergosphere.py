@@ -1994,6 +1994,12 @@ def open_live(sid, cmd, cwd, cols, rows):
     # resume and reattach, so it runs outside the lock. The state is checked
     # again under the lock below, since another launch may have started meanwhile.
     scan = ProcScan()
+    # Read every grok's open files now too: session_holder reads them, and
+    # reading them under LIVE_LOCK would make the lock wait on /proc. They are
+    # a snapshot from about the same moment as the scan, so a grok that opens
+    # the session folder after this point is missed, like one started after the scan.
+    for pid in scan.groks:
+        scan.fd_targets(pid)
     with LIVE_LOCK:
         if RESTART.is_set():
             raise RuntimeError("Ergosphere is restarting")

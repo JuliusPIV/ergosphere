@@ -174,11 +174,51 @@ def check_proc_scan_outside_lock(erg):
     return None
 
 
+def check_holder_fd_walk_outside_lock(erg):
+    """Reading a grok's open files (/proc/<pid>/fd) is /proc work: LIVE_LOCK must be free for it."""
+    held = []
+    real_scan = erg.ProcScan
+
+    class TracingScan(real_scan):
+        def __init__(self):
+            real_scan.__init__(self)
+            self.groks = [1]  # pid 1 stands in for a grok; its fds are read for the holder check
+            self.cmd[1] = b"grok\0"
+
+        def fd_targets(self, pid):
+            # Only a real /proc read counts; a cached answer does no I/O.
+            if pid not in self._fds and erg.LIVE_LOCK.locked():
+                held.append(pid)
+            return real_scan.fd_targets(self, pid)
+
+    saved = (erg.acquire_session_lock, erg.keep_lock_for, erg.spawn_grok)
+    dev = os.open(os.devnull, os.O_RDONLY)
+    erg.ProcScan = TracingScan
+    erg.acquire_session_lock = lambda sid: [dev]
+    erg.keep_lock_for = lambda proc, fds: None
+    erg.spawn_grok = lambda cmd, cwd, cols, rows: (FakeProc(), -1)
+    erg.Live = FakeLive
+    try:
+        # A UUID-shaped id: session_holder only looks up those.
+        erg.open_live("0f8e1d2c-1111-4222-8333-444455556666", ["grok"], "/", 80, 24)
+    except RuntimeError:
+        pass
+    finally:
+        erg.acquire_session_lock, erg.keep_lock_for, erg.spawn_grok = saved
+        erg.ProcScan = real_scan
+        erg.LIVE.clear()
+        os.close(dev)
+    if held:
+        return "holder check: LIVE_LOCK was held while /proc/<pid>/fd was read (pids %s)" % held
+    return None
+
+
 def main():
     erg = load_module()
     failures = [f for f in (check_open_live(erg), check_resume_reply(erg),
                             check_failed_lock_kill(erg),
-                            check_proc_scan_outside_lock(erg)) if f]
+                            check_proc_scan_outside_lock(erg),
+                            check_holder_fd_walk_outside_lock(erg)) if f]
     for failure in failures:
         print("FAIL: " + failure)
     if failures:
