@@ -8,7 +8,9 @@
 # itself breaks.  Optional: AB_CHROME (browser binary), NODE_PATH (playwright).
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SID=0f0e0d0c-0b0a-4908-8706-050403020100
+# A fresh id per run: Ergosphere finds a session's holder machine-wide via
+# /proc, so a fixed id makes concurrent runs on one machine block each other.
+SID="$(cat /proc/sys/kernel/random/uuid)" || exit 2
 for v in AB_A_DIR AB_B_DIR AB_PORT_A AB_PORT_B AB_OUT; do
   [ -n "${!v:-}" ] || { echo "run.sh: $v is not set" >&2; exit 2; }
 done
