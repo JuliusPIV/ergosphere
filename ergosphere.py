@@ -3882,10 +3882,11 @@ termBox.addEventListener("touchstart", function (ev) {
 function onTouchMove(ev) {
   if (!touch || ev.touches.length !== 1) return;
   var y = ev.touches[0].clientY;
+  // touch.y is still the start point here, so the first scrolling move counts
+  // all the travel since touchstart: a flick can arrive as one move event.
   if (!touch.scrolling) {
     if (Math.abs(y - touch.y0) < TOUCH_SLOP) return;
     touch.scrolling = true;
-    touch.y = y;
   }
   ev.preventDefault();
   ev.stopPropagation();

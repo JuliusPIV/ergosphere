@@ -163,6 +163,14 @@ async function normalScreen(p) {
   }));
 }
 const viewTop = p => p.evaluate(() => term.buffer.active.viewportY);
+// One finger: down, a single move event, up at once; then let a fling run.
+async function oneMove(cdp, x, ya, yb) {
+  await cdp.send('Input.dispatchTouchEvent', {type: 'touchStart', touchPoints: [{x, y: ya}]});
+  await wait(30);
+  await cdp.send('Input.dispatchTouchEvent', {type: 'touchMove', touchPoints: [{x, y: yb}]});
+  await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
+  await wait(1500);
+}
 (async () => {
   const b = await chromium.launch({executablePath: chrome, ignoreDefaultArgs: ['--hide-scrollbars']});
   const res = {};
@@ -197,6 +205,10 @@ const viewTop = p => p.evaluate(() => term.buffer.active.viewportY);
   await wait(400);
   res.dragSent = await p.evaluate(() => SENT.join(''));
   res.scrollY = await p.evaluate(() => scrollY);
+  // A flick delivered as one 200px move: it scrolls, and the fling goes on.
+  await p.evaluate(() => { SENT.length = 0; });
+  await oneMove(cdp, x, y0, y0 + 200);
+  res.oneMoveSent = await p.evaluate(() => SENT.join(''));
   // Two fingers: no wheel report and no preventDefault (left for pinch).
   // Count preventDefault itself: xterm's cancel also stops propagation, so a
   // listener on window would never see a prevented move.
@@ -231,6 +243,8 @@ const viewTop = p => p.evaluate(() => term.buffer.active.viewportY);
   await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
   await wait(400);
   res.mobile.normalTopAfterDrag = await viewTop(p);
+  await oneMove(cdp, x, y0, y0 + 200);
+  res.mobile.normalTopAfterOneMove = await viewTop(p);
   await ctx.close();
   // A two-finger pinch over grok's screen in a fresh page still zooms the
   // page (until #86 turns pinch into a text size change) and sends grok
@@ -360,6 +374,12 @@ def check_browser():
     n = res["mobile"]["normal"]
     if not res["mobile"]["normalTopAfterDrag"] < n["base"]:
         fails.append("mobile: a drag does not scroll the normal screen's history (top %s, base %s)" % (res["mobile"]["normalTopAfterDrag"], n["base"]))
+    ones = re.findall(r"\x1b\[<64;\d+;\d+M", res["oneMoveSent"])
+    if len(ones) < 4:
+        fails.append("a 200px flick in one move event sent %d wheel-up reports, want the move plus a fling" % len(ones))
+    if not res["mobile"]["normalTopAfterOneMove"] < res["mobile"]["normalTopAfterDrag"]:
+        fails.append("normal screen: a 200px flick in one move event did not scroll (top %s, was %s)" % (
+            res["mobile"]["normalTopAfterOneMove"], res["mobile"]["normalTopAfterDrag"]))
     if not res["pinchScale"] > 1.2:
         fails.append("a pinch over the terminal did not zoom the page (scale %s)" % res["pinchScale"])
     if "\x1b[<6" in res["pinchSent"]:
