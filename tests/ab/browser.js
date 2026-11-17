@@ -66,13 +66,20 @@ async function run() {
 
     // grok's scroll bar is the last column: drag it from the bottom to the top.
     const cw = g.w / s.cols, ch = g.h / s.rows, bx = g.x + g.w - cw / 2;
+    const low = g.y + g.h - ch * 1.5, high = g.y + ch / 2;
+    async function barDrag(ya, yb) {
+      await p.mouse.move(bx, ya);
+      await p.mouse.down();
+      for (let i = 1; i <= 10; i++) { await p.mouse.move(bx, ya + (yb - ya) * i / 10); await wait(30); }
+      await p.mouse.up();
+    }
     const fromOff = s.off;
-    await p.mouse.move(bx, g.y + g.h - ch * 1.5);
-    await p.mouse.down();
-    for (let i = 1; i <= 10; i++) { await p.mouse.move(bx, g.y + g.h - ch * 1.5 - (g.h - ch * 2) * i / 10); await wait(30); }
-    await p.mouse.up();
+    await barDrag(low, high);
     s = await settle(p, x => x.off <= x.max / 20, 3000);
     checks.bar_drag = check(s.off <= s.max / 20, `bar to top: off ${fromOff}->${s.off} of ${s.max}`);
+    // Back to the bottom, so the later checks start where grok started.
+    await barDrag(high, low);
+    s = await settle(p, x => x.off >= x.max * 0.95, 3000);
 
     const r0 = s.rows, c0 = s.cols;
     await p.setViewportSize({width: 900, height: 600});
