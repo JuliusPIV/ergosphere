@@ -3162,8 +3162,7 @@ def settings_overrides(args):
     return notes
 
 
-def settings_state(server):
-    config = server.config
+def settings_state(server, config):
     agents = dict(server.cwd_defaults)
     host, port = server.server_address[0], server.server_address[1]
     return {
@@ -4530,7 +4529,13 @@ class Handler(BaseHTTPRequestHandler):
             self._redirect("/")
             return
         if path == "/settings":
-            self._html(settings_page(settings_state(self.server)))
+            try:
+                with CONFIG_LOCK:
+                    saved = self._saved_config()
+            except ValueError as exc:
+                print("settings: %s; showing the values in memory" % exc, flush=True)
+                saved = self.server.config
+            self._html(settings_page(settings_state(self.server, saved)))
             return
         if path == "/models":
             models, err = grok_models_list()
@@ -4595,14 +4600,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(404, {"error": "not found"})
 
+    def _saved_config(self):
+        # The file as it is now: the installer or a hand edit may have
+        # changed it while the server runs. Call with CONFIG_LOCK held.
+        path = config_path()
+        if path.exists():
+            return check_config(read_json_file(path), str(path))
+        return check_config(copy.deepcopy(self.server.config), str(path))
+
     def _change_config(self, change):
         # Re-read the file so an edit made while the server runs is kept.
         with CONFIG_LOCK:
             path = config_path()
-            if path.exists():
-                data = check_config(read_json_file(path), str(path))
-            else:
-                data = check_config(copy.deepcopy(self.server.config), str(path))
+            data = self._saved_config()
             change(data)
             data = check_config(data, str(path))
             write_config(data)
@@ -4697,7 +4707,15 @@ class Handler(BaseHTTPRequestHandler):
                 "error": "%d grok %s running; restart needs zero" % (busy, "session" if busy == 1 else "sessions"),
             })
             return
-        nxt = resolve_endpoint(argparse.Namespace(**vars(self.server.args)), self.server.config)
+        # The restarted server reads the file, so the reply must too.
+        try:
+            with CONFIG_LOCK:
+                saved = self._saved_config()
+        except ValueError as exc:
+            RESTART.clear()
+            self._json(409, {"ok": False, "error": ("bad config: %s" % exc)[:300] + "; not restarting"})
+            return
+        nxt = resolve_endpoint(argparse.Namespace(**vars(self.server.args)), saved)
         problem = self._endpoint_problem(nxt.bind, nxt.port)
         if problem:
             RESTART.clear()
