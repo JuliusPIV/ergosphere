@@ -52,8 +52,8 @@ def check_css(page):
         fails.append("the page itself can scroll (html, body lack overflow: hidden; overscroll-behavior: none)")
     if "100dvh" not in css or "100vh" not in css:
         fails.append("#wrap height needs 100dvh with the 100vh fallback")
-    if not re.search(r"#term \{[^}]*touch-action: none", css):
-        fails.append("#term lets the browser pan the page on a touch drag (no touch-action: none)")
+    if not re.search(r"#term \{[^}]*touch-action: pinch-zoom;", css):
+        fails.append("#term needs touch-action: pinch-zoom (no browser pan on a drag, pinch still zooms)")
     return fails
 
 
@@ -179,7 +179,7 @@ const viewTop = p => p.evaluate(() => term.buffer.active.viewportY);
   await ctx.close();
   ctx = await b.newContext({...devices['Pixel 7']});
   p = await ctx.newPage();
-  const cdp = await ctx.newCDPSession(p);
+  let cdp = await ctx.newCDPSession(p);
   await p.goto(url); await wait(2500);
   res.mobile = await measure(p);
   await p.evaluate(() => { window.SENT = []; const s = sock.send.bind(sock);
@@ -198,8 +198,13 @@ const viewTop = p => p.evaluate(() => term.buffer.active.viewportY);
   res.dragSent = await p.evaluate(() => SENT.join(''));
   res.scrollY = await p.evaluate(() => scrollY);
   // Two fingers: no wheel report and no preventDefault (left for pinch).
+  // Count preventDefault itself: xterm's cancel also stops propagation, so a
+  // listener on window would never see a prevented move.
   await p.evaluate(() => { SENT.length = 0; window.PREVENTED = 0;
-    window.addEventListener('touchmove', e => { if (e.defaultPrevented) PREVENTED++; }); });
+    const o = Event.prototype.preventDefault;
+    Event.prototype.preventDefault = function () {
+      if (this.type === 'touchmove' && this.touches && this.touches.length > 1) PREVENTED++;
+      return o.call(this); }; });
   await cdp.send('Input.dispatchTouchEvent', {type: 'touchStart', touchPoints: [{x: x - 40, y: y0, id: 1}, {x: x + 40, y: y0, id: 2}]});
   for (let i = 1; i <= 10; i++) {
     await cdp.send('Input.dispatchTouchEvent', {type: 'touchMove', touchPoints: [{x: x - 40, y: y0 + 20 * i, id: 1}, {x: x + 40, y: y0 + 20 * i, id: 2}]});
@@ -227,6 +232,29 @@ const viewTop = p => p.evaluate(() => term.buffer.active.viewportY);
   await wait(400);
   res.mobile.normalTopAfterDrag = await viewTop(p);
   await ctx.close();
+  // A two-finger pinch over grok's screen in a fresh page still zooms the
+  // page (until #86 turns pinch into a text size change) and sends grok
+  // nothing. Fresh, because on the normal screen with scrollback xterm's own
+  // touch handler cancels the move to scroll, as it does on main.
+  ctx = await b.newContext({...devices['Pixel 7']});
+  p = await ctx.newPage();
+  cdp = await ctx.newCDPSession(p);
+  await p.goto(url); await wait(2500);
+  await p.evaluate(() => { window.SENT = []; const s = sock.send.bind(sock);
+    sock.send = d => { SENT.push(typeof d === 'string' ? d : new TextDecoder().decode(d)); s(d); }; });
+  // Real two-finger touch events: Input.synthesizePinchGesture zooms
+  // nothing in this headless Chrome, even with touch-action auto.
+  const cy = r.top + r.height / 2;
+  await cdp.send('Input.dispatchTouchEvent', {type: 'touchStart', touchPoints: [{x: x - 20, y: cy, id: 1}, {x: x + 20, y: cy, id: 2}]});
+  for (let i = 1; i <= 20; i++) {
+    await cdp.send('Input.dispatchTouchEvent', {type: 'touchMove', touchPoints: [{x: x - 20 - 5 * i, y: cy - 6 * i, id: 1}, {x: x + 20 + 5 * i, y: cy + 6 * i, id: 2}]});
+    await wait(20);
+  }
+  await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
+  await wait(500);
+  res.pinchScale = await p.evaluate(() => visualViewport.scale);
+  res.pinchSent = await p.evaluate(() => SENT.join(''));
+  await ctx.close();
   await b.close();
   console.log(JSON.stringify(res));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
@@ -234,6 +262,8 @@ const viewTop = p => p.evaluate(() => term.buffer.active.viewportY);
 
 
 def free_port():
+    if os.environ.get("ERGOSPHERE_TEST_PORT"):
+        return int(os.environ["ERGOSPHERE_TEST_PORT"])
     while True:
         s = socket.socket()
         s.bind(("127.0.0.1", 0))
@@ -330,6 +360,10 @@ def check_browser():
     n = res["mobile"]["normal"]
     if not res["mobile"]["normalTopAfterDrag"] < n["base"]:
         fails.append("mobile: a drag does not scroll the normal screen's history (top %s, base %s)" % (res["mobile"]["normalTopAfterDrag"], n["base"]))
+    if not res["pinchScale"] > 1.2:
+        fails.append("a pinch over the terminal did not zoom the page (scale %s)" % res["pinchScale"])
+    if "\x1b[<6" in res["pinchSent"]:
+        fails.append("a pinch sent wheel reports")
     if "\x1b[<6" in res["tapSent"]:
         fails.append("a tap sent a wheel report")
     return fails

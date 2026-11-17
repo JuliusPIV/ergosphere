@@ -3530,11 +3530,11 @@ html, body { height: 100%; margin: 0; background: #111; color: #ddd; font: 14px 
 html, body { overflow: hidden; overscroll-behavior: none; }
 #wrap { height: calc(100dvh - 28px); }
 #term .xterm-viewport { overflow-y: hidden; }
-/* Touch drags on the terminal are grok scrolling, not page panning. Native
-   page zoom over the terminal is off on purpose: pinch will resize the
-   terminal text instead (#86). The script only acts on one finger and never
-   prevents two-finger touches, so that handler can take them. */
-#term { touch-action: none; }
+/* One-finger drags on the terminal are grok scrolling, not page panning:
+   without pan-x or pan-y the browser does not pan, and the script handles
+   them. pinch-zoom keeps the browser's two-finger zoom. #86 changes this to
+   none when pinch resizes the terminal text instead. */
+#term { touch-action: pinch-zoom; }
 @media (max-width: 40rem) {
 #bar { height: 56px; flex-wrap: wrap; align-content: center; column-gap: 0.6rem; row-gap: 0.2rem; padding-right: 0.6rem; white-space: nowrap; overflow: hidden; font-size: 0; }
 #bar > * { font-size: 14px; }
