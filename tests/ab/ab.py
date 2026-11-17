@@ -76,11 +76,11 @@ def load(path):
 
 
 def side(dirname):
-    http = load(dirname + "/http.json")
+    server = load(dirname + "/http.json")
     browser = load(dirname + "/browser.json")
-    checks = dict(http.get("checks") or {})
+    checks = dict(server.get("checks") or {})
     checks.update(browser.get("checks") or {})
-    return checks, http.get("info") or {}, browser
+    return checks, server.get("info") or {}, browser
 
 
 def summary(adir, bdir):
