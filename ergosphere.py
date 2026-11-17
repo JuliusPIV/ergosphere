@@ -88,6 +88,9 @@ STOP = threading.Event()
 RESTART = threading.Event()
 SCREEN_CAP = 2 * 1024 * 1024
 FRAME_CHUNK = 64 * 1024
+# Output queued for one /term client that is not reading. Past this the client
+# is dropped: the page reconnects and resyncs from the replay (SCREEN_CAP).
+CLIENT_QUEUE_CAP = 2 * SCREEN_CAP
 # grok coalesces SIGWINCH. Two resizes closer than this read as one, and the
 # same final size does not repaint.
 REPAINT_PAUSE = 0.25
@@ -1484,6 +1487,32 @@ class Live:
         return head + bytes(self.buffer)
 
     def _enqueue(self, client, data, opcode=2):
+        if not client.alive:
+            return
+        with client.lock:
+            if client.queued + len(data) > CLIENT_QUEUE_CAP:
+                client.queued = 0
+                client.alive = False
+                client.dropped = True
+                overflow = True
+            else:
+                client.queued += len(data)
+                overflow = False
+        if overflow:
+            # The sender may be blocked in a write that never finishes.
+            # Shutting the socket down wakes it and the read loop, and _term
+            # detaches as for any close.
+            while True:
+                try:
+                    client.queue.get_nowait()
+                except queue.Empty:
+                    break
+            client.queue.put(None)
+            try:
+                client.handler.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            return
         # Binary terminal bytes can split. A text frame must stay one message.
         if opcode != 2:
             client.queue.put((opcode, data))
@@ -1515,8 +1544,7 @@ class Live:
         with self.lock:
             clients = list(self.clients)
         for client in clients:
-            if client.alive:
-                client.queue.put((1, frame))
+            self._enqueue(client, frame, 1)
 
     def _publish_ended(self):
         # Every attached client, once: the reader (grok exited) and
@@ -1528,8 +1556,7 @@ class Live:
             self.ended_sent = True
             clients = list(self.clients)
         for client in clients:
-            if client.alive:
-                client.queue.put((1, frame))
+            self._enqueue(client, frame, 1)
 
     def _ended_frame(self):
         return json.dumps({"type": "ended"}).encode("utf-8")
@@ -1545,10 +1572,10 @@ class Live:
             if snap:
                 self._enqueue(client, snap)
             late = self.ended_sent
-        client.queue.put((1, self._subagent_frame()))
+        self._enqueue(client, self._subagent_frame(), 1)
         if late:
             # Attached after the ended frame went out (Quit raced this attach).
-            client.queue.put((1, self._ended_frame()))
+            self._enqueue(client, self._ended_frame(), 1)
         return client
 
     def detach(self, client):
@@ -1644,6 +1671,8 @@ class Live:
             if item is None or not client.alive:
                 return
             opcode, payload = item
+            with client.lock:
+                client.queued -= len(payload)
             try:
                 client.handler._send_frame(opcode, payload)
             except (EOFError, OSError, RuntimeError, ValueError):
@@ -1778,6 +1807,10 @@ class _Client:
         self.handler = handler
         self.queue = queue.Queue()
         self.alive = True
+        # Bytes in queue. Over CLIENT_QUEUE_CAP the client is dropped.
+        self.queued = 0
+        self.dropped = False
+        self.lock = threading.Lock()
 
 
 def open_live(sid, cmd, cwd, cols, rows):
@@ -3162,8 +3195,7 @@ def settings_overrides(args):
     return notes
 
 
-def settings_state(server):
-    config = server.config
+def settings_state(server, config):
     agents = dict(server.cwd_defaults)
     host, port = server.server_address[0], server.server_address[1]
     return {
@@ -3524,6 +3556,17 @@ html, body { height: 100%; margin: 0; background: #111; color: #ddd; font: 14px 
 #busy button { font: 14px/1.45 ui-monospace, monospace; color: #fff; background: #000; border: 1px solid #fff; padding: 0 0.5rem; cursor: pointer; margin-top: 0.6rem; }
 #busy button:hover, #busy button:focus { background: #fff; color: #000; outline: none; }
 @@TERM_CSS@@
+/* grok draws on the alternate screen, which has no scrollback: xterm's
+   scroll bar can never move, and the page itself must never scroll. The
+   normal screen keeps its scrollback (the wheel, or a touch drag). */
+html, body { overflow: hidden; overscroll-behavior: none; }
+#wrap { height: calc(100dvh - 28px); }
+#term .xterm-viewport { overflow-y: hidden; }
+/* One-finger drags on the terminal are grok scrolling, not page panning:
+   without pan-x or pan-y the browser does not pan, and the script handles
+   them. pinch-zoom keeps the browser's two-finger zoom. #86 changes this to
+   none when pinch resizes the terminal text instead. */
+#term { touch-action: pinch-zoom; }
 @media (max-width: 40rem) {
 #bar { height: 56px; flex-wrap: wrap; align-content: center; column-gap: 0.6rem; row-gap: 0.2rem; padding-right: 0.6rem; white-space: nowrap; overflow: hidden; font-size: 0; }
 #bar > * { font-size: 14px; }
@@ -3533,7 +3576,7 @@ html, body { height: 100%; margin: 0; background: #111; color: #ddd; font: 14px 
 #title { flex: 1 1 0; min-width: 7.5rem; }
 #title::before { content: "| "; }
 #version, #sid, #title-gap { display: none; }
-#wrap { height: calc(100vh - 56px); }
+#wrap { height: calc(100vh - 56px); height: calc(100dvh - 56px); }
 }
 </style>
 </head>
@@ -3545,6 +3588,14 @@ html, body { height: 100%; margin: 0; background: #111; color: #ddd; font: 14px 
 <script src="/vendor/addon-fit.js"></script>
 <script>
 var term = new Terminal({cursorBlink: true, fontFamily: "monospace", fontSize: 14, scrollback: 5000});
+// The fit addon takes _core.viewport.scrollBarWidth off the columns whenever
+// scrollback is on. xterm 5.5 sets it once, when the terminal opens, to
+// "offsetWidth - scrollArea.offsetWidth || 15": 15 for a hidden bar, which
+// left an empty strip. Nothing else reads it. The bar is hidden, so no width.
+function dropScrollBarGutter() {
+  var core = term._core;
+  if (core && core.viewport) core.viewport.scrollBarWidth = 0;
+}
 // Ctrl+V is xterm's clipboard chord (byte 0x16). Returning false skips that
 // and leaves the event so the browser paste, the same path as Ctrl+Shift+V,
 // supplies text/plain. clipboard.read is refused on this HTTP page. A frozen
@@ -3644,6 +3695,7 @@ function ensureTerm() {
   termOpened = true;
   term.loadAddon(fit);
   term.open(document.getElementById("term"));
+  dropScrollBarGutter();
   // Edge draws a writing-hint dot on the focused field's caret; xterm's
   // hidden helper textarea sits at the terminal cursor, so turn hints off.
   if (term.textarea) term.textarea.setAttribute("writingsuggestions", "false");
@@ -3750,6 +3802,9 @@ function wheelCell(ev) {
   return {col: col + 1, row: row + 1};
 }
 document.getElementById("term").addEventListener("wheel", function (ev) {
+  // On the normal screen (before grok draws, or after it exits) xterm scrolls
+  // its own scrollback: the scroll bar is hidden, so this is the way back.
+  if (termOpened && term.buffer.active.type === "normal") return;
   if (!wheelLines(ev)) return;
   ev.preventDefault();
   ev.stopPropagation();
@@ -3757,6 +3812,113 @@ document.getElementById("term").addEventListener("wheel", function (ev) {
   var cell = wheelCell(ev);
   sock.send(new TextEncoder().encode(wheelReport(ev.deltaY, cell.col, cell.row, ev.ctrlKey, ev.altKey, ev.shiftKey)));
 }, {capture: true, passive: false});
+// Touch: xterm 5.5 scrolls only its own scrollback on touch, and grok's
+// alternate screen has none. A vertical drag becomes the same SGR wheel
+// reports a mouse wheel sends. A move under TOUCH_SLOP stays a tap, so the
+// click that focuses the terminal (and opens the keyboard) still happens.
+var TOUCH_SLOP = 10;
+var TOUCH_ROWS_PER_REPORT = 3;
+// Fling speed kept per 16 ms frame. 0.95 stopped too soon.
+var FLING_DECAY = 0.975;
+var touch = null;
+var fling = null;
+function rowPx() {
+  var screen = document.querySelector("#term .xterm-screen");
+  var rows = term.rows || 24;
+  if (screen) {
+    var rect = screen.getBoundingClientRect();
+    if (rect.height > 0) return rect.height / rows;
+  }
+  return 17;
+}
+function sendWheelSteps(steps, cell) {
+  if (!steps || ended || !sock || sock.readyState !== 1) return;
+  var one = wheelReport(steps < 0 ? -1 : 1, cell.col, cell.row, false, false, false);
+  var out = "";
+  for (var i = 0; i < Math.abs(steps); i++) out += one;
+  sock.send(new TextEncoder().encode(out));
+}
+// px > 0 means the finger moved up: show later lines (wheel down). On the
+// normal screen (before grok draws, or after it exits) the drag scrolls
+// xterm's own scrollback instead, since that is where the history is.
+function touchScrollBy(state, px) {
+  state.acc += px / (rowPx() * TOUCH_ROWS_PER_REPORT);
+  var steps = state.acc < 0 ? Math.ceil(state.acc) : Math.floor(state.acc);
+  state.acc -= steps;
+  if (!steps) return;
+  if (term.buffer.active.type === "normal") {
+    term.scrollLines(steps * TOUCH_ROWS_PER_REPORT);
+    return;
+  }
+  sendWheelSteps(steps, state.cell);
+}
+function stopFling() {
+  if (fling) fling.stopped = true;
+  fling = null;
+}
+var termBox = document.getElementById("term");
+// xterm's DOM renderer replaces the row a finger started on as soon as grok
+// redraws. Touch events keep going to that detached node and no longer reach
+// #term, so the move and end listeners sit on the touch target itself.
+function endTouch() {
+  if (touch && touch.target) {
+    touch.target.removeEventListener("touchmove", onTouchMove, {passive: false});
+    touch.target.removeEventListener("touchend", onTouchEnd, {passive: false});
+    touch.target.removeEventListener("touchcancel", endTouch, {passive: true});
+  }
+  touch = null;
+}
+termBox.addEventListener("touchstart", function (ev) {
+  stopFling();
+  endTouch();
+  if (ev.touches.length !== 1) return;
+  var t = ev.touches[0];
+  var target = ev.target;
+  touch = {target: target, y0: t.clientY, y: t.clientY, scrolling: false, acc: 0, v: 0, t: Date.now(), cell: wheelCell(t)};
+  target.addEventListener("touchmove", onTouchMove, {passive: false});
+  target.addEventListener("touchend", onTouchEnd, {passive: false});
+  target.addEventListener("touchcancel", endTouch, {passive: true});
+}, {capture: true, passive: true});
+function onTouchMove(ev) {
+  if (!touch || ev.touches.length !== 1) return;
+  var y = ev.touches[0].clientY;
+  // touch.y is still the start point here, so the first scrolling move counts
+  // all the travel since touchstart: a flick can arrive as one move event.
+  if (!touch.scrolling) {
+    if (Math.abs(y - touch.y0) < TOUCH_SLOP) return;
+    touch.scrolling = true;
+  }
+  ev.preventDefault();
+  ev.stopPropagation();
+  var now = Date.now();
+  var dy = touch.y - y;
+  var dt = Math.max(1, now - touch.t);
+  touch.v = 0.8 * (dy / dt) + 0.2 * touch.v;
+  touch.y = y;
+  touch.t = now;
+  touchScrollBy(touch, dy);
+}
+function onTouchEnd(ev) {
+  var done = touch;
+  endTouch();
+  if (!done || !done.scrolling) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  // Momentum: keep scrolling at the release speed, decaying each frame.
+  if (Date.now() - done.t > 80 || Math.abs(done.v) < 0.3) return;
+  var state = {v: done.v, acc: done.acc, cell: done.cell, last: performance.now(), stopped: false};
+  fling = state;
+  function step(now) {
+    if (state.stopped) return;
+    var dt = now - state.last;
+    state.last = now;
+    touchScrollBy(state, state.v * dt);
+    state.v *= Math.pow(FLING_DECAY, dt / 16);
+    if (Math.abs(state.v) < 0.05) { fling = null; return; }
+    requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
 window.addEventListener("resize", function () {
   if (!termOpened) return;
   try { fit.fit(); } catch (err) {}
@@ -4530,7 +4692,13 @@ class Handler(BaseHTTPRequestHandler):
             self._redirect("/")
             return
         if path == "/settings":
-            self._html(settings_page(settings_state(self.server)))
+            try:
+                with CONFIG_LOCK:
+                    saved = self._saved_config()
+            except ValueError as exc:
+                print("settings: %s; showing the values in memory" % exc, flush=True)
+                saved = self.server.config
+            self._html(settings_page(settings_state(self.server, saved)))
             return
         if path == "/models":
             models, err = grok_models_list()
@@ -4595,14 +4763,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(404, {"error": "not found"})
 
+    def _saved_config(self):
+        # The file as it is now: the installer or a hand edit may have
+        # changed it while the server runs. Call with CONFIG_LOCK held.
+        path = config_path()
+        if path.exists():
+            return check_config(read_json_file(path), str(path))
+        return check_config(copy.deepcopy(self.server.config), str(path))
+
     def _change_config(self, change):
         # Re-read the file so an edit made while the server runs is kept.
         with CONFIG_LOCK:
             path = config_path()
-            if path.exists():
-                data = check_config(read_json_file(path), str(path))
-            else:
-                data = check_config(copy.deepcopy(self.server.config), str(path))
+            data = self._saved_config()
             change(data)
             data = check_config(data, str(path))
             write_config(data)
@@ -4697,7 +4870,15 @@ class Handler(BaseHTTPRequestHandler):
                 "error": "%d grok %s running; restart needs zero" % (busy, "session" if busy == 1 else "sessions"),
             })
             return
-        nxt = resolve_endpoint(argparse.Namespace(**vars(self.server.args)), self.server.config)
+        # The restarted server reads the file, so the reply must too.
+        try:
+            with CONFIG_LOCK:
+                saved = self._saved_config()
+        except ValueError as exc:
+            RESTART.clear()
+            self._json(409, {"ok": False, "error": ("bad config: %s" % exc)[:300] + "; not restarting"})
+            return
+        nxt = resolve_endpoint(argparse.Namespace(**vars(self.server.args)), saved)
         problem = self._endpoint_problem(nxt.bind, nxt.port)
         if problem:
             RESTART.clear()
@@ -5100,6 +5281,8 @@ class Handler(BaseHTTPRequestHandler):
             self.ws_closed = True
             if live is not None:
                 live.detach(client)
+            if client is not None and client.dropped:
+                print("term drop slow client sid=%s" % sid, flush=True)
             if client is not None and client.sender is not None:
                 client.sender.join(timeout=2)
             try:
