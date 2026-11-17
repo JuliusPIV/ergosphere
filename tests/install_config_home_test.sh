@@ -5,6 +5,7 @@
 # Run: ERGOSPHERE_TEST_PORT=<spare port> bash tests/install_config_home_test.sh
 # --check only: nothing is downloaded, installed or written outside a
 # throwaway dir. The port is only probed.
+# shellcheck disable=SC2088  # a literal ~ is the input under test
 set -u
 repo=$(cd "$(dirname "$0")/.." && pwd)
 port=${ERGOSPHERE_TEST_PORT:-9550}
@@ -32,7 +33,6 @@ server_path() {
   HOME="$work/home" python3 -I -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).expanduser())' "$1"
 }
 
-# shellcheck disable=SC2088  # the literal ~ is the input under test
 for raw in "~/$leaf" "~$me/$leaf"; do
   want=$(server_path "$raw")
   # A decoy where the old code looked: the install dir plus the raw value.
@@ -46,6 +46,17 @@ for raw in "~/$leaf" "~$me/$leaf"; do
     bad "$raw: config row '$row', want $want"
   fi
 done
+
+# A trailing newline is part of the name for the server, so the file without
+# it must not be the one the installer reads.
+mkdir -p "$work/home/${leaf%/*}"
+printf '{}\n' >"$work/home/$leaf"
+out=$(check "~/$leaf"$'\n' "$work/app3")
+if [[ "$out" != *"$work/home/$leaf present"* ]]; then
+  ok "~/$leaf<newline>: the file without the newline is not read"
+else
+  bad "~/$leaf<newline>: installer read $work/home/$leaf"
+fi
 
 raw="~no-such-user-$$/$leaf"
 out=$(check "$raw" "$work/app2")

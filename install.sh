@@ -444,9 +444,11 @@ set_config_file() {
     CFG_FILE="$DEST/ergosphere.json"
   else
     # Same expansion as the server (pathlib expanduser), ~user included.
+    # The trailing "." keeps a newline at the end of the name from $( ).
     if [[ "$c" == \~* ]]; then
-      c=$("$PYTHON" -I -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).expanduser())' "$c" 2>/dev/null) ||
+      c=$("$PYTHON" -I -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).expanduser(), end=".")' "$c" 2>/dev/null) ||
         fail check "ERGOSPHERE_CONFIG=${ERGOSPHERE_CONFIG}: cannot find that home directory"
+      c=${c%.}
     fi
     if [[ "$c" != /* ]]; then c="$DEST/$c"; fi
     CFG_FILE=$c
