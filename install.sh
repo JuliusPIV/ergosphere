@@ -486,18 +486,27 @@ load_config() {
   if [[ "$CFG_SOURCE" != json ]]; then OLD_BIND=$BIND OLD_PORT=$PORT; fi
 }
 
+# Sets REPLY to $1 without "." parts and doubled "/", so paths a user wrote
+# compare equal to the ones find prints.
+plain() {
+  REPLY=$1
+  while [[ "$REPLY" == *//* || "$REPLY" == */./* ]]; do REPLY=${REPLY//\/\//\/}; REPLY=${REPLY//\/.\//\/}; done
+}
+
 # True when $DEST holds nothing but the config file and the folders leading
 # to it, so a user can seed ERGOSPHERE_CONFIG in a new install dir.
 holds_only_config() {
-  local entry cfg=$CFG_FILE
-  # find prints plain paths, so drop the "." parts and doubled "/" a user may write.
-  while [[ "$cfg" == *//* || "$cfg" == */./* ]]; do cfg=${cfg//\/\//\/}; cfg=${cfg//\/.\//\/}; done
+  local entry cfg
+  plain "$CFG_FILE"; cfg=$REPLY
+  # A ".." could climb out of the dir; refuse rather than resolve it.
+  [[ "$cfg" == */../* || "$cfg" == */.. ]] && return 1
   # -H lists the target of a symlinked --dir. The last record is find's exit
   # code, so a folder it could not read counts as not only the config. A
   # symlink inside the dir is refused: package files could land outside it.
   while IFS= read -r -d '' entry; do
     [[ "$entry" == "find rc 0" ]] && return 0
     [[ -L "$entry" ]] && return 1
+    plain "$entry"; entry=$REPLY
     [[ "$cfg" == "$entry" || "$cfg" == "$entry"/* ]] || return 1
   done < <(find -H "$DEST" -mindepth 1 -print0 2>/dev/null; printf 'find rc %s\0' "$?")
   return 1
@@ -644,6 +653,14 @@ download() {
 # file back by hash. The user's config and log are never in this set.
 install_files() {
   local rel n=0 files=0
+  local d cfg
+  # A config named like a package file would be replaced by it: stop first.
+  plain "$DEST"; d=$REPLY
+  plain "$CFG_FILE"; cfg=$REPLY
+  rel=${cfg#"$d"/}
+  if [[ "$cfg" == "$d"/* && -e "$SRC/$rel" && "$rel" != cwd-defaults.json && "$rel" != ergosphere.json && "$rel" != ergosphere.log ]]; then
+    fail install "ERGOSPHERE_CONFIG names the package file $rel; pick another name"
+  fi
   if [[ ! -d "$DEST" ]]; then
     mkdir -p -- "$DEST" || fail install "could not create $DEST"
     CHANGED+=("created $DEST")

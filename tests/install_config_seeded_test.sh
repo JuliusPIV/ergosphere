@@ -94,4 +94,8 @@ mkdir -p "$work/l"
 ln -s "$work/l-elsewhere/e.json" "$work/l/e.json"
 expect "config file that is a symlink" refuse "$work/l" e.json
 
+seed "$work/m-outside.json"
+mkdir -p "$work/m/conf"
+expect "config path that climbs out with .." refuse "$work/m" conf/../../m-outside.json
+
 exit "$fail"
