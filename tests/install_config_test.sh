@@ -94,19 +94,22 @@ check_case set "$work/home2" "$ERGOSPHERE_CONFIG"
 unset ERGOSPHERE_CONFIG
 
 # A seeded config named like a package file is refused before any copy, so
-# the package never replaces the user's settings.
-mkdir -p "$work/home3/app"
+# the package never replaces the user's settings, however --dir is spelled.
 seeded='{"port": '"$port"', "agents": {"seeded": "/tmp"}}'
-printf '%s\n' "$seeded" >"$work/home3/app/ergosphere.example.json"
-out=$(ERGOSPHERE_CONFIG=ergosphere.example.json run_install "$work/home3" --dir "$work/home3/app" --port "$port")
-rc=$?
-pid=$(field pid "$out")
-if [[ -n "$pid" ]]; then pids+=("$pid"); fi
-if [[ "$rc" -ne 0 && "$out" == *"ERGOSPHERE_CONFIG"* ]]; then ok "collide: refused (rc $rc)"; else
-  bad "collide: rc $rc, want a refusal naming ERGOSPHERE_CONFIG"; printf '%s\n' "$out" | tail -n 5; fi
-if [[ "$(cat "$work/home3/app/ergosphere.example.json")" == "$seeded" ]]; then ok "collide: seeded config kept"; else
-  bad "collide: seeded config was replaced"; fi
-if [[ ! -e "$work/home3/app/ergosphere.py" ]]; then ok "collide: no package file written"; else
-  bad "collide: package files were written"; fi
+for spell in app app/.; do
+  rm -rf -- "$work/home3/app"
+  mkdir -p "$work/home3/app"
+  printf '%s\n' "$seeded" >"$work/home3/app/ergosphere.example.json"
+  out=$(ERGOSPHERE_CONFIG=ergosphere.example.json run_install "$work/home3" --dir "$work/home3/$spell" --port "$port")
+  rc=$?
+  pid=$(field pid "$out")
+  if [[ -n "$pid" ]]; then pids+=("$pid"); kill "$pid" 2>/dev/null; fi
+  if [[ "$rc" -ne 0 && "$out" == *"ERGOSPHERE_CONFIG"* ]]; then ok "collide --dir $spell: refused (rc $rc)"; else
+    bad "collide --dir $spell: rc $rc, want a refusal naming ERGOSPHERE_CONFIG"; printf '%s\n' "$out" | tail -n 5; fi
+  if [[ "$(cat "$work/home3/app/ergosphere.example.json")" == "$seeded" ]]; then ok "collide --dir $spell: seeded config kept"; else
+    bad "collide --dir $spell: seeded config was replaced"; fi
+  if [[ ! -e "$work/home3/app/ergosphere.py" ]]; then ok "collide --dir $spell: no package file written"; else
+    bad "collide --dir $spell: package files were written"; fi
+done
 
 exit "$fail"

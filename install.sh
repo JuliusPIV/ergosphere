@@ -653,14 +653,15 @@ download() {
 # file back by hash. The user's config and log are never in this set.
 install_files() {
   local rel n=0 files=0
-  local d cfg
-  # A config named like a package file would be replaced by it: stop first.
-  plain "$DEST"; d=$REPLY
-  plain "$CFG_FILE"; cfg=$REPLY
-  rel=${cfg#"$d"/}
-  if [[ "$cfg" == "$d"/* && -e "$SRC/$rel" && "$rel" != cwd-defaults.json && "$rel" != ergosphere.json && "$rel" != ergosphere.log ]]; then
-    fail install "ERGOSPHERE_CONFIG names the package file $rel; pick another name"
-  fi
+  # A config that is a package file would be replaced by it: stop first.
+  # -ef compares the files themselves, so no spelling of the path slips by.
+  while IFS= read -r -d '' rel; do
+    rel=${rel#./}
+    if [[ "$rel" == cwd-defaults.json || "$rel" == ergosphere.json || "$rel" == ergosphere.log ]]; then continue; fi
+    if [[ "$DEST/$rel" -ef "$CFG_FILE" ]]; then
+      fail install "ERGOSPHERE_CONFIG names the package file $rel; pick another name"
+    fi
+  done < <(cd "$SRC" && find . -type f -print0)
   if [[ ! -d "$DEST" ]]; then
     mkdir -p -- "$DEST" || fail install "could not create $DEST"
     CHANGED+=("created $DEST")
