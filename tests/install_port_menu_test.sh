@@ -1,19 +1,26 @@
 #!/usr/bin/env bash
-# Manual mode offers the current port plus other ports as a numbered list,
-# prints the chosen port, and warns (and asks port and bind again) when a
-# chosen port is answered at the chosen bind by something that is not
-# Ergosphere (issue #82).
+# Manual mode offers the current port plus other ports as a numbered list and
+# checks the final bind:port before anything changes: a port held by anything
+# but this install is named with its holder and port and bind are asked again,
+# up to 3 times, then the run stops with nothing changed. Automatic mode still
+# fails at the checks with nothing changed (issue #82).
 #
 # Run: ERGOSPHERE_TEST_PORT=<spare port> bash tests/install_port_menu_test.sh
 # Uses that port and the next two. ERGOSPHERE_INSTALL_PORT_OFFERS stands in for
 # 8080 8081, so nothing outside those ports is probed. No network: the package
 # is served from 127.0.0.1 and grok is a stub that only answers --version. A pty
 # plays the terminal. Every server it starts is stopped at the end.
+# The case with no --port (it would probe 9241) runs only inside a private
+# network namespace (unshare -rn), where that port is not the host's.
 set -u
 repo=$(cd "$(dirname "$0")/.." && pwd)
+mode=${1:-}
 port=${ERGOSPHERE_TEST_PORT:-9560}
 busy=$((port + 1))
 free=$((port + 2))
+if [[ "$mode" == --netns ]]; then
+  ip link set lo up 2>/dev/null
+fi
 work=$(mktemp -d "${TMPDIR:-/tmp}/ergosphere-port-menu-test.XXXXXX")
 pids=()
 fail=0
@@ -36,7 +43,7 @@ tar -czf "$work/www/src.tar.gz" -C "$work/pkg" ergosphere-test
 printf '#!/bin/sh\necho "grok 0.0.0-test"\n' >"$work/bin/grok"
 chmod +x "$work/bin/grok"
 
-# The package server, and a plain HTTP server (not Ergosphere) on $busy.
+# The package server, and a plain HTTP server (not Ergosphere) on 127.0.0.1:$busy.
 python3 -I -c '
 import functools, http.server, sys, threading
 www, portfile, busy = sys.argv[1], sys.argv[2], int(sys.argv[3])
@@ -47,18 +54,24 @@ threading.Thread(target=o.serve_forever, daemon=True).start()
 s = http.server.HTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=www))
 open(portfile, "w").write(str(s.server_address[1]))
 s.serve_forever()' "$work/www" "$work/www.port" "$busy" </dev/null >/dev/null 2>&1 &
-pids+=($!)
+holder=$!
+pids+=("$holder")
 for _ in $(seq 50); do [[ -s "$work/www.port" ]] && break; sleep 0.1; done
 url="http://127.0.0.1:$(cat "$work/www.port")/src.tar.gz"
 
-# run_manual PORT ANSWER... : runs install.sh --manual --port PORT on a pty, typing one answer
-# per prompt (each prompt ends in ": " or "] "). Prints everything shown.
-run_manual() {
-  local p=$1
-  shift
+inst_env() {
   env -u ERGOSPHERE_PORT -u ERGOSPHERE_CONFIG HOME="$work/u" PATH="$work/bin:$PATH" TMPDIR="$work" \
-    ERGOSPHERE_INSTALL_SOURCE_URL="$url" ERGOSPHERE_INSTALL_PORT_OFFERS="$busy $free" \
-    python3 -I -c '
+    ERGOSPHERE_INSTALL_SOURCE_URL="$url" ERGOSPHERE_INSTALL_PORT_OFFERS="$busy $free" "$@"
+}
+
+# run_manual PORT ANSWER... : runs install.sh --manual --port PORT (no --port
+# for "-") on a pty, typing one answer per prompt (each prompt ends in ": " or
+# "] "). Prints everything shown.
+run_manual() {
+  local p=()
+  if [[ "$1" != - ]]; then p=(--port "$1"); fi
+  shift
+  inst_env python3 -I -c '
 import os, pty, sys, time
 argv, answers = sys.argv[1:sys.argv.index("--")], sys.argv[sys.argv.index("--") + 1:]
 pid, fd = pty.fork()
@@ -79,16 +92,37 @@ while time.time() < end:
         buf += b"<" + answers[sent - 1].encode() + b">\n"
 sys.stdout.write(buf.decode(errors="replace").replace("\r", ""))
 sys.exit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
-' bash "$repo/install.sh" --manual --dir "$work/u/app" --port "$p" -- "$@"
+' bash "$repo/install.sh" --manual --dir "$work/u/app" ${p[@]+"${p[@]}"} -- "$@"
 }
 field() { sed -n "s/^  $1: *//p" <<<"$2" | head -n 1; }
 health_pid() { # PORT [HOST]
   curl --noproxy '*' -s --max-time 3 "http://${2:-127.0.0.1}:$1/health" |
     python3 -I -c 'import json,sys; d=json.load(sys.stdin); print(d["pid"] if d.get("product") == "ergosphere" else "")' 2>/dev/null
 }
+# Every file under the throwaway HOME (the install is in it), with size,
+# mtime and mode. The server's own log is left out: it is not the installer's.
+listing() {
+  find "$work/u" -path "$work/u/app/ergosphere.log" -prune -o -printf '%P %s %T@ %m\n' | sort
+}
 
-# Dir Enter, port 2 (busy) and bind Enter -> warned and asked again, port 3
-# (free), bind Enter, agent Enter.
+if [[ "$mode" == --netns ]]; then
+  # r1-2: a config with no port key; choosing the current port (1) writes it,
+  # as typing it did before the list.
+  mkdir -p "$work/u/app"
+  printf '{"bind": "127.0.0.1", "agents": {}}\n' >"$work/u/app/ergosphere.json"
+  out=$(run_manual - "" 1 "" "")
+  pid=$(field pid "$out")
+  if [[ -n "$pid" ]]; then pids+=("$pid"); fi
+  if python3 -I -c 'import json,sys; sys.exit(json.load(open(sys.argv[1])).get("port") != 9241)' "$work/u/app/ergosphere.json"; then
+    ok "choosing the current port 9241 writes the port key"
+  else
+    bad "port key not written: $(cat "$work/u/app/ergosphere.json")"
+    printf '%s\n' "$out" | tail -n 15
+  fi
+  exit "$fail"
+fi
+
+# Port 2 (busy) with bind Enter -> warned, naming the holder; then port 3 (free).
 rc=0
 out=$(run_manual "$port" "" 2 "" 3 "" "") || rc=$?
 pid=$(field pid "$out")
@@ -99,51 +133,71 @@ else
   bad "menu does not offer $port, $busy and $free"
   printf '%s\n' "$out" | head -n 20
 fi
-if grep -q "something already answers on 127.0.0.1:$busy" <<<"$out" && [[ $(grep -c "1) $port" <<<"$out") -eq 2 ]]; then
-  ok "choosing busy $busy warns and asks again"
+if grep -q "127.0.0.1:$busy is in use by pid $holder (python3)" <<<"$out" && [[ $(grep -c "1) $port" <<<"$out") -eq 2 ]]; then
+  ok "busy $busy warns, names pid $holder, and asks again"
 else
-  bad "choosing busy $busy did not warn and ask again"
+  bad "busy $busy: no warning naming pid $holder, or not asked again"
+  grep -i warn <<<"$out"
 fi
-if grep -q "^port: $free" <<<"$out"; then
-  ok "prints the chosen port $free"
-else
-  bad "chosen port $free not printed"
-fi
-if [[ "$rc" -eq 0 && -n "$pid" && "$(health_pid "$free")" == "$pid" ]]; then
-  ok "installed and running on $free, pid $pid (exit $rc)"
+if [[ "$rc" -eq 0 && -n "$pid" && "$(health_pid "$free")" == "$pid" ]] && grep -q "^port: $free" <<<"$out"; then
+  ok "then free $free: installed and running, pid $pid, port printed"
 else
   bad "not running on $free: exit $rc, pid '${pid:-none}'"
   printf '%s\n' "$out" | tail -n 15
 fi
-if curl --noproxy '*' -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$busy/" | grep -q 404; then
-  ok "the program holding $busy was not touched"
-else
-  bad "the program holding $busy no longer answers"
-fi
 
-# Enter keeps the current port (now $free), with no warning; nothing changes.
-out=$(run_manual "$free" "" "" "" "") || rc=$?
+# Enter keeps the current port: this install's own server holds it, so no warning.
+out=$(run_manual "$free" "" "" "" "")
 if [[ -n "$(field pid "$out")" ]]; then pids+=("$(field pid "$out")"); fi
-if grep -q "^port: $free" <<<"$out" && ! grep -q "already answers" <<<"$out" &&
-  [[ "$(field pid "$out")" == "$pid" && "$(field changed "$out")" == nothing* ]]; then
-  ok "Enter keeps $free; second run changed nothing"
+if ! grep -q "in use by" <<<"$out" && [[ "$(field pid "$out")" == "$pid" && "$(field changed "$out")" == nothing* ]]; then
+  ok "Enter keeps $free (own server); second run changed nothing"
 else
   bad "Enter on rerun: pid '$(field pid "$out")', changed '$(field changed "$out")'"
   printf '%s\n' "$out" | tail -n 15
 fi
 
-# $busy is taken on 127.0.0.1 only: choosing it with bind 127.0.0.2 is the
-# final address that counts, and that one is free.
+# $busy is taken on 127.0.0.1 only; with bind 127.0.0.2 it is free.
 rc=0
 out=$(run_manual "$free" "" 2 127.0.0.2 "") || rc=$?
-moved=$(field pid "$out")
-if [[ -n "$moved" ]]; then pids+=("$moved"); fi
-if [[ "$rc" -eq 0 && -n "$moved" && "$(health_pid "$busy" 127.0.0.2)" == "$moved" ]] &&
-  ! grep -q "already answers" <<<"$out"; then
-  ok "port $busy with bind 127.0.0.2 accepted, pid $moved runs there"
+pid=$(field pid "$out")
+if [[ -n "$pid" ]]; then pids+=("$pid"); fi
+if [[ "$rc" -eq 0 && -n "$pid" && "$(health_pid "$busy" 127.0.0.2)" == "$pid" ]] && ! grep -q "in use by" <<<"$out"; then
+  ok "port $busy with bind 127.0.0.2 accepted, pid $pid runs there"
 else
-  bad "port $busy with bind 127.0.0.2: exit $rc, pid '${moved:-none}'"
+  bad "port $busy with bind 127.0.0.2: exit $rc, pid '${pid:-none}'"
   printf '%s\n' "$out" | tail -n 15
+fi
+
+# Busy three times (127.0.0.1:$busy) -> stops; files and server untouched.
+before=$(listing)
+rc=0
+out=$(run_manual "$busy" "" "" 127.0.0.1 "" 127.0.0.1 "" 127.0.0.1) || rc=$?
+if [[ "$rc" -ne 0 && $(grep -c "^Warning: 127.0.0.1:$busy is in use" <<<"$out") -eq 2 ]] &&
+  grep -q "^failed at check: 127.0.0.1:$busy is in use by pid $holder (python3); asked 3 times, nothing was changed" <<<"$out"; then
+  ok "busy 3 times: stops (exit $rc) after 2 warnings"
+else
+  bad "busy 3 times: exit $rc, $(grep -E '^(failed at|Warning)' <<<"$out")"
+fi
+if [[ "$(listing)" == "$before" && "$(health_pid "$busy" 127.0.0.2)" == "$pid" ]]; then
+  ok "busy 3 times: no file changed, pid $pid still serves"
+else
+  bad "busy 3 times changed something: $(diff <(echo "$before") <(listing) | head -n 5)"
+fi
+
+# Automatic mode has no question: a busy port still fails at check, nothing changed.
+rc=0
+out=$(inst_env bash "$repo/install.sh" --auto --dir "$work/u/app2" --port "$busy" --bind 127.0.0.1 </dev/null 2>&1) || rc=$?
+if [[ "$rc" -ne 0 ]] && grep -q "^failed at check" <<<"$out" && grep -q "port $busy is in use" <<<"$out" &&
+  [[ "$(listing)" == "$before" && "$(health_pid "$busy" 127.0.0.2)" == "$pid" ]]; then
+  ok "auto on busy $busy: fails at check (exit $rc), nothing changed"
+else
+  bad "auto on busy $busy: exit $rc, $(grep '^failed at' <<<"$out")"
+fi
+
+if unshare -rn true 2>/dev/null; then
+  ERGOSPHERE_TEST_PORT=$port unshare -rn bash "$0" --netns || fail=1
+else
+  echo "skip: no private network namespace (unshare -rn) for the no --port case"
 fi
 
 exit "$fail"
