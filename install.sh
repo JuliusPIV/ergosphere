@@ -443,7 +443,11 @@ set_config_file() {
   if [[ -z "$c" ]]; then
     CFG_FILE="$DEST/ergosphere.json"
   else
-    if [[ "$c" == \~ || "$c" == \~/* ]]; then c="${HOME:-}${c:1}"; fi
+    # Same expansion as the server (pathlib expanduser), ~user included.
+    if [[ "$c" == \~* ]]; then
+      c=$("$PYTHON" -I -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).expanduser())' "$c" 2>/dev/null) ||
+        fail check "ERGOSPHERE_CONFIG=${ERGOSPHERE_CONFIG}: cannot find that home directory"
+    fi
     if [[ "$c" != /* ]]; then c="$DEST/$c"; fi
     CFG_FILE=$c
   fi
@@ -518,7 +522,7 @@ check_target() {
   case "$CFG_SOURCE" in
     json) row ok config "$cfg present: agents $CFG_AGENTS" ;;
     legacy) row ok config "missing; will be created from cwd-defaults.json (kept as is): agents $CFG_AGENTS" ;;
-    *) row ok config "missing; will be created" ;;
+    *) row ok config "$cfg missing; will be created" ;;
   esac
   if (( PORT < 1024 )) && [[ "$EUID" -ne 0 ]]; then
     row invalid port "$PORT is privileged; pick a port above 1023"
