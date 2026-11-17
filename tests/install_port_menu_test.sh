@@ -72,13 +72,15 @@ run_manual() {
   if [[ "$1" != - ]]; then p=(--port "$1"); fi
   shift
   inst_env python3 -I -c '
-import os, pty, sys, time
+import os, pty, select, sys, time
 argv, answers = sys.argv[1:sys.argv.index("--")], sys.argv[sys.argv.index("--") + 1:]
 pid, fd = pty.fork()
 if pid == 0:
     os.execvp(argv[0], argv)
-buf, sent, end = b"", 0, time.time() + 120
+buf, sent, end = b"", 0, time.time() + 60
 while time.time() < end:
+    if not select.select([fd], [], [], 1)[0]:
+        continue
     try:
         b = os.read(fd, 4096)
     except OSError:
@@ -90,6 +92,9 @@ while time.time() < end:
         os.write(fd, answers[sent].encode() + b"\n")
         sent += 1
         buf += b"<" + answers[sent - 1].encode() + b">\n"
+if time.time() >= end:
+    os.kill(pid, 9)
+    buf += b"\n[driver: no answer left, installer killed]\n"
 sys.stdout.write(buf.decode(errors="replace").replace("\r", ""))
 sys.exit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
 ' bash "$repo/install.sh" --manual --dir "$work/u/app" ${p[@]+"${p[@]}"} -- "$@"
