@@ -111,34 +111,46 @@ listing() {
 }
 
 if [[ "$mode" == --netns ]]; then
-  # r1-2: a config with no port key; choosing the current port (1) writes it,
-  # as typing it did before the list.
+  # A config with no port key; choosing the current port (a) writes it, as
+  # typing it did before the list.
   mkdir -p "$work/u/app"
   printf '{"bind": "127.0.0.1", "agents": {}}\n' >"$work/u/app/ergosphere.json"
-  out=$(run_manual - "" 1 "" "")
+  out=$(run_manual - "" a "" "")
   pid=$(field pid "$out")
   if [[ -n "$pid" ]]; then pids+=("$pid"); fi
-  if python3 -I -c 'import json,sys; sys.exit(json.load(open(sys.argv[1])).get("port") != 9241)' "$work/u/app/ergosphere.json"; then
+  cfg_port() { python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("port"))' "$work/u/app/ergosphere.json"; }
+  if [[ "$(cfg_port)" == 9241 ]]; then
     ok "choosing the current port 9241 writes the port key"
   else
     bad "port key not written: $(cat "$work/u/app/ergosphere.json")"
     printf '%s\n' "$out" | tail -n 15
   fi
+  # Here the installer runs as uid 0 of the namespace, so a typed low port is
+  # allowed: 2 means port 2, not an entry of the list.
+  out=$(run_manual - "" 2 "" "")
+  pid=$(field pid "$out")
+  if [[ -n "$pid" ]]; then pids+=("$pid"); fi
+  if [[ "$(cfg_port)" == 2 && -n "$pid" && "$(health_pid 2)" == "$pid" ]]; then
+    ok "typed port 2 (as root) is port 2"
+  else
+    bad "typed port 2 (as root): config port $(cfg_port), pid '${pid:-none}'"
+    printf '%s\n' "$out" | tail -n 15
+  fi
   exit "$fail"
 fi
 
-# Port 2 (busy) with bind Enter -> warned, naming the holder; then port 3 (free).
+# Entry b (busy) with bind Enter -> warned, naming the holder; then c (free).
 rc=0
-out=$(run_manual "$port" "" 2 "" 3 "" "") || rc=$?
+out=$(run_manual "$port" "" b "" c "" "") || rc=$?
 pid=$(field pid "$out")
 if [[ -n "$pid" ]]; then pids+=("$pid"); fi
-if grep -q "1) $port" <<<"$out" && grep -q "2) $busy" <<<"$out" && grep -q "3) $free" <<<"$out"; then
+if grep -q "a) $port" <<<"$out" && grep -q "b) $busy" <<<"$out" && grep -q "c) $free" <<<"$out"; then
   ok "menu offers $port, $busy and $free"
 else
   bad "menu does not offer $port, $busy and $free"
   printf '%s\n' "$out" | head -n 20
 fi
-if grep -q "127.0.0.1:$busy is in use by pid $holder (python3)" <<<"$out" && [[ $(grep -c "1) $port" <<<"$out") -eq 2 ]]; then
+if grep -q "127.0.0.1:$busy is in use by pid $holder (python3)" <<<"$out" && [[ $(grep -c "a) $port" <<<"$out") -eq 2 ]]; then
   ok "busy $busy warns, names pid $holder, and asks again"
 else
   bad "busy $busy: no warning naming pid $holder, or not asked again"
@@ -163,7 +175,7 @@ fi
 
 # $busy is taken on 127.0.0.1 only; with bind 127.0.0.2 it is free.
 rc=0
-out=$(run_manual "$free" "" 2 127.0.0.2 "") || rc=$?
+out=$(run_manual "$free" "" b 127.0.0.2 "") || rc=$?
 pid=$(field pid "$out")
 if [[ -n "$pid" ]]; then pids+=("$pid"); fi
 if [[ "$rc" -eq 0 && -n "$pid" && "$(health_pid "$busy" 127.0.0.2)" == "$pid" ]] && ! grep -q "in use by" <<<"$out"; then

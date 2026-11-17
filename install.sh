@@ -214,19 +214,24 @@ ask_dir() {
 }
 
 # Offers the current port, then the ports in ERGOSPHERE_INSTALL_PORT_OFFERS
-# (default 8080 8081), or takes a typed port. Any answer counts as a given
-# port, as a typed one did before the list.
+# (default 8080 8081), or takes a typed port. List entries are letters, so
+# every number stays a port. Any answer counts as a given port, as a typed
+# one did before the list.
 ask_port() {
-  local p n i ports=("$PORT")
+  local p n i keys=abcdefghi ports=("$PORT")
   for p in ${ERGOSPHERE_INSTALL_PORT_OFFERS-8080 8081}; do
-    if [[ "$p" != "$PORT" ]]; then ports+=("$p"); fi
+    if [[ "$p" != "$PORT" && ${#ports[@]} -lt ${#keys} ]]; then ports+=("$p"); fi
   done
   printf 'Port:\n' >/dev/tty
-  for i in "${!ports[@]}"; do printf '  %s) %s\n' "$((i + 1))" "${ports[$i]}" >/dev/tty; done
-  ask "Choose 1-${#ports[@]} or type a port [1]: "
+  for i in "${!ports[@]}"; do printf '  %s) %s\n' "${keys:i:1}" "${ports[$i]}" >/dev/tty; done
+  ask "Choose a-${keys:${#ports[@]}-1:1} or type a port [a]: "
   if [[ -z "$REPLY" ]]; then return 0; fi
-  n=$REPLY
-  if [[ "$n" =~ ^[0-9]$ ]] && (( n >= 1 && n <= ${#ports[@]} )); then n=${ports[$((n - 1))]}; fi
+  n=${REPLY,,}
+  if [[ "$n" =~ ^[a-i]$ ]]; then
+    p=${keys%%"$n"*}
+    (( ${#p} < ${#ports[@]} )) || fail check "answer a-${keys:${#ports[@]}-1:1} or a port: $REPLY"
+    n=${ports[${#p}]}
+  fi
   set_port "$n"
   ARG_PORT=$PORT
 }
