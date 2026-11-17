@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Manual mode offers the current port plus other ports as a numbered list,
-# prints the chosen port, and warns (and asks again) when a chosen port is
-# answered by something that is not Ergosphere (issue #82).
+# prints the chosen port, and warns (and asks port and bind again) when a
+# chosen port is answered at the chosen bind by something that is not
+# Ergosphere (issue #82).
 #
 # Run: ERGOSPHERE_TEST_PORT=<spare port> bash tests/install_port_menu_test.sh
 # Uses that port and the next two. ERGOSPHERE_INSTALL_PORT_OFFERS stands in for
@@ -81,15 +82,15 @@ sys.exit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
 ' bash "$repo/install.sh" --manual --dir "$work/u/app" --port "$p" -- "$@"
 }
 field() { sed -n "s/^  $1: *//p" <<<"$2" | head -n 1; }
-health_pid() {
-  curl --noproxy '*' -s --max-time 3 "http://127.0.0.1:$1/health" |
+health_pid() { # PORT [HOST]
+  curl --noproxy '*' -s --max-time 3 "http://${2:-127.0.0.1}:$1/health" |
     python3 -I -c 'import json,sys; d=json.load(sys.stdin); print(d["pid"] if d.get("product") == "ergosphere" else "")' 2>/dev/null
 }
 
-# Dir Enter, port 2 (busy) -> warned and asked again, port 3 (free),
-# bind Enter, agent Enter.
+# Dir Enter, port 2 (busy) and bind Enter -> warned and asked again, port 3
+# (free), bind Enter, agent Enter.
 rc=0
-out=$(run_manual "$port" "" 2 3 "" "") || rc=$?
+out=$(run_manual "$port" "" 2 "" 3 "" "") || rc=$?
 pid=$(field pid "$out")
 if [[ -n "$pid" ]]; then pids+=("$pid"); fi
 if grep -q "1) $port" <<<"$out" && grep -q "2) $busy" <<<"$out" && grep -q "3) $free" <<<"$out"; then
@@ -98,7 +99,7 @@ else
   bad "menu does not offer $port, $busy and $free"
   printf '%s\n' "$out" | head -n 20
 fi
-if grep -q "something already answers on port $busy" <<<"$out" && [[ $(grep -c "1) $port" <<<"$out") -eq 2 ]]; then
+if grep -q "something already answers on 127.0.0.1:$busy" <<<"$out" && [[ $(grep -c "1) $port" <<<"$out") -eq 2 ]]; then
   ok "choosing busy $busy warns and asks again"
 else
   bad "choosing busy $busy did not warn and ask again"
@@ -128,6 +129,20 @@ if grep -q "^port: $free" <<<"$out" && ! grep -q "already answers" <<<"$out" &&
   ok "Enter keeps $free; second run changed nothing"
 else
   bad "Enter on rerun: pid '$(field pid "$out")', changed '$(field changed "$out")'"
+  printf '%s\n' "$out" | tail -n 15
+fi
+
+# $busy is taken on 127.0.0.1 only: choosing it with bind 127.0.0.2 is the
+# final address that counts, and that one is free.
+rc=0
+out=$(run_manual "$free" "" 2 127.0.0.2 "") || rc=$?
+moved=$(field pid "$out")
+if [[ -n "$moved" ]]; then pids+=("$moved"); fi
+if [[ "$rc" -eq 0 && -n "$moved" && "$(health_pid "$busy" 127.0.0.2)" == "$moved" ]] &&
+  ! grep -q "already answers" <<<"$out"; then
+  ok "port $busy with bind 127.0.0.2 accepted, pid $moved runs there"
+else
+  bad "port $busy with bind 127.0.0.2: exit $rc, pid '${moved:-none}'"
   printf '%s\n' "$out" | tail -n 15
 fi
 

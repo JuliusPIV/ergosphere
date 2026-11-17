@@ -214,39 +214,40 @@ ask_dir() {
 }
 
 # Offers the current port, then the ports in ERGOSPHERE_INSTALL_PORT_OFFERS
-# (default 8080 8081), or takes a typed port. A newly chosen port that
-# something other than Ergosphere answers is warned about and asked again.
+# (default 8080 8081), or takes a typed port. Any answer counts as a given
+# port, as a typed one did before the list.
 ask_port() {
-  local cur=$PORT p n i ports
-  while :; do
-    ports=("$cur")
-    for p in ${ERGOSPHERE_INSTALL_PORT_OFFERS-8080 8081}; do
-      if [[ "$p" != "$cur" ]]; then ports+=("$p"); fi
-    done
-    printf 'Port:\n' >/dev/tty
-    for i in "${!ports[@]}"; do printf '  %s) %s\n' "$((i + 1))" "${ports[$i]}" >/dev/tty; done
-    ask "Choose 1-${#ports[@]} or type a port [1]: "
-    n=${REPLY:-1}
-    if [[ "$n" =~ ^[0-9]$ ]] && (( n >= 1 && n <= ${#ports[@]} )); then n=${ports[$((n - 1))]}; fi
-    set_port "$n"
-    if [[ "$PORT" == "$cur" ]]; then break; fi
-    probe "$BIND" "$PORT"
-    if [[ "$PROBE" == down || "$PROBE" == match || "$PROBE" == moved ]]; then
-      ARG_PORT=$PORT
-      break
-    fi
-    if [[ "$PORT" == 8080 ]]; then p=" (llama.cpp's llama-server uses 8080 by default)"; else p=""; fi
-    printf 'Warning: something already answers on port %s%s; pick another.\n' "$PORT" "$p" >/dev/tty
-    PORT=$cur
+  local p n i ports=("$PORT")
+  for p in ${ERGOSPHERE_INSTALL_PORT_OFFERS-8080 8081}; do
+    if [[ "$p" != "$PORT" ]]; then ports+=("$p"); fi
   done
-  printf 'port: %s\n' "$PORT"
+  printf 'Port:\n' >/dev/tty
+  for i in "${!ports[@]}"; do printf '  %s) %s\n' "$((i + 1))" "${ports[$i]}" >/dev/tty; done
+  ask "Choose 1-${#ports[@]} or type a port [1]: "
+  if [[ -z "$REPLY" ]]; then return 0; fi
+  n=$REPLY
+  if [[ "$n" =~ ^[0-9]$ ]] && (( n >= 1 && n <= ${#ports[@]} )); then n=${ports[$((n - 1))]}; fi
+  set_port "$n"
+  ARG_PORT=$PORT
 }
 
-# Asked after the config is read, so Enter keeps the saved values.
+# Asked after the config is read, so Enter keeps the saved values. A new
+# port that something other than Ergosphere answers at the chosen bind is
+# warned about, and port and bind are asked again.
 ask_manual() {
-  ask_port
-  ask "Bind [${BIND}] (anything but 127.0.0.1 lets anyone who reaches the port run grok as this user): "
-  if [[ -n "$REPLY" ]]; then set_bind "$REPLY"; ARG_BIND=$BIND; fi
+  local cur=$PORT arg=$ARG_PORT p
+  while :; do
+    ask_port
+    ask "Bind [${BIND}] (anything but 127.0.0.1 lets anyone who reaches the port run grok as this user): "
+    if [[ -n "$REPLY" ]]; then set_bind "$REPLY"; ARG_BIND=$BIND; fi
+    if [[ "$PORT" == "$cur" ]]; then break; fi
+    probe "$BIND" "$PORT"
+    if [[ "$PROBE" == down || "$PROBE" == match || "$PROBE" == moved ]]; then break; fi
+    if [[ "$PORT" == 8080 ]]; then p=" (llama.cpp's llama-server uses 8080 by default)"; else p=""; fi
+    printf 'Warning: something already answers on %s:%s%s; pick another port or bind.\n' "$BIND" "$PORT" "$p" >/dev/tty
+    PORT=$cur ARG_PORT=$arg
+  done
+  printf 'port: %s\n' "$PORT"
   ask "Agent name for ergosphere.json (optional, Enter to skip): "
   AGENT=$REPLY
   if [[ -n "$AGENT" ]]; then
