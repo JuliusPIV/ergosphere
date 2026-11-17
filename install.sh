@@ -486,6 +486,15 @@ load_config() {
   if [[ "$CFG_SOURCE" != json ]]; then OLD_BIND=$BIND OLD_PORT=$PORT; fi
 }
 
+# True when $DEST holds nothing but the config file and the folders leading
+# to it, so a user can seed ERGOSPHERE_CONFIG in a new install dir.
+holds_only_config() {
+  local entry
+  while IFS= read -r -d '' entry; do
+    [[ "$CFG_FILE" == "$entry" || "$CFG_FILE" == "$entry"/* ]] || return 1
+  done < <(find "$DEST" -mindepth 1 -print0)
+}
+
 # Checks that depend on the chosen settings. Still before any download.
 check_target() {
   local cfg=$CFG_FILE up old=0
@@ -494,7 +503,7 @@ check_target() {
     row invalid dir "$DEST exists and is not a directory"
   elif [[ -d "$DEST" && ( ! -w "$DEST" || ! -x "$DEST" ) ]]; then
     row invalid dir "$DEST is not writable"
-  elif [[ -d "$DEST" && ! -f "$DEST/ergosphere.py" && ! -f "$DEST/ergosphere.json" && ! -f "$DEST/cwd-defaults.json" && -n "$(ls -A -- "$DEST")" ]]; then
+  elif [[ -d "$DEST" && ! -f "$DEST/ergosphere.py" && ! -f "$DEST/ergosphere.json" && ! -f "$DEST/cwd-defaults.json" && -n "$(ls -A -- "$DEST")" ]] && ! holds_only_config; then
     row invalid dir "$DEST is not empty and is not an Ergosphere install"
   elif [[ -d "$DEST" ]]; then
     row ok dir "$DEST exists"
