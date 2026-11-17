@@ -10,7 +10,7 @@ set -u
 repo=$(cd "$(dirname "$0")/.." && pwd)
 port=${ERGOSPHERE_TEST_PORT:-9550}
 work=$(mktemp -d "${TMPDIR:-/tmp}/ergosphere-seeded-test.XXXXXX")
-trap 'rm -rf -- "$work"' EXIT
+trap 'chmod -R u+rwx -- "$work"; rm -rf -- "$work"' EXIT
 fail=0
 ok() { echo "ok:   $1"; }
 bad() { echo "FAIL: $1"; fail=1; }
@@ -65,5 +65,21 @@ expect "config plus an empty folder" refuse "$work/e" conf/e.json
 
 seed "$work/f/notes.txt"
 expect "a stray file, config not there" refuse "$work/f" conf/e.json
+
+# --dir is a symlink to a foreign dir: its contents count, not the link itself.
+mkdir -p "$work/h/stuff"
+ln -s "$work/h" "$work/h-link"
+expect "symlinked dir holding foreign files" refuse "$work/h-link" conf/e.json
+
+seed "$work/i-link-target/conf/e.json"
+ln -s "$work/i-link-target" "$work/i-link"
+expect "symlinked dir holding only the config" accept "$work/i-link" conf/e.json
+
+# A folder on the config path that cannot be listed may hide foreign files.
+seed "$work/j/conf/e.json"
+seed "$work/j/conf/hidden.txt"
+chmod 0300 "$work/j/conf"
+expect "unreadable folder on the config path" refuse "$work/j" conf/e.json
+chmod 0700 "$work/j/conf"
 
 exit "$fail"

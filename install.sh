@@ -492,9 +492,13 @@ holds_only_config() {
   local entry cfg=$CFG_FILE
   # find prints plain paths, so drop the "." parts and doubled "/" a user may write.
   while [[ "$cfg" == *//* || "$cfg" == */./* ]]; do cfg=${cfg//\/\//\/}; cfg=${cfg//\/.\//\/}; done
+  # -H lists the target of a symlinked --dir. The last record is find's exit
+  # code, so a folder it could not read counts as not only the config.
   while IFS= read -r -d '' entry; do
+    [[ "$entry" == "find rc 0" ]] && return 0
     [[ "$cfg" == "$entry" || "$cfg" == "$entry"/* ]] || return 1
-  done < <(find "$DEST" -mindepth 1 -print0)
+  done < <(find -H "$DEST" -mindepth 1 -print0 2>/dev/null; printf 'find rc %s\0' "$?")
+  return 1
 }
 
 # Checks that depend on the chosen settings. Still before any download.
