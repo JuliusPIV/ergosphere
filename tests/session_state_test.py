@@ -194,6 +194,63 @@ def check_two_servers(erg):
     return None
 
 
+def take_reply(erg, query):
+    got = {}
+    handler = types.SimpleNamespace(
+        path="/take?" + query,
+        _drain_body=lambda: None,
+        _json=lambda code, obj: got.update(code=code, obj=obj),
+    )
+    erg.Handler._take(handler)
+    return got
+
+
+def check_take_over_other_server(erg):
+    # Another server (listening on a port) runs the session. This page names
+    # it with its address and offers to take it over; plain /take still
+    # refuses; /take?server=1 quits only that grok, the other server lives
+    # on, and Resume here then starts the one grok.
+    sid = new_sid(51)
+    other = popen([sys.executable, "-B", "-c",
+                   "import importlib.util,socket,sys,time\n"
+                   "s=importlib.util.spec_from_file_location('e',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\n"
+                   "m.print=lambda *a, **k: None\n"
+                   "l=socket.socket(); l.bind(('127.0.0.1', 0)); l.listen(1)\n"
+                   "m.open_live(sys.argv[2], [sys.argv[3], '-c', sys.argv[4], '--resume', sys.argv[2]], sys.argv[5], 80, 24)\n"
+                   "print(l.getsockname()[1], flush=True); time.sleep(30)\n",
+                   str(ROOT / "ergosphere.py"), sid, GROK, FAKE, CWD],
+                  stdout=subprocess.PIPE)
+    port = int(other.stdout.readline())
+    wait_for(lambda: groks_for(sid), 5)
+    theirs = groks_for(sid)
+    holder = erg.session_holder(sid)
+    page = erg.chat_page(sid, holder, False, "")
+    where = "127.0.0.1:%d" % port
+    label = getattr(erg, "TAKEOVER_LABEL", "Take over here")
+    if not holder or holder.get("kind") != "web" or where not in page or label not in page:
+        other.kill()
+        return "take-over: page for a session another server runs names %r, offers take-over %s, holder %r" % (
+            where if where in page else None, label in page, holder)
+    plain = take_reply(erg, "id=" + sid)
+    if plain.get("code") != 409 or groks_for(sid) != theirs:
+        other.kill()
+        return "take-over: plain /take signalled another server's grok: %r" % plain
+    got = take_reply(erg, "id=%s&server=1" % sid)
+    gone = wait_for(lambda: not groks_for(sid), 3)
+    alive = other.poll() is None
+    try:
+        _live, again = erg.open_live(sid, fake_cmd(sid), CWD, 80, 24)
+        resumed = "started" if not again else "reattached"
+    except Exception as exc:
+        resumed = "%s: %s" % (type(exc).__name__, exc)
+    n = len(groks_for(sid))
+    other.kill()
+    if got.get("code") != 200 or not gone or not alive or resumed != "started" or n != 1:
+        return "take-over: /take?server=1 %r, their grok gone %s, other server alive %s, resume %r, groks %d" % (
+            got, gone, alive, resumed, n)
+    return None
+
+
 def check_conflict_everywhere(erg):
     # This server runs the session and a CLI `grok -r` opens it too: the one
     # state says held, and the list marks the row, not a plain Idle row.
@@ -406,6 +463,7 @@ def check_holder_labels(erg):
     holder = erg.session_holder(sid)
     offered = erg.holder_can_quit(holder)
     quit_ok, _info = erg.release_holder(sid)
+    quit_ok = quit_ok or take_reply(erg, "id=%s&server=1" % sid).get("code") == 200
     if offered or quit_ok or inner not in groks_for(sid):
         return "take: a grok under another server's grok was offered for quitting %s, /take quit it %s" % (
             offered, quit_ok)
@@ -569,7 +627,7 @@ def main():
     erg = load()
     erg.print = lambda *a, **k: None
     checks = (check_quit_tells_every_tab, check_no_resume_while_stopping, check_two_servers,
-              check_conflict_everywhere,
+              check_take_over_other_server, check_conflict_everywhere,
               check_held_session, check_own_grok_named_beside_holder,
               check_orphan_notice_needs_quit, check_status_keeps_warning, check_refresh_keeps_focus, check_holder_labels, check_words,
               check_new_session_launch, check_one_proc_pass,
