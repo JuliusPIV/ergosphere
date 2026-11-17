@@ -3,6 +3,7 @@
 # README install commands, the installer finds the latest release itself (or
 # installs --version vA.B.C), and the reported version comes from the release
 # archive (git export-subst), with a plain checkout reporting "dev".
+# Run: [ERGOSPHERE_TEST_PORT=<spare port>] bash tests/release_version_test.sh (installer --check probes it).
 set -u
 cd "$(dirname "$0")/.." || exit 1
 root=$PWD
@@ -57,7 +58,7 @@ for _ in $(seq 50); do [ -s "$tmp/port" ] && break; sleep 0.1; done
 latest="http://127.0.0.1:$(cat "$tmp/port")/releases/latest"
 run() {
   env -u ERGOSPHERE_PORT -u ERGOSPHERE_INSTALL_SOURCE_URL -u ERGOSPHERE_TOKEN PATH="$tmp/bin:$PATH" \
-    ERGOSPHERE_INSTALL_LATEST_URL="$latest" bash "$root/install.sh" --check --dir "$tmp/dest" --port 9560 "$@" 2>&1 </dev/null
+    ERGOSPHERE_INSTALL_LATEST_URL="$latest" bash "$root/install.sh" --check --dir "$tmp/dest" --port "${ERGOSPHERE_TEST_PORT:-9560}" "$@" 2>&1 </dev/null
 }
 out=$(run)
 if grep -q 'release  *v9\.8\.7 (latest)' <<<"$out"; then ok "lookup finds the latest release"; else bad "lookup: $out"; fi
