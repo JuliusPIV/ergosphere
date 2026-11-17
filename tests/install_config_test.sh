@@ -93,23 +93,28 @@ printf '{"port": %s, "agents": {"seeded": "/tmp"}}\n' "$port" >"$ERGOSPHERE_CONF
 check_case set "$work/home2" "$ERGOSPHERE_CONFIG"
 unset ERGOSPHERE_CONFIG
 
-# A seeded config named like a package file is refused before any copy, so
-# the package never replaces the user's settings, however --dir is spelled.
+# A seeded config named like a file the installer writes (a package file, a
+# copy's .part temp, the log) is refused before any write, so the user's
+# settings are never replaced, however --dir is spelled.
 seeded='{"port": '"$port"', "agents": {"seeded": "/tmp"}}'
-for spell in app app/.; do
+for c in "ergosphere.example.json app" "ergosphere.example.json app/." "ergosphere.py.part app" "ergosphere.log app"; do
+  read -r name spell <<<"$c"
   rm -rf -- "$work/home3/app"
   mkdir -p "$work/home3/app"
-  printf '%s\n' "$seeded" >"$work/home3/app/ergosphere.example.json"
-  out=$(ERGOSPHERE_CONFIG=ergosphere.example.json run_install "$work/home3" --dir "$work/home3/$spell" --port "$port")
+  printf '%s\n' "$seeded" >"$work/home3/app/$name"
+  out=$(ERGOSPHERE_CONFIG=$name run_install "$work/home3" --dir "$work/home3/$spell" --port "$port")
   rc=$?
   pid=$(field pid "$out")
-  if [[ -n "$pid" ]]; then pids+=("$pid"); kill "$pid" 2>/dev/null; fi
-  if [[ "$rc" -ne 0 && "$out" == *"ERGOSPHERE_CONFIG"* ]]; then ok "collide --dir $spell: refused (rc $rc)"; else
-    bad "collide --dir $spell: rc $rc, want a refusal naming ERGOSPHERE_CONFIG"; printf '%s\n' "$out" | tail -n 5; fi
-  if [[ "$(cat "$work/home3/app/ergosphere.example.json")" == "$seeded" ]]; then ok "collide --dir $spell: seeded config kept"; else
-    bad "collide --dir $spell: seeded config was replaced"; fi
-  if [[ ! -e "$work/home3/app/ergosphere.py" ]]; then ok "collide --dir $spell: no package file written"; else
-    bad "collide --dir $spell: package files were written"; fi
+  if [[ -n "$pid" ]]; then
+    pids+=("$pid"); kill "$pid" 2>/dev/null
+    for _ in $(seq 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+  fi
+  if [[ "$rc" -ne 0 && "$out" == *"ERGOSPHERE_CONFIG"* ]]; then ok "collide $name --dir $spell: refused (rc $rc)"; else
+    bad "collide $name --dir $spell: rc $rc, want a refusal naming ERGOSPHERE_CONFIG"; printf '%s\n' "$out" | tail -n 3; fi
+  if [[ "$(cat "$work/home3/app/$name" 2>/dev/null)" == "$seeded" ]]; then ok "collide $name --dir $spell: seeded config kept"; else
+    bad "collide $name --dir $spell: seeded config was replaced or removed"; fi
+  if [[ ! -e "$work/home3/app/ergosphere.py" ]]; then ok "collide $name --dir $spell: no package file written"; else
+    bad "collide $name --dir $spell: package files were written"; fi
 done
 
 exit "$fail"

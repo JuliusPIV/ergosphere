@@ -652,16 +652,23 @@ download() {
 # Copies only files whose sha256 differs from the archive, then reads each
 # file back by hash. The user's config and log are never in this set.
 install_files() {
-  local rel n=0 files=0
-  # A config that is a package file would be replaced by it: stop first.
-  # -ef compares the files themselves, so no spelling of the path slips by.
+  local rel n=0 files=0 p cfg writes=("$DEST/ergosphere.log")
+  # Every file this run writes in $DEST besides the config: each package file,
+  # its .part temp, and the server log. A config that is one of them would be
+  # overwritten, so stop before any write. -ef matches an existing config
+  # however the path is spelled; the plain path matches one not made yet.
   while IFS= read -r -d '' rel; do
     rel=${rel#./}
     if [[ "$rel" == cwd-defaults.json || "$rel" == ergosphere.json || "$rel" == ergosphere.log ]]; then continue; fi
-    if [[ "$DEST/$rel" -ef "$CFG_FILE" ]]; then
-      fail install "ERGOSPHERE_CONFIG names the package file $rel; pick another name"
-    fi
+    writes+=("$DEST/$rel" "$DEST/$rel.part")
   done < <(cd "$SRC" && find . -type f -print0)
+  plain "$CFG_FILE"; cfg=$REPLY
+  for p in "${writes[@]}"; do
+    plain "$p"
+    if [[ "$p" -ef "$CFG_FILE" || "$REPLY" == "$cfg" ]]; then
+      fail install "ERGOSPHERE_CONFIG names ${p#"$DEST"/}, a file the installer writes; pick another name"
+    fi
+  done
   if [[ ! -d "$DEST" ]]; then
     mkdir -p -- "$DEST" || fail install "could not create $DEST"
     CHANGED+=("created $DEST")
