@@ -14,6 +14,7 @@ Skipped without node, playwright or Chrome (/usr/bin/google-chrome or ERGO_CHROM
 """
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -76,9 +77,32 @@ async function drag(p, x, ya, yb) {
   await wait(300);
   res.text = await state(p);
   res.textSelection = await p.evaluate(() => term.getSelection().length);
-  // Normal screen: leave the alternate screen locally; a bar drag sends nothing.
   await p.evaluate(() => { window.SENT = []; const s = sock.send.bind(sock);
     sock.send = d => { SENT.push(typeof d === 'string' ? d : new TextDecoder().decode(d)); s(d); }; });
+  const sentSince = () => p.evaluate(() => SENT.splice(0).join(''));
+  // A release the page never sees (button let go outside the window), then a
+  // window blur mid-drag: each ends the drag with a release, and later
+  // pointer moves send grok nothing.
+  const lost = {
+    mouseup: () => p.evaluate(([x, y]) => document.getElementById('term').dispatchEvent(
+      new MouseEvent('mousemove', {bubbles: true, clientX: x, clientY: y, buttons: 0})), [barX, r.y + r.h / 2]),
+    blur: () => p.evaluate(() => window.dispatchEvent(new Event('blur'))),
+  };
+  res.lost = {};
+  for (const [name, end] of Object.entries(lost)) {
+    await p.mouse.move(barX, low);
+    await p.mouse.down();
+    await p.mouse.move(barX, top, {steps: 5});
+    await sentSince();
+    await end();
+    await p.evaluate(([x, y]) => document.dispatchEvent(
+      new MouseEvent('mousemove', {bubbles: true, clientX: x, clientY: y, buttons: 0})), [barX, low]);
+    await wait(200);
+    res.lost[name] = await sentSince();
+    await p.mouse.up();
+    await sentSince();
+  }
+  // Normal screen: leave the alternate screen locally; a bar drag sends nothing.
   await p.evaluate(() => new Promise(done => term.write('\x1b[?1049l', done)));
   await drag(p, barX, low, top);
   await wait(300);
@@ -170,6 +194,9 @@ def check(res):
         fails.append("a drag over the text reached grok: off %d -> %d, last=%s" % (bar["off"], text["off"], text["last"]))
     if res["textSelection"] <= 0:
         fails.append("a drag over the text selected nothing")
+    for name, sent in res["lost"].items():
+        if not re.fullmatch(r"\x1b\[<0;\d+;\d+m", sent):
+            fails.append("lost %s mid-drag: want one release and then nothing, grok got %r" % (name, sent[:80]))
     if res["normalSent"]:
         fails.append("normal screen: a last-column drag sent mouse reports: %r" % res["normalSent"][:80])
     return fails

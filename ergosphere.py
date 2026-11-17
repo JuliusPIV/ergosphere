@@ -4057,20 +4057,32 @@ document.getElementById("term").addEventListener("mousedown", function (ev) {
   sendBarReport(1, cell.col, cell.row);
   term.focus();
 }, true);
+// A release the page never saw (let go outside the window, or the window
+// lost focus) still ends the drag, with the release grok is waiting for.
+function endBarDrag(row) {
+  var drag = barDrag;
+  barDrag = null;
+  sendBarReport(0, drag.col, row);
+}
 document.addEventListener("mousemove", function (ev) {
   if (!barDrag) return;
   ev.preventDefault();
   var row = wheelCell(ev).row;
+  if ((ev.buttons & 1) === 0) {
+    endBarDrag(row);
+    return;
+  }
   if (row === barDrag.row) return;
   barDrag.row = row;
   sendBarReport(32, barDrag.col, row);
 }, true);
 document.addEventListener("mouseup", function (ev) {
   if (!barDrag || ev.button !== 0) return;
-  var drag = barDrag;
-  barDrag = null;
-  sendBarReport(0, drag.col, wheelCell(ev).row);
+  endBarDrag(wheelCell(ev).row);
 }, true);
+window.addEventListener("blur", function () {
+  if (barDrag) endBarDrag(barDrag.row);
+});
 var clickDown = null;
 document.getElementById("term").addEventListener("mousedown", function (ev) {
   clickDown = null;
