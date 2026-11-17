@@ -691,7 +691,7 @@ has_addr_args() {
 # The server reads bind and port from ergosphere.json, so it runs with no
 # address arguments and without ERGOSPHERE_PORT, which would override the file.
 start_server() {
-  local out deadline kids why=""
+  local out deadline kids at why=""
   out=$(cd -- "$DEST" && unset ERGOSPHERE_PORT && "$PYTHON" ergosphere.py --check </dev/null 2>&1) ||
     fail install "ergosphere.py --check failed: ${out//$'\n'/; }"
   SRV_BIND=$BIND SRV_PORT=$PORT
@@ -724,6 +724,13 @@ start_server() {
       SERVER_NOTE="Ergosphere pid $PID keeps running as before ($why) because it has $kids $noun open; when they are done run: kill $PID, then rerun this installer"
       printf 'start: already running, pid %s, not restarted (%s %s open): %s\n' "$PID" "$kids" "$noun" "$why"
       return 0
+    fi
+    # check_target saw the new address free, but the download took time.
+    # Probe it again right before the kill, so a taken port stops nothing.
+    at=$PROBE_AT
+    probe "$BIND" "$PORT"
+    if [[ "$PROBE" != down && "$PROBE_PID" != "$PID" ]]; then
+      fail start "port $PORT is in use by something that is not this Ergosphere; it was not touched, and pid $PID keeps running on $at (rerun once $PORT is free)"
     fi
     printf 'start: restarting pid %s (no grok sessions): %s\n' "$PID" "$why"
     kill "$PID" 2>/dev/null || true
