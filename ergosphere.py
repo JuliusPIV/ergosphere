@@ -4035,6 +4035,42 @@ document.getElementById("term").addEventListener("click", function (ev) {
   ev.stopPropagation();
   openResumeAsk();
 }, true);
+// grok draws its own scroll bar in the last column, sized and placed from
+// its own view. A drag that starts there on grok's screen goes to grok as
+// the SGR press, drag motion and release it asked for, so grok scrolls and
+// redraws the thumb. Registered before the click handler below, which it
+// stops; a drag anywhere else stays a browser text selection.
+var barDrag = null;
+function sendBarReport(action, col, row) {
+  if (ended || !sock || sock.readyState !== 1) return;
+  sock.send(new TextEncoder().encode(sgrClick(0, action, col, row, false, false, false)));
+}
+document.getElementById("term").addEventListener("mousedown", function (ev) {
+  barDrag = null;
+  if (ev.button !== 0 || ev.shiftKey || ev.altKey || ev.ctrlKey || ended) return;
+  if (!termOpened || term.buffer.active.type !== "alternate") return;
+  var cell = wheelCell(ev);
+  if (cell.col !== (term.cols || 80)) return;
+  ev.preventDefault();
+  ev.stopImmediatePropagation();
+  barDrag = {col: cell.col, row: cell.row};
+  sendBarReport(1, cell.col, cell.row);
+  term.focus();
+}, true);
+document.addEventListener("mousemove", function (ev) {
+  if (!barDrag) return;
+  ev.preventDefault();
+  var row = wheelCell(ev).row;
+  if (row === barDrag.row) return;
+  barDrag.row = row;
+  sendBarReport(32, barDrag.col, row);
+}, true);
+document.addEventListener("mouseup", function (ev) {
+  if (!barDrag || ev.button !== 0) return;
+  var drag = barDrag;
+  barDrag = null;
+  sendBarReport(0, drag.col, wheelCell(ev).row);
+}, true);
 var clickDown = null;
 document.getElementById("term").addEventListener("mousedown", function (ev) {
   clickDown = null;

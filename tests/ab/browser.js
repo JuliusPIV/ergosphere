@@ -64,6 +64,16 @@ async function run() {
     s = await settle(p, x => x.off !== before, 3000);
     checks.wheel_scroll = check(s.off < before, `3 notches up: moved ${s.off - before}`);
 
+    // grok's scroll bar is the last column: drag it from the bottom to the top.
+    const cw = g.w / s.cols, ch = g.h / s.rows, bx = g.x + g.w - cw / 2;
+    const fromOff = s.off;
+    await p.mouse.move(bx, g.y + g.h - ch * 1.5);
+    await p.mouse.down();
+    for (let i = 1; i <= 10; i++) { await p.mouse.move(bx, g.y + g.h - ch * 1.5 - (g.h - ch * 2) * i / 10); await wait(30); }
+    await p.mouse.up();
+    s = await settle(p, x => x.off <= x.max / 20, 3000);
+    checks.bar_drag = check(s.off <= s.max / 20, `bar to top: off ${fromOff}->${s.off} of ${s.max}`);
+
     const r0 = s.rows, c0 = s.cols;
     await p.setViewportSize({width: 900, height: 600});
     s = await settle(p, x => fitted(x) && (x.rows !== r0 || x.cols !== c0), 5000);
