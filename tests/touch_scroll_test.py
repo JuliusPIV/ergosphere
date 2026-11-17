@@ -6,6 +6,9 @@ a browser, a one-finger drag in Pixel 7 emulation sends SGR wheel reports to
 grok, a tap still focuses the terminal, and the terminal fills the width.
 Normal-screen output taller than the terminal stays in xterm's scrollback,
 reachable by the wheel and by a touch drag.
+Pinch (#86): two fingers change the terminal font size (clamped 8-28 px) and
+refit, so grok gets a resize; the page itself never zooms; the size is kept
+per browser and used on the next page load.
 
 Run: python3 -B tests/touch_scroll_test.py
 Stdlib only, no network, no real grok: "grok" is a small python TUI.
@@ -52,8 +55,8 @@ def check_css(page):
         fails.append("the page itself can scroll (html, body lack overflow: hidden; overscroll-behavior: none)")
     if "100dvh" not in css or "100vh" not in css:
         fails.append("#wrap height needs 100dvh with the 100vh fallback")
-    if not re.search(r"#term \{[^}]*touch-action: pinch-zoom;", css):
-        fails.append("#term needs touch-action: pinch-zoom (no browser pan on a drag, pinch still zooms)")
+    if not re.search(r"#term \{[^}]*touch-action: none;", css):
+        fails.append("#term needs touch-action: none (no browser pan or zoom; drag and pinch are the script's)")
     return fails
 
 
@@ -84,6 +87,8 @@ var window = {getComputedStyle: function (el) { return {getPropertyValue: functi
 globalThis.window = window;
 globalThis.self = globalThis;
 var FitAddon = require("./vendor/addon-fit.js");
+// The page reads its saved pinch size from localStorage; 14 is the default.
+function savedFontSize() { return 14; }
 var opts = (%s);
 var parent = {style: {width: "800px", height: "340px"}};
 var term = {options: opts, rows: 24, cols: 80,
@@ -246,28 +251,43 @@ async function oneMove(cdp, x, ya, yb) {
   await oneMove(cdp, x, y0, y0 + 200);
   res.mobile.normalTopAfterOneMove = await viewTop(p);
   await ctx.close();
-  // A two-finger pinch over grok's screen in a fresh page still zooms the
-  // page (until #86 turns pinch into a text size change) and sends grok
-  // nothing. Fresh, because on the normal screen with scrollback xterm's own
-  // touch handler cancels the move to scroll, as it does on main.
+  // Pinch in a fresh page: two fingers change the font size and refit, grok
+  // gets the new size, the page never zooms. Fresh, because on the normal
+  // screen with scrollback xterm's own touch handler cancels the move.
   ctx = await b.newContext({...devices['Pixel 7']});
   p = await ctx.newPage();
   cdp = await ctx.newCDPSession(p);
   await p.goto(url); await wait(2500);
   await p.evaluate(() => { window.SENT = []; const s = sock.send.bind(sock);
     sock.send = d => { SENT.push(typeof d === 'string' ? d : new TextDecoder().decode(d)); s(d); }; });
+  const fontState = () => p.evaluate(() => ({font: term.options.fontSize, cols: term.cols, rows: term.rows,
+    scale: visualViewport.scale}));
   // Real two-finger touch events: Input.synthesizePinchGesture zooms
   // nothing in this headless Chrome, even with touch-action auto.
   const cy = r.top + r.height / 2;
-  await cdp.send('Input.dispatchTouchEvent', {type: 'touchStart', touchPoints: [{x: x - 20, y: cy, id: 1}, {x: x + 20, y: cy, id: 2}]});
-  for (let i = 1; i <= 20; i++) {
-    await cdp.send('Input.dispatchTouchEvent', {type: 'touchMove', touchPoints: [{x: x - 20 - 5 * i, y: cy - 6 * i, id: 1}, {x: x + 20 + 5 * i, y: cy + 6 * i, id: 2}]});
-    await wait(20);
+  async function pinch(d0, d1) {
+    const pts = d => [{x: x - d / 2, y: cy, id: 1}, {x: x + d / 2, y: cy, id: 2}];
+    await cdp.send('Input.dispatchTouchEvent', {type: 'touchStart', touchPoints: pts(d0)});
+    for (let i = 1; i <= 15; i++) {
+      await cdp.send('Input.dispatchTouchEvent', {type: 'touchMove', touchPoints: pts(d0 + (d1 - d0) * i / 15)});
+      await wait(30);
+    }
+    await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
+    await wait(500);
   }
-  await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
-  await wait(500);
-  res.pinchScale = await p.evaluate(() => visualViewport.scale);
+  res.pinch = {start: await fontState()};
+  await pinch(100, 150);
+  res.pinch.spread = await fontState();
+  await pinch(150, 50);
+  res.pinch.squeeze = await fontState();
+  await pinch(50, 400);
+  res.pinch.max = await fontState();
+  await pinch(400, 20);
+  res.pinch.min = await fontState();
   res.pinchSent = await p.evaluate(() => SENT.join(''));
+  res.pinch.resizes = await p.evaluate(() => SENT.filter(s => s.startsWith('{"type":"resize"')).length);
+  await p.reload(); await wait(2500);
+  res.pinch.reload = await fontState();
   await ctx.close();
   await b.close();
   console.log(JSON.stringify(res));
@@ -285,6 +305,27 @@ def free_port():
         s.close()
         if port not in FORBIDDEN_PORTS:
             return port
+
+
+def check_pinch(pn):
+    fails = []
+    st, sp, sq, mx, mn = pn["start"], pn["spread"], pn["squeeze"], pn["max"], pn["min"]
+    for name in ("spread", "squeeze", "max", "min", "reload"):
+        if pn[name]["scale"] != 1:
+            fails.append("pinch: the page zoomed (%s: scale %s)" % (name, pn[name]["scale"]))
+    if not (sp["font"] > st["font"] and sp["cols"] < st["cols"]):
+        fails.append("pinch: spreading did not enlarge the text (font %s->%s, cols %s->%s)" % (
+            st["font"], sp["font"], st["cols"], sp["cols"]))
+    if not (sq["font"] < sp["font"] and sq["cols"] > sp["cols"]):
+        fails.append("pinch: squeezing did not shrink the text (font %s->%s, cols %s->%s)" % (
+            sp["font"], sq["font"], sp["cols"], sq["cols"]))
+    if mx["font"] != 28 or mn["font"] != 8:
+        fails.append("pinch: font size not clamped to 8-28 (max %s, min %s)" % (mx["font"], mn["font"]))
+    if pn["resizes"] < 4:
+        fails.append("pinch: grok got %d resize messages for 4 pinches" % pn["resizes"])
+    if pn["reload"]["font"] != mn["font"]:
+        fails.append("pinch: the size is not kept on reload (%s, was %s)" % (pn["reload"]["font"], mn["font"]))
+    return fails
 
 
 def check_browser():
@@ -380,8 +421,7 @@ def check_browser():
     if not res["mobile"]["normalTopAfterOneMove"] < res["mobile"]["normalTopAfterDrag"]:
         fails.append("normal screen: a 200px flick in one move event did not scroll (top %s, was %s)" % (
             res["mobile"]["normalTopAfterOneMove"], res["mobile"]["normalTopAfterDrag"]))
-    if not res["pinchScale"] > 1.2:
-        fails.append("a pinch over the terminal did not zoom the page (scale %s)" % res["pinchScale"])
+    fails += check_pinch(res["pinch"])
     if "\x1b[<6" in res["pinchSent"]:
         fails.append("a pinch sent wheel reports")
     if "\x1b[<6" in res["tapSent"]:

@@ -3562,11 +3562,9 @@ html, body { height: 100%; margin: 0; background: #111; color: #ddd; font: 14px 
 html, body { overflow: hidden; overscroll-behavior: none; }
 #wrap { height: calc(100dvh - 28px); }
 #term .xterm-viewport { overflow-y: hidden; }
-/* One-finger drags on the terminal are grok scrolling, not page panning:
-   without pan-x or pan-y the browser does not pan, and the script handles
-   them. pinch-zoom keeps the browser's two-finger zoom. #86 changes this to
-   none when pinch resizes the terminal text instead. */
-#term { touch-action: pinch-zoom; }
+/* The browser neither pans nor zooms on the terminal: a one-finger drag is
+   grok scrolling and a pinch changes the terminal text size (the script). */
+#term { touch-action: none; }
 @media (max-width: 40rem) {
 #bar { height: 56px; flex-wrap: wrap; align-content: center; column-gap: 0.6rem; row-gap: 0.2rem; padding-right: 0.6rem; white-space: nowrap; overflow: hidden; font-size: 0; }
 #bar > * { font-size: 14px; }
@@ -3587,7 +3585,24 @@ html, body { overflow: hidden; overscroll-behavior: none; }
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
 <script>
-var term = new Terminal({cursorBlink: true, fontFamily: "monospace", fontSize: 14, scrollback: 5000});
+// Pinch sets the font size; it is kept per browser for the next session.
+// 8 px is about the smallest legible size; 28 px still leaves a phone about
+// 24 columns. Storage can throw (private mode, blocked site data).
+var FONT_MIN = 8;
+var FONT_MAX = 28;
+var FONT_KEY = "ergosphere.fontSize";
+function clampFontSize(n) {
+  return Math.max(FONT_MIN, Math.min(FONT_MAX, n));
+}
+function savedFontSize() {
+  var n = NaN;
+  try { n = parseInt(localStorage.getItem(FONT_KEY), 10); } catch (err) {}
+  return isNaN(n) ? 14 : clampFontSize(n);
+}
+function saveFontSize(n) {
+  try { localStorage.setItem(FONT_KEY, String(n)); } catch (err) {}
+}
+var term = new Terminal({cursorBlink: true, fontFamily: "monospace", fontSize: savedFontSize(), scrollback: 5000});
 // The fit addon takes _core.viewport.scrollBarWidth off the columns whenever
 // scrollback is on. xterm 5.5 sets it once, when the terminal opens, to
 // "offsetWidth - scrollArea.offsetWidth || 15": 15 for a hidden bar, which
@@ -3918,6 +3933,54 @@ function onTouchEnd(ev) {
     requestAnimationFrame(step);
   }
   requestAnimationFrame(step);
+}
+// Pinch: two fingers scale the font size and refit, so the text reflows and
+// grok gets the new cols and rows. Passive: touch-action none already stops
+// the page zoom, and the one-finger handler leaves two fingers alone.
+var pinch = null;
+function pinchDist(touches) {
+  var dx = touches[0].clientX - touches[1].clientX;
+  var dy = touches[0].clientY - touches[1].clientY;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+function endPinch() {
+  if (!pinch) return;
+  for (var i = 0; i < pinch.targets.length; i++) {
+    pinch.targets[i].removeEventListener("touchmove", onPinchMove, {passive: true});
+    pinch.targets[i].removeEventListener("touchend", onPinchEnd, {passive: true});
+    pinch.targets[i].removeEventListener("touchcancel", onPinchEnd, {passive: true});
+  }
+  pinch = null;
+  saveFontSize(term.options.fontSize);
+}
+termBox.addEventListener("touchstart", function (ev) {
+  endPinch();
+  if (ev.touches.length !== 2) return;
+  var d = pinchDist(ev.touches);
+  if (d < 1) return;
+  // Each finger's own target, for the same detached-row reason as endTouch.
+  var targets = [];
+  for (var i = 0; i < 2; i++) {
+    var tg = ev.touches[i].target;
+    if (targets.indexOf(tg) < 0) targets.push(tg);
+  }
+  pinch = {d0: d, size0: term.options.fontSize, targets: targets};
+  for (var j = 0; j < targets.length; j++) {
+    targets[j].addEventListener("touchmove", onPinchMove, {passive: true});
+    targets[j].addEventListener("touchend", onPinchEnd, {passive: true});
+    targets[j].addEventListener("touchcancel", onPinchEnd, {passive: true});
+  }
+}, {capture: true, passive: true});
+function onPinchMove(ev) {
+  if (!pinch || ev.touches.length !== 2) return;
+  var size = clampFontSize(Math.round(pinch.size0 * pinchDist(ev.touches) / pinch.d0));
+  if (size === term.options.fontSize) return;
+  term.options.fontSize = size;
+  try { fit.fit(); } catch (err) {}
+}
+function onPinchEnd(ev) {
+  if (ev.touches.length >= 2) return;
+  endPinch();
 }
 window.addEventListener("resize", function () {
   if (!termOpened) return;
