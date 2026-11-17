@@ -35,7 +35,7 @@ fi
 log "playwright path: ${pw_path:-none}; browser: ${AB_CHROME:-playwright default}"
 
 run_side() { # label code-dir port
-  local label="$1" code="$2" port="$3" w="$AB_OUT/$1" pid i brc
+  local label="$1" code="$2" port="$3" w="$AB_OUT/$1" pid brc
   rm -rf "$w"; mkdir -p "$w/home/.grok/sessions/ab/$SID" "$w/work" "$w/bin"
   printf '{"info":{"id":"%s","cwd":"%s"},"generated_title":"AB seeded session","updated_at":"2026-01-01T00:00:00Z"}\n' \
     "$SID" "$w/work" >"$w/home/.grok/sessions/ab/$SID/summary.json"
@@ -47,7 +47,7 @@ run_side() { # label code-dir port
   (cd "$w" && HOME="$w/home" ERGOSPHERE_CONFIG="$w/config.json" PATH="$w/bin:$PATH" \
      exec python3 -B "$code/ergosphere.py" --bind 127.0.0.1 --port "$port") >"$w/server.log" 2>&1 &
   pid=$!
-  for i in $(seq 100); do grep -q ERGOSPHERE_READY "$w/server.log" && break; sleep 0.1; done
+  for _ in $(seq 100); do grep -q ERGOSPHERE_READY "$w/server.log" && break; sleep 0.1; done
   grep -q ERGOSPHERE_READY "$w/server.log" || log "$label: server not ready: $(tail -n 3 "$w/server.log")"
   python3 -B "$HERE/ab.py" http "$port" "$SID" >"$w/http.json" 2>"$w/http.err"
   if [ -z "$browser_off" ]; then
@@ -58,7 +58,7 @@ run_side() { # label code-dir port
     printf '{"error":"%s"}\n' "$browser_off" >"$w/browser.json"
   fi
   kill "$pid" 2>/dev/null
-  for i in $(seq 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+  for _ in $(seq 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
   kill -9 "$pid" 2>/dev/null
   wait "$pid" 2>/dev/null
   log "$label: http $(cat "$w/http.json")"
