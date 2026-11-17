@@ -43,12 +43,17 @@ const document = {
 };
 const intervals = [];
 let infoBody = null;
-function reply(body) {
-  return Promise.resolve({ok: true, status: 200, json: () => Promise.resolve(body)});
+let refusal = null;
+function reply(body, status) {
+  status = status || 200;
+  return Promise.resolve({ok: status === 200, status, json: () => Promise.resolve(body)});
 }
 function fetch(url) {
   if (url === '/session-info') return reply(infoBody);
-  return new Promise(() => {});  // /health during a restart: never answers
+  // Restart: refused with step.refuse, else /health never answers.
+  if (refusal && url === '/health') return reply({started: 1});
+  if (refusal && url === '/settings') return reply(refusal, 409);
+  return new Promise(() => {});
 }
 const ctx = {document, fetch, location: {origin: 'http://127.0.0.1:1', hostname: '127.0.0.1', protocol: 'http:'},
   setInterval: (f) => { intervals.push(f); return intervals.length; }, setTimeout: () => 0,
@@ -59,11 +64,12 @@ const settle = () => new Promise((r) => setImmediate(() => setImmediate(() => se
 (async () => {
   const out = [];
   for (const step of steps) {
-    if (step.click) nodes.restart.listeners.click();
+    refusal = step.refuse || null;
     infoBody = step.body;
+    if (step.click) { nodes.restart.listeners.click(); await settle(); }
     for (const f of intervals) f();
     await settle();
-    out.push({text: nodes.sessions.textContent, disabled: nodes.restart.disabled});
+    out.push({text: nodes.sessions.textContent, disabled: nodes.restart.disabled, msg: document.getElementById('restart-msg').textContent});
   }
   console.log(JSON.stringify(out));
 })();
@@ -119,6 +125,12 @@ def main():
         erg.LIVE.update(table)
         steps.append({"body": {"sessions": erg.list_live()}})
         want.append((name, erg.running_sessions()))
+    # Restart refused (a session started first), then that session ends:
+    # the refusal must not stay on screen next to an enabled button.
+    busy = "1 grok session running; restart needs zero"
+    one = {"sessions": [{"id": "e", "alive": True}]}
+    steps.append({"click": True, "refuse": {"ok": False, "sessions": 1, "error": busy}, "body": one})
+    steps.append({"body": {"sessions": []}})
     # Restart pressed at zero; while its request is out a session starts and
     # ends again.  The poll must not re-enable the button.
     steps.append({"click": True, "body": {"sessions": [{"id": "e", "alive": True}]}})
@@ -146,6 +158,18 @@ def main():
         print("%s %s: server counts %d; page shows %r, button %s" % (
             "PASS" if ok else "FAIL", name, count, seen["text"], "disabled" if seen["disabled"] else "enabled"))
         failed += not ok
+    refused, cleared = got[len(want)], got[len(want) + 1]
+    if refused["disabled"] and refused["msg"] == busy:
+        print("PASS refused restart: button disabled, %r shown" % refused["msg"])
+    else:
+        print("FAIL refused restart: got %r" % refused)
+        failed += 1
+    if not cleared["disabled"] and cleared["msg"] == "" and cleared["text"].startswith("Running in this server: 0."):
+        print("PASS session ended after the refusal: count 0, button enabled, refusal cleared")
+    else:
+        print("FAIL session ended after the refusal: page shows %r, button %s, message %r" % (
+            cleared["text"], "disabled" if cleared["disabled"] else "enabled", cleared["msg"]))
+        failed += 1
     last = got[-1]
     if last["disabled"]:
         print("PASS restart in progress: polls (1 then 0) leave the button disabled")

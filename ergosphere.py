@@ -3359,6 +3359,7 @@ function pollSessions() {
     for (i = 0; i < data.sessions.length; i++) if (data.sessions[i].alive) n++;
     if (n !== state.sessions) {
       state.sessions = n;
+      say("restart-msg", "");
       renderRestart();
     }
   }).catch(function () {});
