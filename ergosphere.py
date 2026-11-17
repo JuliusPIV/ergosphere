@@ -4704,9 +4704,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json(409, {"ok": False, "error": problem + "; not restarting"})
             return
         print("restart requested; next %s:%s" % (nxt.bind, nxt.port), flush=True)
-        self._json(200, {"ok": True, "bind": nxt.bind, "port": nxt.port})
-        self.close_connection = True
-        threading.Thread(target=self.server.shutdown, daemon=True).start()
+        # RESTART is set: the restart must go ahead even if the client is
+        # gone and the reply raises, or the server serves on refusing launches.
+        try:
+            self._json(200, {"ok": True, "bind": nxt.bind, "port": nxt.port})
+        finally:
+            self.close_connection = True
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
 
     def _drain_body(self):
         raw = self.headers.get("Content-Length")
