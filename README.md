@@ -269,7 +269,7 @@ If you run Ergosphere from your own systemd unit, it supports `Type=notify` and 
 <details>
 <summary><b>How do I stop or remove it?</b></summary>
 
-The install summary prints the process ID and a `kill <pid>` command. To remove Ergosphere, stop it and delete the install directory.
+The install summary prints the process ID and a `kill <pid>` command. To remove Ergosphere, follow [Uninstall](#uninstall).
 </details>
 
 <details>
@@ -414,6 +414,16 @@ python3 ergosphere.py           # runs in the foreground; prints ERGOSPHERE_READ
 For a reverse proxy that handles its own authentication, set `ERGOSPHERE_TOKEN` to the path of a file holding a one-line token. Ergosphere then requires `Authorization: Bearer <token>`, and the proxy must send that header. Browsers do not send it, so use this only behind a proxy. The installer refuses to run while `ERGOSPHERE_TOKEN` is set; start the server yourself in that setup.
 
 To keep the install directory read-only, set `ERGOSPHERE_CONFIG` to the path of the config file. Ergosphere then reads and writes that file, and its `.bak`, instead of `ergosphere.json` next to `ergosphere.py`. Unset means `ergosphere.json` in the install directory.
+
+### Uninstall
+
+Ergosphere keeps everything in its install directory, plus the `ERGOSPHERE_CONFIG` file if you set one. The installer adds no service, cron job, `PATH` entry or shell profile line, and it does not change `~/.grok`.
+
+1. Stop the server: `kill <pid>`. The pid is on the `pid:` line of the install summary, and `curl -s http://127.0.0.1:<port>/health` prints it (use your listen address if it is not 127.0.0.1). This also stops the grok sessions it started.
+2. Delete the install directory: `rm -rf ~/.local/share/ergosphere`, or the directory you passed with `--dir`. That removes the code, `ergosphere.json`, its `.bak` and `ergosphere.log`.
+3. Only if you set `ERGOSPHERE_CONFIG` to a path outside the install directory: delete that file and its `.bak`. If the folder that held them is now empty, `rmdir` it too.
+
+Your sessions in `~/.grok/sessions` belong to grok and stay.
 
 ---
 
