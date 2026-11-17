@@ -5328,9 +5328,32 @@ def cmd_check(args, binary):
     return 0
 
 
+# A client gets this long to finish the TLS handshake before it is dropped.
+TLS_HANDSHAKE_TIMEOUT = 10
+
+
 class ErgosphereServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
+    tls_context = None
+
+    def finish_request(self, request, client_address):
+        # The handshake runs here, in the connection's own thread, not in the
+        # accept loop: a client that never sends a ClientHello holds only itself.
+        if self.tls_context is None:
+            return super().finish_request(request, client_address)
+        request.settimeout(TLS_HANDSHAKE_TIMEOUT)
+        try:
+            conn = self.tls_context.wrap_socket(request, server_side=True)
+        except (OSError, ssl.SSLError) as exc:
+            print("tls: handshake from %s failed: %s" % (client_address[0], exc), file=sys.stderr, flush=True)
+            return None
+        try:
+            conn.settimeout(None)
+            super().finish_request(conn, client_address)
+        finally:
+            self.shutdown_request(conn)
+        return None
 
 
 def runtime_fingerprint():
@@ -5541,7 +5564,7 @@ def serve(args, config):
     if tls:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(args.tls_cert, args.tls_key)
-        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+        httpd.tls_context = ctx
     print("ERGOSPHERE_READY port=%s tls=%s" % (args.port, 1 if tls else 0), flush=True)
 
     def _stop(_signum, _frame):
