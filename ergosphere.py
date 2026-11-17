@@ -88,6 +88,9 @@ STOP = threading.Event()
 RESTART = threading.Event()
 SCREEN_CAP = 2 * 1024 * 1024
 FRAME_CHUNK = 64 * 1024
+# Output queued for one /term client that is not reading. Past this the client
+# is dropped: the page reconnects and resyncs from the replay (SCREEN_CAP).
+CLIENT_QUEUE_CAP = 2 * SCREEN_CAP
 # grok coalesces SIGWINCH. Two resizes closer than this read as one, and the
 # same final size does not repaint.
 REPAINT_PAUSE = 0.25
@@ -1484,6 +1487,32 @@ class Live:
         return head + bytes(self.buffer)
 
     def _enqueue(self, client, data, opcode=2):
+        if not client.alive:
+            return
+        with client.lock:
+            if client.queued + len(data) > CLIENT_QUEUE_CAP:
+                client.queued = 0
+                client.alive = False
+                client.dropped = True
+                overflow = True
+            else:
+                client.queued += len(data)
+                overflow = False
+        if overflow:
+            # The sender may be blocked in a write that never finishes.
+            # Shutting the socket down wakes it and the read loop, and _term
+            # detaches as for any close.
+            while True:
+                try:
+                    client.queue.get_nowait()
+                except queue.Empty:
+                    break
+            client.queue.put(None)
+            try:
+                client.handler.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            return
         # Binary terminal bytes can split. A text frame must stay one message.
         if opcode != 2:
             client.queue.put((opcode, data))
@@ -1515,8 +1544,7 @@ class Live:
         with self.lock:
             clients = list(self.clients)
         for client in clients:
-            if client.alive:
-                client.queue.put((1, frame))
+            self._enqueue(client, frame, 1)
 
     def _publish_ended(self):
         # Every attached client, once: the reader (grok exited) and
@@ -1528,8 +1556,7 @@ class Live:
             self.ended_sent = True
             clients = list(self.clients)
         for client in clients:
-            if client.alive:
-                client.queue.put((1, frame))
+            self._enqueue(client, frame, 1)
 
     def _ended_frame(self):
         return json.dumps({"type": "ended"}).encode("utf-8")
@@ -1545,10 +1572,10 @@ class Live:
             if snap:
                 self._enqueue(client, snap)
             late = self.ended_sent
-        client.queue.put((1, self._subagent_frame()))
+        self._enqueue(client, self._subagent_frame(), 1)
         if late:
             # Attached after the ended frame went out (Quit raced this attach).
-            client.queue.put((1, self._ended_frame()))
+            self._enqueue(client, self._ended_frame(), 1)
         return client
 
     def detach(self, client):
@@ -1644,6 +1671,8 @@ class Live:
             if item is None or not client.alive:
                 return
             opcode, payload = item
+            with client.lock:
+                client.queued -= len(payload)
             try:
                 client.handler._send_frame(opcode, payload)
             except (EOFError, OSError, RuntimeError, ValueError):
@@ -1778,6 +1807,10 @@ class _Client:
         self.handler = handler
         self.queue = queue.Queue()
         self.alive = True
+        # Bytes in queue. Over CLIENT_QUEUE_CAP the client is dropped.
+        self.queued = 0
+        self.dropped = False
+        self.lock = threading.Lock()
 
 
 def open_live(sid, cmd, cwd, cols, rows):
@@ -5118,6 +5151,8 @@ class Handler(BaseHTTPRequestHandler):
             self.ws_closed = True
             if live is not None:
                 live.detach(client)
+            if client is not None and client.dropped:
+                print("term drop slow client sid=%s" % sid, flush=True)
             if client is not None and client.sender is not None:
                 client.sender.join(timeout=2)
             try:
