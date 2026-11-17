@@ -3525,7 +3525,8 @@ html, body { height: 100%; margin: 0; background: #111; color: #ddd; font: 14px 
 #busy button:hover, #busy button:focus { background: #fff; color: #000; outline: none; }
 @@TERM_CSS@@
 /* grok draws on the alternate screen, which has no scrollback: xterm's
-   scroll bar can never move, and the page itself must never scroll. */
+   scroll bar can never move, and the page itself must never scroll. The
+   normal screen keeps its scrollback (the wheel, or a touch drag). */
 html, body { overflow: hidden; overscroll-behavior: none; }
 #wrap { height: calc(100dvh - 28px); }
 #term .xterm-viewport { overflow-y: hidden; }
@@ -3554,12 +3555,15 @@ html, body { overflow: hidden; overscroll-behavior: none; }
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
 <script>
-// scrollback 0: grok runs on the alternate screen, and every wheel and touch
-// scroll goes to grok, so xterm's own scrollback can never be shown. It also
-// makes the fit addon reserve no scroll bar width: with scrollback on it
-// subtracts viewport.scrollBarWidth, which xterm 5.5 sets to 15 when the
-// hidden bar takes no width ("offsetWidth - scrollArea.offsetWidth || 15").
-var term = new Terminal({cursorBlink: true, fontFamily: "monospace", fontSize: 14, scrollback: 0});
+var term = new Terminal({cursorBlink: true, fontFamily: "monospace", fontSize: 14, scrollback: 5000});
+// The fit addon takes _core.viewport.scrollBarWidth off the columns whenever
+// scrollback is on. xterm 5.5 sets it once, when the terminal opens, to
+// "offsetWidth - scrollArea.offsetWidth || 15": 15 for a hidden bar, which
+// left an empty strip. Nothing else reads it. The bar is hidden, so no width.
+function dropScrollBarGutter() {
+  var core = term._core;
+  if (core && core.viewport) core.viewport.scrollBarWidth = 0;
+}
 // Ctrl+V is xterm's clipboard chord (byte 0x16). Returning false skips that
 // and leaves the event so the browser paste, the same path as Ctrl+Shift+V,
 // supplies text/plain. clipboard.read is refused on this HTTP page. A frozen
@@ -3659,6 +3663,7 @@ function ensureTerm() {
   termOpened = true;
   term.loadAddon(fit);
   term.open(document.getElementById("term"));
+  dropScrollBarGutter();
   // Edge draws a writing-hint dot on the focused field's caret; xterm's
   // hidden helper textarea sits at the terminal cursor, so turn hints off.
   if (term.textarea) term.textarea.setAttribute("writingsuggestions", "false");
@@ -3765,6 +3770,9 @@ function wheelCell(ev) {
   return {col: col + 1, row: row + 1};
 }
 document.getElementById("term").addEventListener("wheel", function (ev) {
+  // On the normal screen (before grok draws, or after it exits) xterm scrolls
+  // its own scrollback: the scroll bar is hidden, so this is the way back.
+  if (termOpened && term.buffer.active.type === "normal") return;
   if (!wheelLines(ev)) return;
   ev.preventDefault();
   ev.stopPropagation();
@@ -3798,11 +3806,18 @@ function sendWheelSteps(steps, cell) {
   for (var i = 0; i < Math.abs(steps); i++) out += one;
   sock.send(new TextEncoder().encode(out));
 }
-// px > 0 means the finger moved up: show later lines (wheel down).
+// px > 0 means the finger moved up: show later lines (wheel down). On the
+// normal screen (before grok draws, or after it exits) the drag scrolls
+// xterm's own scrollback instead, since that is where the history is.
 function touchScrollBy(state, px) {
   state.acc += px / (rowPx() * TOUCH_ROWS_PER_REPORT);
   var steps = state.acc < 0 ? Math.ceil(state.acc) : Math.floor(state.acc);
   state.acc -= steps;
+  if (!steps) return;
+  if (term.buffer.active.type === "normal") {
+    term.scrollLines(steps * TOUCH_ROWS_PER_REPORT);
+    return;
+  }
   sendWheelSteps(steps, state.cell);
 }
 function stopFling() {

@@ -4,6 +4,8 @@ Covers (#66): no visible xterm or page scroll bar; the fit addon gives the
 hidden bar's width back to the terminal columns; the page script parses; in
 a browser, a one-finger drag in Pixel 7 emulation sends SGR wheel reports to
 grok, a tap still focuses the terminal, and the terminal fills the width.
+Normal-screen output taller than the terminal stays in xterm's scrollback,
+reachable by the wheel and by a touch drag.
 
 Run: python3 -B tests/touch_scroll_test.py
 Stdlib only, no network, no real grok: "grok" is a small python TUI.
@@ -72,10 +74,11 @@ def check_node_syntax(script):
 
 
 GUTTER_JS = r"""
-// The vendored fit addon against a terminal built with the page's options.
-// xterm 5.5 sets viewport.scrollBarWidth to
-// "viewport.offsetWidth - scrollArea.offsetWidth || 15": a hidden bar takes
-// no width, so it is 15. The addon subtracts it unless scrollback is 0.
+// The vendored fit addon against a terminal built with the page's options,
+// after the page's own fix-up once the terminal is open. xterm 5.5 sets
+// viewport.scrollBarWidth to "viewport.offsetWidth - scrollArea.offsetWidth
+// || 15": a hidden bar takes no width, so it is 15. The addon subtracts it
+// unless scrollback is 0.
 var window = {getComputedStyle: function (el) { return {getPropertyValue: function (k) {
   return el.style[k] || "0"; }}; }};
 globalThis.window = window;
@@ -83,12 +86,14 @@ globalThis.self = globalThis;
 var FitAddon = require("./vendor/addon-fit.js");
 var opts = (%s);
 var parent = {style: {width: "800px", height: "340px"}};
-var fake = {options: opts, rows: 24, cols: 80,
+var term = {options: opts, rows: 24, cols: 80,
   element: {parentElement: parent, style: {}},
   _core: {viewport: {scrollBarWidth: 15},
           _renderService: {dimensions: {css: {cell: {width: 8, height: 17}}}}}};
+%s
+if (typeof dropScrollBarGutter === "function") dropScrollBarGutter();
 var fit = new FitAddon.FitAddon();
-fit.activate(fake);
+fit.activate(term);
 console.log(JSON.stringify(fit.proposeDimensions()));
 """
 
@@ -101,7 +106,8 @@ def check_gutter(script):
     m = re.search(r"new Terminal\((\{.*?\})\);", script)
     if not m:
         return ["no new Terminal({...}) in the page script"]
-    out = subprocess.run([node, "-e", GUTTER_JS % m.group(1)], cwd=str(ROOT),
+    f = re.search(r"^function dropScrollBarGutter\(\) \{\n.*?^\}\n", script, re.S | re.M)
+    out = subprocess.run([node, "-e", GUTTER_JS % (m.group(1), f.group(0) if f else "")], cwd=str(ROOT),
                          capture_output=True, text=True, timeout=20)
     try:
         dims = json.loads(out.stdout)
@@ -146,6 +152,17 @@ async function measure(p) {
       gapPx: box.width - sc.width, cellPx: sc.width / term.cols, cols: term.cols};
   });
 }
+// Leave grok's alternate screen locally and write 200 lines, more than the
+// terminal is tall, as output on the normal screen.
+async function normalScreen(p) {
+  return p.evaluate(() => new Promise(done => {
+    let s = '\x1b[?1049l\x1b[2J\x1b[H';
+    for (let i = 0; i < 200; i++) s += 'normal ' + i + '\r\n';
+    term.write(s, () => done({len: term.buffer.normal.length, rows: term.rows,
+      top: term.buffer.active.viewportY, base: term.buffer.active.baseY}));
+  }));
+}
+const viewTop = p => p.evaluate(() => term.buffer.active.viewportY);
 (async () => {
   const b = await chromium.launch({executablePath: chrome, ignoreDefaultArgs: ['--hide-scrollbars']});
   const res = {};
@@ -153,6 +170,12 @@ async function measure(p) {
   let p = await ctx.newPage();
   await p.goto(url); await wait(2500);
   res.desktop = await measure(p);
+  res.desktop.normal = await normalScreen(p);
+  const d = await p.evaluate(() => document.querySelector('#term .xterm-screen').getBoundingClientRect().toJSON());
+  await p.mouse.move(d.left + d.width / 2, d.top + d.height / 2);
+  for (let i = 0; i < 3; i++) { await p.mouse.wheel(0, -200); await wait(80); }
+  await wait(300);
+  res.desktop.normalTopAfterWheel = await viewTop(p);
   await ctx.close();
   ctx = await b.newContext({...devices['Pixel 7']});
   p = await ctx.newPage();
@@ -192,6 +215,17 @@ async function measure(p) {
   await wait(300);
   res.tapFocused = await p.evaluate(() => !!document.activeElement && document.activeElement.classList.contains('xterm-helper-textarea'));
   res.tapSent = await p.evaluate(() => SENT.join(''));
+  // On the normal screen a drag scrolls xterm's own scrollback.
+  res.mobile.normal = await normalScreen(p);
+  await cdp.send('Input.dispatchTouchEvent', {type: 'touchStart', touchPoints: [{x, y: y0}]});
+  for (let i = 1; i <= 15; i++) {
+    await cdp.send('Input.dispatchTouchEvent', {type: 'touchMove', touchPoints: [{x, y: y0 + 20 * i}]});
+    await wait(40);
+  }
+  await wait(150);
+  await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
+  await wait(400);
+  res.mobile.normalTopAfterDrag = await viewTop(p);
   await ctx.close();
   await b.close();
   console.log(JSON.stringify(res));
@@ -286,6 +320,16 @@ def check_browser():
         fails.append("a two-finger drag was preventDefault-ed %d times" % res["twoPrevented"])
     if not res["tapFocused"]:
         fails.append("a tap did not focus the terminal")
+    for name in ("desktop", "mobile"):
+        n = res[name]["normal"]
+        if n["len"] < 200:
+            fails.append("%s: normal-screen output beyond the terminal height is lost: %d of 200+ lines kept" % (name, n["len"]))
+    n = res["desktop"]["normal"]
+    if not res["desktop"]["normalTopAfterWheel"] < n["base"]:
+        fails.append("desktop: the wheel does not scroll the normal screen's history (top %s, base %s)" % (res["desktop"]["normalTopAfterWheel"], n["base"]))
+    n = res["mobile"]["normal"]
+    if not res["mobile"]["normalTopAfterDrag"] < n["base"]:
+        fails.append("mobile: a drag does not scroll the normal screen's history (top %s, base %s)" % (res["mobile"]["normalTopAfterDrag"], n["base"]))
     if "\x1b[<6" in res["tapSent"]:
         fails.append("a tap sent a wheel report")
     return fails
