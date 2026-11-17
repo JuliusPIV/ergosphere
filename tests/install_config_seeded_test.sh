@@ -52,6 +52,9 @@ expect "only the config at the top" accept "$work/b" e.json
 seed "$work/c/conf/e.json"
 expect "only the config (absolute, inside the dir)" accept "$work/c" "$work/c/conf/e.json"
 
+seed "$work/g/conf/e.json"
+expect "only the config (written ./conf//e.json)" accept "$work/g" ./conf//e.json
+
 seed "$work/d/conf/e.json"
 seed "$work/d/conf/other.txt"
 expect "config plus another file beside it" refuse "$work/d" conf/e.json

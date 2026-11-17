@@ -489,9 +489,11 @@ load_config() {
 # True when $DEST holds nothing but the config file and the folders leading
 # to it, so a user can seed ERGOSPHERE_CONFIG in a new install dir.
 holds_only_config() {
-  local entry
+  local entry cfg=$CFG_FILE
+  # find prints plain paths, so drop the "." parts and doubled "/" a user may write.
+  while [[ "$cfg" == *//* || "$cfg" == */./* ]]; do cfg=${cfg//\/\//\/}; cfg=${cfg//\/.\//\/}; done
   while IFS= read -r -d '' entry; do
-    [[ "$CFG_FILE" == "$entry" || "$CFG_FILE" == "$entry"/* ]] || return 1
+    [[ "$cfg" == "$entry" || "$cfg" == "$entry"/* ]] || return 1
   done < <(find "$DEST" -mindepth 1 -print0)
 }
 
