@@ -8,7 +8,9 @@ reply write raises as it does when the client reset the socket.
 """
 import argparse
 import importlib.util
+import os
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -51,7 +53,11 @@ def check(exc_type):
 
 
 def main():
-    failures = check(BrokenPipeError) + check(ConnectionResetError)
+    # The restart reads the config file; a missing one keeps the fake
+    # server's settings, whatever config the developer has.
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["ERGOSPHERE_CONFIG"] = os.path.join(tmp, "missing.json")
+        failures = check(BrokenPipeError) + check(ConnectionResetError)
     for failure in failures:
         print("FAIL: " + failure)
     if failures:
