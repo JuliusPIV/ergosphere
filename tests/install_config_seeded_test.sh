@@ -82,4 +82,16 @@ chmod 0300 "$work/j/conf"
 expect "unreadable folder on the config path" refuse "$work/j" conf/e.json
 chmod 0700 "$work/j/conf"
 
+# A symlink inside the dir would let package files land outside it.
+seed "$work/k-foreign/e.json"
+seed "$work/k-foreign/xterm.js"
+mkdir -p "$work/k"
+ln -s "$work/k-foreign" "$work/k/vendor"
+expect "config reached through a symlinked folder" refuse "$work/k" vendor/e.json
+
+seed "$work/l-elsewhere/e.json"
+mkdir -p "$work/l"
+ln -s "$work/l-elsewhere/e.json" "$work/l/e.json"
+expect "config file that is a symlink" refuse "$work/l" e.json
+
 exit "$fail"

@@ -493,9 +493,11 @@ holds_only_config() {
   # find prints plain paths, so drop the "." parts and doubled "/" a user may write.
   while [[ "$cfg" == *//* || "$cfg" == */./* ]]; do cfg=${cfg//\/\//\/}; cfg=${cfg//\/.\//\/}; done
   # -H lists the target of a symlinked --dir. The last record is find's exit
-  # code, so a folder it could not read counts as not only the config.
+  # code, so a folder it could not read counts as not only the config. A
+  # symlink inside the dir is refused: package files could land outside it.
   while IFS= read -r -d '' entry; do
     [[ "$entry" == "find rc 0" ]] && return 0
+    [[ -L "$entry" ]] && return 1
     [[ "$cfg" == "$entry" || "$cfg" == "$entry"/* ]] || return 1
   done < <(find -H "$DEST" -mindepth 1 -print0 2>/dev/null; printf 'find rc %s\0' "$?")
   return 1
