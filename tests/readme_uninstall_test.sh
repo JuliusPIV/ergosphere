@@ -47,6 +47,14 @@ has "$un"        'ERGOSPHERE_CONFIG'       'Uninstall covers ERGOSPHERE_CONFIG'
 has "$un"        'kill <pid>'              'Uninstall stops the server first'
 has "$un"        '/health'                 'Uninstall says where to find the pid'
 
+# The FAQ offers running it from your own systemd unit with Restart=always;
+# kill alone does not stop that (systemd starts it again), so the steps must
+# say how to stop and remove the unit.
+has "$(cat "$readme")" 'your own systemd unit' 'README offers a user-run systemd unit'
+has "$un" 'systemctl --user disable --now <unit>' 'Uninstall stops and disables a systemd unit'
+has "$un" 'unit file'                             'Uninstall deletes the unit file'
+has "$un" 'daemon-reload'                         'Uninstall reloads systemd after removing the unit'
+
 # "Nothing else to remove" holds only while install.sh writes none of these.
 lacks "$installer" 'systemctl|crontab|\.bashrc|\.profile|\.zshrc|/etc/|\.grok' 'install.sh adds no service, cron, profile or ~/.grok change'
 has "$un" '~/.grok' 'Uninstall says ~/.grok is left alone'

@@ -419,7 +419,7 @@ To keep the install directory read-only, set `ERGOSPHERE_CONFIG` to the path of 
 
 Ergosphere keeps everything in its install directory, plus the `ERGOSPHERE_CONFIG` file if you set one. The installer adds no service, cron job, `PATH` entry or shell profile line, and it does not change `~/.grok`.
 
-1. Stop the server: `kill <pid>`. The pid is on the `pid:` line of the install summary, and `curl -s http://127.0.0.1:<port>/health` prints it (use your listen address if it is not 127.0.0.1). This also stops the grok sessions it started.
+1. Stop the server: `kill <pid>`. The pid is on the `pid:` line of the install summary, and `curl -s http://127.0.0.1:<port>/health` prints it (use your listen address if it is not 127.0.0.1). This also stops the grok sessions it started. If you run it from your own systemd unit, `kill` is not enough, because `Restart=always` starts it again: run `systemctl --user disable --now <unit>`, delete the unit file, then run `systemctl --user daemon-reload` (leave out `--user` for a system unit).
 2. Delete the install directory: `rm -rf ~/.local/share/ergosphere`, or the directory you passed with `--dir`. That removes the code, `ergosphere.json`, its `.bak` and `ergosphere.log`.
 3. Only if you set `ERGOSPHERE_CONFIG` to a path outside the install directory: delete that file and its `.bak`. If the folder that held them is now empty, `rmdir` it too.
 
