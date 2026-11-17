@@ -5674,7 +5674,9 @@ def serve(args, config):
     finally:
         kill_all()
         httpd.server_close()
-    if RESTART.is_set():
+    # A stop request wins over a pending restart: a service manager or the
+    # installer that sent SIGTERM must see the process exit.
+    if RESTART.is_set() and not STOP.is_set():
         return restart_self(httpd.server_address[0], httpd.server_address[1])
     return 0
 
