@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Manual mode offers the current port plus other ports as a numbered list and
+# Manual mode offers the current port plus other ports as a lettered list and
 # checks the final bind:port before anything changes: a port held by anything
 # but this install is named with its holder and port and bind are asked again,
 # up to 3 times, then the run stops with nothing changed. Automatic mode still
@@ -195,10 +195,11 @@ if [[ "$rc" -ne 0 && $(grep -c "^Warning: 127.0.0.1:$busy is in use" <<<"$out") 
 else
   bad "busy 3 times: exit $rc, $(grep -E '^(failed at|Warning)' <<<"$out")"
 fi
-if [[ "$(listing)" == "$before" && "$(health_pid "$busy" 127.0.0.2)" == "$pid" ]]; then
+served=$(health_pid "$busy" 127.0.0.2)
+if [[ "$(listing)" == "$before" && -n "$pid" && "$served" == "$pid" ]]; then
   ok "busy 3 times: no file changed, pid $pid still serves"
 else
-  bad "busy 3 times changed something: $(diff <(echo "$before") <(listing) | head -n 5)"
+  bad "busy 3 times: pid '${pid:-none}' should still serve 127.0.0.2:$busy (serves '${served:-none}'); file diff: $(diff <(echo "$before") <(listing) | head -n 5)"
 fi
 
 # Automatic mode has no question: a busy port still fails at check, nothing changed.
