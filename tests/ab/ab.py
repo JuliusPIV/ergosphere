@@ -12,7 +12,7 @@ import urllib.error
 import urllib.request
 
 TITLE = "AB seeded session"
-ORDER = ["health", "session_list", "open_session", "terminal", "wheel_scroll", "touch_scroll", "resize"]
+ORDER = ["health", "session_list", "open_session", "terminal", "wheel_scroll", "touch_scroll", "resize", "keyboard_android", "keyboard_ios"]
 
 
 def get(base, path):

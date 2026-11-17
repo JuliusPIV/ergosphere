@@ -1,6 +1,6 @@
 // Page checks in headless Chromium: node browser.js <port> <session-id>
 // Prints {"browser": version, "checks": {...}} or {"error": why} on stdout.
-const {chromium} = require('playwright');
+const {chromium, devices} = require('playwright');
 const [port, sid] = process.argv.slice(2);
 const url = `http://127.0.0.1:${port}/chat?resume=${sid}`;
 const wait = ms => new Promise(r => setTimeout(r, ms));
@@ -47,6 +47,60 @@ async function screen(p) {
   });
 }
 
+// Headless Chrome has no on-screen keyboard. A phone keyboard shrinks only
+// the visual viewport (iOS also pans it), so stand in by overriding
+// visualViewport.height/offsetTop and firing its resize and scroll events.
+function fakeKeyboard() {
+  window.KB = null;
+  const P = VisualViewport.prototype;
+  for (const k of ['height', 'offsetTop']) {
+    const real = Object.getOwnPropertyDescriptor(P, k).get;
+    Object.defineProperty(P, k, {configurable: true,
+      get() { return window.KB ? window.KB[k] : real.call(this); }});
+  }
+}
+async function setKeyboard(p, kb, pan) {
+  await p.evaluate(([kb, pan]) => {
+    const h = innerHeight - kb;
+    window.KB = kb ? {height: h, offsetTop: pan ? kb : 0} : null;
+    visualViewport.dispatchEvent(new Event('resize'));
+    visualViewport.dispatchEvent(new Event('scroll'));
+  }, [kb, pan]);
+}
+// The terminal's first and last rows inside the visible area.
+async function rowsVisible(p) {
+  return p.evaluate(() => {
+    const rows = document.querySelector('#term .xterm-rows').children;
+    const a = rows[0].getBoundingClientRect(), z = rows[term.rows - 1].getBoundingClientRect();
+    const top = visualViewport.offsetTop, bottom = top + visualViewport.height;
+    return {ok: a.top >= top - 1 && z.bottom <= bottom + 1,
+      text: `rows y${Math.round(a.top)}-${Math.round(z.bottom)} in ${Math.round(top)}-${Math.round(bottom)}`};
+  });
+}
+// Keyboard open: fewer rows, grok redrawn at them, all rows visible; closed:
+// the full-height rows again.
+async function keyboardCheck(b, device, kb, pan) {
+  const ctx = await b.newContext({...devices[device]});
+  try {
+    const p = await ctx.newPage();
+    await p.addInitScript(fakeKeyboard);
+    await p.goto(url);
+    const s0 = await settle(p, fitted, 15000);
+    if (!fitted(s0)) return check(false, 'no grok view at page size');
+    const box = await screen(p);
+    await p.touchscreen.tap(box.x + box.w / 2, box.y + box.h / 2);
+    await setKeyboard(p, kb, pan);
+    const s1 = await settle(p, x => fitted(x) && x.rows < s0.rows, 5000);
+    const v = await rowsVisible(p);
+    await setKeyboard(p, 0, false);
+    const s2 = await settle(p, x => fitted(x) && x.rows === s0.rows, 5000);
+    const ok = fitted(s1) && s1.rows < s0.rows && v.ok && fitted(s2) && s2.rows === s0.rows;
+    return check(ok, `${s0.rows}->${s1.rows}->${s2.rows} ${v.text}`);
+  } finally {
+    await ctx.close();
+  }
+}
+
 async function run() {
   const exe = process.env.AB_CHROME || undefined;
   const b = await chromium.launch(exe ? {executablePath: exe} : {});
@@ -86,6 +140,8 @@ async function run() {
     s = await settle(p, v => v.off !== tb, 2000);
     checks.touch_scroll = check(s.off < tb, `drag down 300px: moved ${s.off - tb}`);
     await ctx.close();
+    checks.keyboard_android = await keyboardCheck(b, 'Pixel 7', 320, false);
+    checks.keyboard_ios = await keyboardCheck(b, 'iPhone 14', 300, true);
     return {browser: b.version(), checks};
   } finally {
     await b.close();
