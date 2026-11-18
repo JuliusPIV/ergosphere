@@ -3587,7 +3587,11 @@ html, body { height: 100%; margin: 0; background: #111; color: #ddd; font: 14px 
    scroll bar can never move, and the page itself must never scroll. The
    normal screen keeps its scrollback (the wheel, or a touch drag). */
 html, body { overflow: hidden; overscroll-behavior: none; }
-#wrap { height: calc(100dvh - 28px); }
+#wrap { height: calc(var(--vvh, 100dvh) - 28px); }
+/* The page sits on the visible part of the screen: the script sets --vvh
+   and --vv-top from visualViewport, which a phone keyboard shrinks and iOS
+   pans. Fixed boxes are placed against the layout viewport. */
+body { position: fixed; left: 0; right: 0; top: var(--vv-top, 0px); }
 #term .xterm-viewport { overflow-y: hidden; }
 /* The browser neither pans nor zooms on the terminal: a one-finger drag is
    grok scrolling and a pinch changes the terminal text size (the script). */
@@ -3601,7 +3605,7 @@ html, body { overflow: hidden; overscroll-behavior: none; }
 #title { flex: 1 1 0; min-width: 7.5rem; }
 #title::before { content: "| "; }
 #version, #sid, #title-gap { display: none; }
-#wrap { height: calc(100vh - 56px); height: calc(100dvh - 56px); }
+#wrap { height: calc(100vh - 56px); height: calc(var(--vvh, 100dvh) - 56px); }
 }
 </style>
 </head>
@@ -4009,10 +4013,25 @@ function onPinchEnd(ev) {
   if (ev.touches.length >= 2) return;
   endPinch();
 }
-window.addEventListener("resize", function () {
+// A phone keyboard shrinks only the visual viewport (Chrome on Android
+// since 108, Safari on iOS), and iOS pans it to show the focused field. The
+// page follows it and refits, so grok redraws its input line above the
+// keyboard and again at full height when the keyboard closes.
+function followViewport() {
+  var vv = window.visualViewport;
+  if (vv) {
+    var root = document.documentElement.style;
+    root.setProperty("--vvh", vv.height + "px");
+    root.setProperty("--vv-top", vv.offsetTop + "px");
+  }
   if (!termOpened) return;
   try { fit.fit(); } catch (err) {}
-});
+}
+window.addEventListener("resize", followViewport);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", followViewport);
+  window.visualViewport.addEventListener("scroll", followViewport);
+}
 function resumeAskOpen() {
   return !document.getElementById("resume-ask").hidden;
 }
