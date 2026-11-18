@@ -2,7 +2,9 @@
 # It sets the DEC modes grok sets (1049, 1000, 1002, 1003, 1006, 1015, 2004,
 # 25l, 2026 frames), shows a 400-line scrollable view with a right-edge
 # scroll bar that takes SGR wheel, press and drag, and keeps a status line
-# on the last row: "off=<offset>/<max> size=<rows>x<cols> last=<event>".
+# on the last row: "off=<offset>/<max> size=<rows>x<cols> n=<wheel reports
+# handled> last=<event> $".  The "$" ends it: the page can see a frame half
+# drawn, and a reading without it is not one.
 import fcntl
 import os
 import re
@@ -19,6 +21,7 @@ fd = sys.stdin.fileno()
 tty.setraw(fd)
 off = None
 last = "none"
+wheels = 0
 drag = False
 
 
@@ -42,8 +45,8 @@ def draw():
         txt = LINES[off + y] if off + y < len(LINES) else ""
         bar = "█" if thumb_y <= y < thumb_y + thumb_h else "│"
         s.append(("\x1b[%d;1H\x1b[2K%s\x1b[%d;%dH%s" % (y + 1, txt[:cols - 1], y + 1, cols, bar)).encode())
-    s.append(("\x1b[%d;1H\x1b[2K\x1b[7m off=%d/%d size=%dx%d last=%s \x1b[0m"
-              % (rows, off, maxoff, rows, cols, last)).encode())
+    status = " off=%d/%d size=%dx%d n=%d last=%s $" % (off, maxoff, rows, cols, wheels, last)
+    s.append(("\x1b[%d;1H\x1b[2K\x1b[7m%s\x1b[0m" % (rows, status[:cols - 1])).encode())
     s.append(b"\x1b[?2026l")
     out.write(b"".join(s))
     out.flush()
@@ -56,13 +59,27 @@ def bar_to_off(y, view, maxoff):
 
 out.write(b"\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?1015h\x1b[?2004h")
 out.flush()
-signal.signal(signal.SIGWINCH, lambda *a: draw())
+# A resize only wakes the main loop, which redraws.  Drawing inside the
+# handler let a second SIGWINCH start a frame inside the first one.
+wake_r, wake_w = os.pipe()
+os.set_blocking(wake_r, False)
+os.set_blocking(wake_w, False)
+signal.set_wakeup_fd(wake_w)
+signal.signal(signal.SIGWINCH, lambda *a: None)
 cols, view, maxoff = draw()
 SGR = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
 while True:
     try:
-        ready, _, _ = select.select([fd], [], [], 1)
-        if not ready:
+        ready, _, _ = select.select([fd, wake_r], [], [], 1)
+        if wake_r in ready:
+            while True:
+                try:
+                    if not os.read(wake_r, 512):
+                        break
+                except BlockingIOError:
+                    break
+            cols, view, maxoff = draw()
+        if fd not in ready:
             continue
         d = os.read(fd, 4096)
     except InterruptedError:
@@ -78,6 +95,7 @@ while True:
     for m in SGR.finditer(d):
         b, x, y, fin = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4)
         if b & 64:
+            wheels += 1
             off += 3 if b & 1 else -3
             last = "wheel%s" % ("Dn" if b & 1 else "Up")
         elif (b & 3) == 0 and fin == b"M" and not (b & 32):
