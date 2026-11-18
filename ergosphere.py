@@ -3342,9 +3342,31 @@ function renderAgents() {
   fillOptions(el("add-name"), free, "");
   el("add").disabled = !free.length;
 }
+var restarting = false;
+// Bumped by every poll and every restart click, so a reply from a poll that
+// started before a newer poll or a restart attempt is dropped.
+var pollSeq = 0;
 function renderRestart() {
   say("sessions", "Running in this server: " + state.sessions + ". Restart needs zero.");
-  el("restart").disabled = state.sessions !== 0;
+  el("restart").disabled = restarting || state.sessions !== 0;
+}
+// /session-info with no id reads only this server's LIVE table (no /proc
+// scan), so a 2 s poll is cheap. alive matches the restart gate's count.
+function pollSessions() {
+  if (restarting || document.hidden) return;
+  var seq = ++pollSeq;
+  fetch("/session-info", {cache: "no-store"}).then(function (resp) {
+    return resp.ok ? resp.json() : null;
+  }).then(function (data) {
+    var i, n = 0;
+    if (seq !== pollSeq || restarting || !data || !Array.isArray(data.sessions)) return;
+    for (i = 0; i < data.sessions.length; i++) if (data.sessions[i].alive) n++;
+    if (n !== state.sessions) {
+      state.sessions = n;
+      say("restart-msg", "");
+      renderRestart();
+    }
+  }).catch(function () {});
 }
 function agentResult(res) {
   if (res.ok && res.data.agents) {
@@ -3435,11 +3457,14 @@ function waitFor(origin, oldStart, tries) {
   });
 }
 el("restart").addEventListener("click", function () {
+  restarting = true;
+  pollSeq++;
   el("restart").disabled = true;
   say("restart-msg", "Restarting...");
   fetch("/health", {cache: "no-store"}).then(function (resp) { return resp.json(); }).then(function (health) {
     return post({action: "restart"}).then(function (res) {
       if (!res.ok) {
+        restarting = false;
         say("restart-msg", res.data.error || "could not restart");
         if (typeof res.data.sessions === "number") {
           state.sessions = res.data.sessions;
@@ -3456,6 +3481,7 @@ el("restart").addEventListener("click", function () {
       waitFor(location.protocol + "//" + host + ":" + res.data.port, health.started, 60);
     });
   }).catch(function () {
+    restarting = false;
     say("restart-msg", "could not restart");
     el("restart").disabled = false;
   });
@@ -3463,6 +3489,7 @@ el("restart").addEventListener("click", function () {
 renderServer();
 renderAgents();
 renderRestart();
+setInterval(pollSessions, 2000);
 </script>
 </body>
 </html>
