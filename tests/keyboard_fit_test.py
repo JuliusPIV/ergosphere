@@ -21,6 +21,7 @@ stand-in TUI is tests/ab/fakegrok.py.
 """
 import json
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -146,7 +147,7 @@ def run_browser():
         grok = os.path.join(bindir, "grok")
         # argv[0] must be "grok" for the server's /proc check.
         Path(grok).write_text('#!/bin/bash\nexec -a grok %s -B %s "$@"\n' % (
-            sys.executable, ROOT / "tests" / "ab" / "fakegrok.py"))
+            shlex.quote(sys.executable), shlex.quote(str(ROOT / "tests" / "ab" / "fakegrok.py"))))
         os.chmod(grok, 0o755)
         port = free_port()
         cfg = os.path.join(tmp, "ergosphere.json")
