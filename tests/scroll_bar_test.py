@@ -42,7 +42,7 @@ const state = p => p.evaluate(() => {
     const c = line && line.getCell(term.cols - 1);
     if (c && c.getChars() === '█') thumb.push(y + 1);
   }
-  const m = /off=(\d+)\/(\d+) size=(\d+)x(\d+) last=(\S+)/.exec(text);
+  const m = /off=(\d+)\/(\d+) size=(\d+)x(\d+) n=\d+ last=(\S+)/.exec(text);
   return {off: m ? +m[1] : -1, max: m ? +m[2] : -1, fitted: !!m && +m[3] === term.rows && +m[4] === term.cols,
     last: m ? m[5] : '', thumb, screen: buf.type};
 });
