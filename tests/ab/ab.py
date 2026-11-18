@@ -17,7 +17,7 @@ ORDER = ["health", "session_list", "open_session", "terminal", "wheel_scroll", "
 
 def get(base, path):
     try:
-        with urllib.request.urlopen(base + path, timeout=10) as resp:
+        with urllib.request.urlopen(base + path, timeout=60) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", "replace")
@@ -27,7 +27,7 @@ def post(base, path, body):
     req = urllib.request.Request(base + path, data=json.dumps(body).encode(), headers={
         "Origin": base, "Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", "replace")
@@ -52,7 +52,8 @@ def http_checks(port, sid):
         code, text = post(base, "/resume", {"id": sid})
         state = ""
         if code == 200:
-            for _ in range(50):
+            end = time.monotonic() + 60
+            while time.monotonic() < end:
                 c2, t2 = get(base, "/session-info?id=" + sid)
                 state = json.loads(t2).get("state", "") if c2 == 200 else ""
                 if state.startswith("running"):

@@ -19,7 +19,7 @@ Ergosphere installer (installs the latest release unless --version is given)
 With a terminal it asks: Automatic (recommended) or Manual? [A/m]
 No terminal means automatic. Prerequisites are checked first and never installed.
   --auto       automatic, no questions
-  --manual     ask install dir, port, bind, optional agent (on /dev/tty)
+  --manual     ask install dir, port (also offers 8080, 8081), bind, optional agent (on /dev/tty)
   --dir DIR    install dir (default: \$HOME/.local/share/ergosphere)
   --port N     port (default: ERGOSPHERE_PORT, else ergosphere.json, else 9241)
   --bind ADDR  IPv4 address or localhost (default: ergosphere.json, else 127.0.0.1)
@@ -213,12 +213,89 @@ ask_dir() {
   if [[ -n "$REPLY" ]]; then set_dir "$REPLY"; fi
 }
 
-# Asked after the config is read, so Enter keeps the saved values.
+# Offers the current port, then the ports in ERGOSPHERE_INSTALL_PORT_OFFERS
+# (default 8080 8081), or takes a typed port. List entries are letters, so
+# every number stays a port. Any answer counts as a given port, as a typed
+# one did before the list.
+ask_port() {
+  local p n i keys=abcdefghi ports=("$PORT")
+  for p in ${ERGOSPHERE_INSTALL_PORT_OFFERS-8080 8081}; do
+    if [[ "$p" != "$PORT" && ${#ports[@]} -lt ${#keys} ]]; then ports+=("$p"); fi
+  done
+  printf 'Port:\n' >/dev/tty
+  for i in "${!ports[@]}"; do printf '  %s) %s\n' "${keys:i:1}" "${ports[$i]}" >/dev/tty; done
+  ask "Choose a-${keys:${#ports[@]}-1:1} or type a port [a]: "
+  if [[ -z "$REPLY" ]]; then return 0; fi
+  n=${REPLY,,}
+  if [[ "$n" =~ ^[a-i]$ ]]; then
+    p=${keys%%"$n"*}
+    (( ${#p} < ${#ports[@]} )) || fail check "answer a-${keys:${#ports[@]}-1:1} or a port: $REPLY"
+    n=${ports[${#p}]}
+  fi
+  set_port "$n"
+  ARG_PORT=$PORT
+}
+
+# Prints "pid name" of a process listening on TCP port $1, when this user
+# can see its sockets, or nothing.
+port_holder() {
+  "$PYTHON" -I -c '
+import os, sys
+port, inodes = int(sys.argv[1]), set()
+for t in ("/proc/net/tcp", "/proc/net/tcp6"):
+    try:
+        rows = open(t).read().splitlines()[1:]
+    except OSError:
+        continue
+    for row in rows:
+        c = row.split()
+        if len(c) > 9 and c[3] == "0A" and int(c[1].rsplit(":", 1)[1], 16) == port:
+            inodes.add("socket:[%s]" % c[9])
+for pid in sorted((p for p in os.listdir("/proc") if p.isdigit()), key=int):
+    try:
+        if any(os.readlink("/proc/%s/fd/%s" % (pid, fd)) in inodes for fd in os.listdir("/proc/%s/fd" % pid)):
+            print(pid, open("/proc/%s/comm" % pid).read().strip())
+            sys.exit(0)
+    except OSError:
+        pass' "$1" 2>/dev/null </dev/null || true
+}
+
+# True when BIND:PORT answers and is not this install's server. Sets HELD_BY.
+port_taken() {
+  local h
+  probe "$BIND" "$PORT"
+  case "$PROBE" in
+    down) return 1 ;;
+    match|moved)
+      probe_script
+      [[ "$PROBE_SCRIPT" != "$(realpath -m -- "$DEST/ergosphere.py")" ]] || return 1
+      HELD_BY="an Ergosphere installed in ${PROBE_SCRIPT%/ergosphere.py} (pid $PROBE_PID)" ;;
+    *)
+      h=$(port_holder "$PORT")
+      if [[ -n "$h" ]]; then HELD_BY="pid ${h%% *} (${h#* })"; else HELD_BY="a program this user cannot see"; fi ;;
+  esac
+  return 0
+}
+
+# Asked after the config is read, so Enter keeps the saved values. The final
+# bind:port must be free or this install's server; otherwise port and bind
+# are asked again, up to 3 times. Nothing is changed before this.
 ask_manual() {
-  ask "Port [${PORT}]: "
-  if [[ -n "$REPLY" ]]; then set_port "$REPLY"; ARG_PORT=$PORT; fi
-  ask "Bind [${BIND}] (anything but 127.0.0.1 lets anyone who reaches the port run grok as this user): "
-  if [[ -n "$REPLY" ]]; then set_bind "$REPLY"; ARG_BIND=$BIND; fi
+  local cur=$PORT arg=$ARG_PORT tries=0 p
+  while :; do
+    ask_port
+    ask "Bind [${BIND}] (anything but 127.0.0.1 lets anyone who reaches the port run grok as this user): "
+    if [[ -n "$REPLY" ]]; then set_bind "$REPLY"; ARG_BIND=$BIND; fi
+    port_taken || break
+    tries=$((tries + 1))
+    if [[ "$PORT" == 8080 ]]; then p=" (llama.cpp's llama-server uses 8080 by default)"; else p=""; fi
+    if (( tries >= 3 )); then
+      fail check "${BIND}:${PORT} is in use by ${HELD_BY}${p}; asked 3 times, nothing was changed"
+    fi
+    printf 'Warning: %s:%s is in use by %s%s; pick another port or bind.\n' "$BIND" "$PORT" "$HELD_BY" "$p" >/dev/tty
+    PORT=$cur ARG_PORT=$arg
+  done
+  printf 'port: %s\n' "$PORT"
   ask "Agent name for ergosphere.json (optional, Enter to skip): "
   AGENT=$REPLY
   if [[ -n "$AGENT" ]]; then
@@ -318,16 +395,21 @@ probe_own() {
 # A matching /health may come from another install. Compare the running
 # script path (resolved against the server's cwd) with this install's.
 same_install() {
+  probe_script
+  if [[ "$PROBE_SCRIPT" != "$(realpath -m -- "$DEST/ergosphere.py")" ]]; then
+    fail check "$PROBE_AT is used by an Ergosphere installed in ${PROBE_SCRIPT%/ergosphere.py}; it was not touched"
+  fi
+}
+
+# Sets PROBE_SCRIPT to the resolved ergosphere.py that PROBE_PID runs.
+probe_script() {
   local arg script="" cwd
   while IFS= read -r -d '' arg; do
     if [[ "$arg" == *ergosphere.py ]]; then script=$arg; break; fi
   done <"/proc/$PROBE_PID/cmdline"
   cwd=$(readlink "/proc/$PROBE_PID/cwd") || cwd=/
   if [[ "$script" != /* ]]; then script="$cwd/$script"; fi
-  script=$(realpath -m -- "$script")
-  if [[ "$script" != "$(realpath -m -- "$DEST/ergosphere.py")" ]]; then
-    fail check "$PROBE_AT is used by an Ergosphere installed in ${script%/ergosphere.py}; it was not touched"
-  fi
+  PROBE_SCRIPT=$(realpath -m -- "$script")
 }
 
 # Compare loaded runtime bytes, so chmod/touch and documentation edits do not
@@ -838,7 +920,7 @@ main() {
   DEST=$DEFAULT_DEST BIND=127.0.0.1 PORT=9241 ARG_BIND="" ARG_PORT="" MODE="" WANT_CHECK=0 ASSUME_YES=0
   OLD_BIND="" OLD_PORT="" SRV_BIND="" SRV_PORT="" CFG_SOURCE="" CFG_BIND="" CFG_PORT="" AGENT_STATE=none AGENT_ADDED=0
   AGENT="" AGENT_DIR="" CFG_FILE="" LEGACY_FILE="" CFG_AGENTS="(none)" CFG_NOTE="" SERVER_NOTE="" PID=""
-  STAGE="" SRC="" STARTED_PID="" VERIFIED=0 PROBE="" PROBE_PID="" PROBE_DIGEST="" PROBE_AT=""
+  STAGE="" SRC="" STARTED_PID="" VERIFIED=0 PROBE="" PROBE_PID="" PROBE_DIGEST="" PROBE_AT="" PROBE_SCRIPT="" HELD_BY=""
   PYTHON="" CURL="" GROK="" BLOCKERS=() CHANGED=()
   export PYTHONDONTWRITEBYTECODE=1
   trap cleanup EXIT
