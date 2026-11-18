@@ -50,12 +50,11 @@ function fakeKeyboard() {
 async function state(p) {
   return p.evaluate(() => {
     const buf = term.buffer.active;
-    let grok = '';
-    for (let y = buf.length - 1; y >= 0 && !grok; y--) {
-      const t = buf.getLine(y) ? buf.getLine(y).translateToString(true) : '';
-      const m = /size=(\d+)x(\d+)/.exec(t);
-      if (m) grok = m[1] + 'x' + m[2];
-    }
+    // Only a complete status line on the last row counts: a frame can reach
+    // the page in pieces, and older rows hold earlier sizes.
+    const line = buf.getLine(buf.length - 1);
+    const m = /size=(\d+)x(\d+) n=\d+ last=\w+ \$/.exec(line ? line.translateToString(true) : '');
+    const grok = m ? m[1] + 'x' + m[2] : '';
     const el = document.querySelector('#term .xterm-rows');
     if (!el || !el.children[term.rows - 1]) return {rows: term.rows, cols: term.cols, grok};
     const rows = el.children;
@@ -81,7 +80,7 @@ async function device(b, name, kb, pan) {
   const p = await ctx.newPage();
   await p.addInitScript(fakeKeyboard);
   await p.goto(url);
-  const closed = await settle(p, drawn, 15000);
+  const closed = await settle(p, drawn, 30000);
   const box = await p.evaluate(() => document.querySelector('#term .xterm-screen').getBoundingClientRect().toJSON());
   await p.touchscreen.tap(box.left + box.width / 2, box.top + box.height / 2);
   await p.evaluate(([kb, pan]) => {
@@ -90,13 +89,13 @@ async function device(b, name, kb, pan) {
     visualViewport.dispatchEvent(new Event('resize'));
     if (pan) visualViewport.dispatchEvent(new Event('scroll'));
   }, [kb, pan]);
-  const open = await settle(p, s => drawn(s) && s.rows < closed.rows && s.lastVisible && s.firstVisible, 5000);
+  const open = await settle(p, s => drawn(s) && s.rows < closed.rows && s.lastVisible && s.firstVisible, 30000);
   await p.evaluate(() => {
     window.KB = null;
     visualViewport.dispatchEvent(new Event('resize'));
     visualViewport.dispatchEvent(new Event('scroll'));
   });
-  const reclosed = await settle(p, s => drawn(s) && s.rows === closed.rows, 5000);
+  const reclosed = await settle(p, s => drawn(s) && s.rows === closed.rows, 30000);
   await ctx.close();
   return {closed, open, reclosed};
 }

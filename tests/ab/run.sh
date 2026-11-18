@@ -8,7 +8,9 @@
 # itself breaks.  Optional: AB_CHROME (browser binary), NODE_PATH (playwright).
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SID=0f0e0d0c-0b0a-4908-8706-050403020100
+# A fresh id per run: Ergosphere finds a session's holder machine-wide via
+# /proc, so a fixed id makes concurrent runs on one machine block each other.
+SID="$(cat /proc/sys/kernel/random/uuid)" || exit 2
 for v in AB_A_DIR AB_B_DIR AB_PORT_A AB_PORT_B AB_OUT; do
   [ -n "${!v:-}" ] || { echo "run.sh: $v is not set" >&2; exit 2; }
 done
@@ -47,12 +49,17 @@ run_side() { # label code-dir port
   (cd "$w" && HOME="$w/home" ERGOSPHERE_CONFIG="$w/config.json" PATH="$w/bin:$PATH" \
      exec python3 -B "$code/ergosphere.py" --bind 127.0.0.1 --port "$port") >"$w/server.log" 2>&1 &
   pid=$!
-  for _ in $(seq 100); do grep -q ERGOSPHERE_READY "$w/server.log" && break; sleep 0.1; done
+  # Wait for the ready line, not a time: a loaded machine can take long to start.
+  for _ in $(seq 600); do
+    grep -q ERGOSPHERE_READY "$w/server.log" && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
   grep -q ERGOSPHERE_READY "$w/server.log" || log "$label: server not ready: $(tail -n 3 "$w/server.log")"
   python3 -B "$HERE/ab.py" http "$port" "$SID" >"$w/http.json" 2>"$w/http.err"
   if [ -z "$browser_off" ]; then
     brc=0
-    NODE_PATH="$pw_path" timeout 120 node "$HERE/browser.js" "$port" "$SID" >"$w/browser.json" 2>"$w/browser.err" || brc=$?
+    NODE_PATH="$pw_path" timeout 300 node "$HERE/browser.js" "$port" "$SID" >"$w/browser.json" 2>"$w/browser.err" || brc=$?
     [ -s "$w/browser.json" ] || printf '{"error":"browser.js exited %s with no result"}\n' "$brc" >"$w/browser.json"
   else
     printf '{"error":"%s"}\n' "$browser_off" >"$w/browser.json"
