@@ -44,11 +44,14 @@ const document = {
 const intervals = [];
 let infoBody = null;
 let refusal = null;
+let hold = false;
+let held = null;
 function reply(body, status) {
   status = status || 200;
   return Promise.resolve({ok: status === 200, status, json: () => Promise.resolve(body)});
 }
 function fetch(url) {
+  if (url === '/session-info' && hold) return new Promise((r) => { held = r; });
   if (url === '/session-info') return reply(infoBody);
   // Restart: refused with step.refuse, else /health never answers.
   if (refusal && url === '/health') return reply({started: 1});
@@ -66,8 +69,14 @@ const settle = () => new Promise((r) => setImmediate(() => setImmediate(() => se
   for (const step of steps) {
     refusal = step.refuse || null;
     infoBody = step.body;
+    hold = !!step.hold;
     if (step.click) { nodes.restart.listeners.click(); await settle(); }
-    for (const f of intervals) f();
+    if (step.release) {
+      held({ok: true, status: 200, json: () => Promise.resolve(step.release)});
+      held = null;
+    } else {
+      for (const f of intervals) f();
+    }
     await settle();
     out.push({text: nodes.sessions.textContent, disabled: nodes.restart.disabled, msg: document.getElementById('restart-msg').textContent});
   }
@@ -131,6 +140,12 @@ def main():
     one = {"sessions": [{"id": "e", "alive": True}]}
     steps.append({"click": True, "refuse": {"ok": False, "sessions": 1, "error": busy}, "body": one})
     steps.append({"body": {"sessions": []}})
+    # A poll goes out at zero and its reply is held; a session starts and a
+    # restart is refused with a count of one; then the old reply lands.  It
+    # must not reset the count to zero, clear the refusal or enable Restart.
+    steps.append({"hold": True, "body": None})
+    steps.append({"click": True, "refuse": {"ok": False, "sessions": 1, "error": busy},
+                  "release": {"sessions": []}})
     # Restart pressed at zero; while its request is out a session starts and
     # ends again.  The poll must not re-enable the button.
     steps.append({"click": True, "body": {"sessions": [{"id": "e", "alive": True}]}})
@@ -158,7 +173,7 @@ def main():
         print("%s %s: server counts %d; page shows %r, button %s" % (
             "PASS" if ok else "FAIL", name, count, seen["text"], "disabled" if seen["disabled"] else "enabled"))
         failed += not ok
-    refused, cleared = got[len(want)], got[len(want) + 1]
+    refused, cleared, stale = got[len(want)], got[len(want) + 1], got[len(want) + 3]
     if refused["disabled"] and refused["msg"] == busy:
         print("PASS refused restart: button disabled, %r shown" % refused["msg"])
     else:
@@ -169,6 +184,12 @@ def main():
     else:
         print("FAIL session ended after the refusal: page shows %r, button %s, message %r" % (
             cleared["text"], "disabled" if cleared["disabled"] else "enabled", cleared["msg"]))
+        failed += 1
+    if stale["disabled"] and stale["msg"] == busy and stale["text"].startswith("Running in this server: 1."):
+        print("PASS poll reply older than a refusal: count 1, button disabled, %r kept" % stale["msg"])
+    else:
+        print("FAIL poll reply older than a refusal: page shows %r, button %s, message %r" % (
+            stale["text"], "disabled" if stale["disabled"] else "enabled", stale["msg"]))
         failed += 1
     last = got[-1]
     if last["disabled"]:

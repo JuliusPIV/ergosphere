@@ -3343,6 +3343,9 @@ function renderAgents() {
   el("add").disabled = !free.length;
 }
 var restarting = false;
+// Bumped by every poll and every restart click, so a reply from a poll that
+// started before a newer poll or a restart attempt is dropped.
+var pollSeq = 0;
 function renderRestart() {
   say("sessions", "Running in this server: " + state.sessions + ". Restart needs zero.");
   el("restart").disabled = restarting || state.sessions !== 0;
@@ -3351,11 +3354,12 @@ function renderRestart() {
 // scan), so a 2 s poll is cheap. alive matches the restart gate's count.
 function pollSessions() {
   if (restarting || document.hidden) return;
+  var seq = ++pollSeq;
   fetch("/session-info", {cache: "no-store"}).then(function (resp) {
     return resp.ok ? resp.json() : null;
   }).then(function (data) {
     var i, n = 0;
-    if (restarting || !data || !Array.isArray(data.sessions)) return;
+    if (seq !== pollSeq || restarting || !data || !Array.isArray(data.sessions)) return;
     for (i = 0; i < data.sessions.length; i++) if (data.sessions[i].alive) n++;
     if (n !== state.sessions) {
       state.sessions = n;
@@ -3454,6 +3458,7 @@ function waitFor(origin, oldStart, tries) {
 }
 el("restart").addEventListener("click", function () {
   restarting = true;
+  pollSeq++;
   el("restart").disabled = true;
   say("restart-msg", "Restarting...");
   fetch("/health", {cache: "no-store"}).then(function (resp) { return resp.json(); }).then(function (health) {
