@@ -357,6 +357,7 @@ def session_updates_path(sid):
 
 BUTTON_LABEL = "Quit that CLI and resume here"
 ORPHAN_BUTTON_LABEL = "Quit that grok and resume here"
+TAKEOVER_LABEL = "Take over here"
 
 
 def read_proc_cmdline(pid):
@@ -477,6 +478,90 @@ def holder_can_quit(holder):
         and holder.get("via") == "cmdline"
         and not under_server(holder["pid"])
     )
+
+
+def holder_server(holder):
+    """pid of the other Ergosphere server whose own grok holds the session, or None.
+
+    Only a cmdline holder of kind web: its nearest grok-or-server ancestor
+    is an ergosphere.py that is not this process. A grok started from a web
+    session's shell is a CLI (a grok is met first) and gets None.
+    """
+    if not isinstance(holder, dict) or holder.get("via") != "cmdline" or holder.get("kind") != "web":
+        return None
+    for ppid in proc_ancestors(holder["pid"]):
+        if is_ergosphere_server(ppid):
+            return None if ppid == os.getpid() else ppid
+        if grok_cmdline(read_proc_cmdline(ppid)):
+            return None
+    return None
+
+
+def _proc_net_addr(text, v6):
+    # The kernel prints the address as 32-bit words in host order (%08X each);
+    # packing them little-endian gives the bytes in network order.
+    words = [int(text[i:i + 8], 16) for i in range(0, len(text), 8)]
+    raw = struct.pack("<%dI" % len(words), *words)
+    return str(ipaddress.IPv6Address(raw) if v6 else ipaddress.IPv4Address(raw))
+
+
+def server_address(spid):
+    """{host, port, tls} the Ergosphere server spid listens on, or None.
+
+    Its listening TCP socket: socket inodes from /proc/<spid>/fd matched
+    against LISTEN rows of /proc/net/tcp and tcp6. TLS is on only through
+    --tls-cert on its command line.
+    """
+    inodes = set()
+    fd_dir = "/proc/%d/fd" % spid
+    try:
+        names = os.listdir(fd_dir)
+    except OSError:
+        return None
+    for name in names:
+        try:
+            target = os.readlink(os.path.join(fd_dir, name))
+        except OSError:
+            continue
+        if target.startswith("socket:[") and target.endswith("]"):
+            inodes.add(target[8:-1])
+    if not inodes:
+        return None
+    args = read_proc_cmdline(spid).split(b"\0")
+    tls = any(arg == b"--tls-cert" or arg.startswith(b"--tls-cert=") for arg in args)
+    for path, v6 in (("/proc/net/tcp", False), ("/proc/net/tcp6", True)):
+        try:
+            with open(path) as fh:
+                rows = fh.read().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            fields = row.split()
+            if len(fields) < 10 or fields[3] != "0A" or fields[9] not in inodes:
+                continue
+            addr, _sep, port = fields[1].rpartition(":")
+            try:
+                return {"host": _proc_net_addr(addr, v6), "port": int(port, 16), "tls": tls}
+            except ValueError:
+                continue
+    return None
+
+
+def host_port(host, port):
+    return ("[%s]:%s" if ":" in host else "%s:%s") % (host, port)
+
+
+def held_server(holder):
+    """What the page shows for another server's grok: {pid, host, port, tls}, or None.
+
+    host and port are None when its listening socket was not found.
+    """
+    spid = holder_server(holder)
+    if spid is None:
+        return None
+    out = {"pid": spid, "host": None, "port": None, "tls": False}
+    out.update(server_address(spid) or {})
+    return out
 
 
 def holder_button(holder):
@@ -639,6 +724,21 @@ def busy_notice(sid, holder):
             "holder pid: %s\n"
             "%s\n"
         ) % (sid, pid, ORPHAN_BUTTON_LABEL)
+    server = held_server(holder) if holder.get("kind") == "web" else None
+    if server:
+        where = "on this machine"
+        if server["port"]:
+            where = "at %s on this machine" % host_port(server["host"], server["port"])
+        return (
+            "This session is open in another Ergosphere server %s. "
+            "This page cannot attach to that terminal. "
+            "Open it there, or take it over here: that quits its grok, which ends "
+            "the session on that server and on every device using it there. "
+            "Resume is offered here when that grok exits.\n"
+            "session id: %s\n"
+            "holder pid: %s\n"
+            "server pid: %s\n"
+        ) % (where, sid, pid, server["pid"])
     if holder.get("kind") == "web":
         return (
             "This session is already open in a web dashboard on this machine. "
@@ -707,6 +807,12 @@ def release_holder(sid):
             "via": holder["via"],
             "kind": holder["kind"],
         }
+    return term_holder(sid, holder, raw)
+
+
+def term_holder(sid, holder, raw):
+    """SIGTERM the holder grok after checking raw (its command line) names sid; wait for exit."""
+    pid = holder["pid"]
     if pid_gone(pid):
         return True, {"ok": True, "pid": pid, "already": "gone"}
     if not grok_cmdline(raw) or not cmdline_contains_sid(raw, sid):
@@ -735,6 +841,30 @@ def release_holder(sid):
         "error": "holder still running after SIGTERM",
         "pid": pid,
     }
+
+
+def take_from_server(sid):
+    """Quit another Ergosphere server's own grok on sid (take-over) and wait until it is gone.
+
+    Signals only a cmdline holder whose nearest grok-or-server ancestor is
+    another ergosphere.py (holder_server), read twice so a pid reused in
+    between is not signalled. Never the other server itself.
+    """
+    holder = session_holder(sid)
+    if not holder:
+        return False, {"ok": False, "error": "no holder"}
+    pid = holder["pid"]
+    spid = holder_server(holder)
+    if spid is None or pid <= 1 or pid == os.getpid():
+        print("take refuse pid=%s sid=%s kind=%s not another server's grok" % (pid, sid, holder.get("kind")),
+              flush=True)
+        return False, {"ok": False, "error": "not another Ergosphere server's grok", "pid": pid,
+                       "kind": holder.get("kind")}
+    raw = read_proc_cmdline(pid)
+    if holder_server(holder) != spid:
+        return False, {"ok": False, "error": "that grok changed; try again", "pid": pid}
+    print("take over pid=%s sid=%s from server pid=%s" % (pid, sid, spid), flush=True)
+    return term_holder(sid, holder, raw)
 
 
 def apply_session_update(state, upd, owner):
@@ -3532,7 +3662,8 @@ def chat_page(resume="", holder=None, running=False, title=""):
     # A resume that already has a holder must show the notice in this HTML.
     # The quit button cannot wait for a websocket frame to learn the id.
     held = isinstance(holder, dict)
-    can_quit = bool(held and holder_can_quit(holder))
+    server = held_server(holder) if held else None
+    can_quit = bool(held and (holder_can_quit(holder) or server))
     sid_js = resume if isinstance(resume, str) and SID_TOKEN_RE.match(resume) else ""
     if held:
         busy_css = (
@@ -3551,6 +3682,7 @@ def chat_page(resume="", holder=None, running=False, title=""):
         visible_sid = "" if running else sid_js
     button_attr = "" if can_quit else " hidden"
     hold_js = "true" if held else "false"
+    button = TAKEOVER_LABEL if server else holder_button(holder)
     run_js = "true" if running and not held else "false"
     if not isinstance(title, str):
         title = ""
@@ -3582,6 +3714,8 @@ html, body { height: 100%; margin: 0; background: #111; color: #ddd; font: 14px 
 @@BUSY_CSS@@
 #busy button { font: 14px/1.45 ui-monospace, monospace; color: #fff; background: #000; border: 1px solid #fff; padding: 0 0.5rem; cursor: pointer; margin-top: 0.6rem; }
 #busy button:hover, #busy button:focus { background: #fff; color: #000; outline: none; }
+#busy a { color: #ddd; margin-right: 0.8rem; }
+#busy a[hidden] { display: none; }
 @@TERM_CSS@@
 /* grok draws on the alternate screen, which has no scrollback: xterm's
    scroll bar can never move, and the page itself must never scroll. The
@@ -3612,7 +3746,7 @@ body { position: fixed; left: 0; right: 0; top: var(--vv-top, 0px); }
 <body>
 <div id="bar"><a href="/">← Session List</a> | <button id="stop" type="button">Quit</button> | <span id="status">@@STATUS@@</span> | <span id="title"@@TITLE_ATTR@@>@@TITLE@@</span><span id="title-gap"@@GAP_ATTR@@> | </span><span id="sid">Session ID: @@SID_TEXT@@</span></div>
 <div id="version">v@@VERSION@@</div>
-<div id="wrap"><div id="stage"><div id="resume-ask" hidden><div>Resume this session?</div><button type="button" id="resume-yes">Resume</button><button type="button" id="resume-no">Cancel</button></div><div id="busy"><div id="busy-text">@@NOTICE@@</div><button id="take" type="button"@@BUTTON_ATTR@@>@@BUTTON_LABEL@@</button></div><div id="term"></div></div></div>
+<div id="wrap"><div id="stage"><div id="resume-ask" hidden><div>Resume this session?</div><button type="button" id="resume-yes">Resume</button><button type="button" id="resume-no">Cancel</button></div><div id="busy"><div id="busy-text">@@NOTICE@@</div><a id="open-there" hidden>Open it there</a><button id="take" type="button"@@BUTTON_ATTR@@>@@BUTTON_LABEL@@</button> <a id="busy-back" href="/" hidden>Back</a></div><div id="term"></div></div></div>
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
 <script>
@@ -3721,6 +3855,8 @@ var stopping = false;
 var ended = false;
 var sid = @@SID_JS@@;
 var hold = @@HOLD_JS@@;
+// Another Ergosphere server's own grok holds it: {pid, host, port, tls}, or null.
+var heldServer = @@SERVER_JS@@;
 var running = @@RUN_JS@@;
 var termOpened = false;
 var sawOutput = false;
@@ -4389,6 +4525,7 @@ function connect() {
             var busy = document.getElementById("busy");
             document.getElementById("busy-text").textContent = msg.notice || msg.text;
             var btn = document.getElementById("take");
+            showHeldServer(msg.server);
             if (msg.canQuit) {
               btn.hidden = false;
               btn.disabled = false;
@@ -4464,19 +4601,43 @@ document.getElementById("stop").addEventListener("click", function () {
   setStatus("quitting", false);
   if (sock && sock.readyState === 1) sock.send(JSON.stringify({type: "stop"}));
 });
+// A link to the other server's page, only where this page's own host reaches it.
+function serverUrl(info) {
+  if (!info || !info.host || !info.port || !sid) return "";
+  var page = location.hostname.replace(/^\\[|\\]$/g, "");
+  function loop(h) { return h === "localhost" || h === "::1" || /^127\\./.test(h); }
+  var host = info.host;
+  if (host === "0.0.0.0" || host === "::") host = page;
+  else if (!(loop(host) && loop(page)) && host !== page) return "";
+  if (host.indexOf(":") >= 0) host = "[" + host + "]";
+  return (info.tls ? "https://" : "http://") + host + ":" + info.port + "/chat?resume=" + encodeURIComponent(sid);
+}
+function showHeldServer(info) {
+  heldServer = info || null;
+  var link = document.getElementById("open-there");
+  var url = serverUrl(heldServer);
+  link.hidden = !url;
+  if (url) link.href = url;
+  document.getElementById("busy-back").hidden = !heldServer;
+}
 document.getElementById("take").addEventListener("click", function () {
   if (!sid || !hold) return;
+  var server = heldServer;
+  if (server && !confirm("Take over this session here?\\n\\nThis quits its grok on the other Ergosphere server" +
+      (server.port ? " (port " + server.port + ")" : "") +
+      ". That ends the session on that server and on every device using it there, then resumes it here.")) return;
   var btn = document.getElementById("take");
   btn.disabled = true;
   taking = true;
-  setStatus("quitting that CLI", false);
-  fetch("/take?id=" + encodeURIComponent(sid), {method: "POST", cache: "no-store"}).then(function (resp) {
+  var failed = server ? "could not end it on the other server" : "could not quit that CLI";
+  setStatus(server ? "ending it on the other server" : "quitting that CLI", false);
+  fetch("/take?id=" + encodeURIComponent(sid) + (server ? "&server=1" : ""), {method: "POST", cache: "no-store"}).then(function (resp) {
     return resp.json().then(function (data) {
       return {ok: resp.ok, data: data};
     });
   }).then(function (res) {
     if (!res.ok || !res.data || !res.data.ok) {
-      var why = (res.data && res.data.error) || "could not quit that CLI";
+      var why = (res.data && res.data.error) || failed;
       setStatus(why, false);
       document.getElementById("busy-text").textContent =
         document.getElementById("busy-text").textContent + "\\n" + why;
@@ -4487,7 +4648,7 @@ document.getElementById("take").addEventListener("click", function () {
     taking = false;
     openAfterHolder(true);
   }).catch(function () {
-    setStatus("could not quit that CLI", false);
+    setStatus(failed, false);
     btn.disabled = false;
     taking = false;
   });
@@ -4519,7 +4680,7 @@ function pollHold() {
 setInterval(pollHold, 1000);
 startTitlePoll();
 if (sid) pollTitle();
-if (hold) pollHold();
+if (hold) { showHeldServer(heldServer); pollHold(); }
 if (!hold && running) { ensureTerm(); requestAnimationFrame(connect); }
 else if (!hold) { ensureTerm(); setSid(sid); showEnded(); }
 </script>
@@ -4532,7 +4693,9 @@ else if (!hold) { ensureTerm(); setSid(sid); showEnded(); }
     ).replace("@@SID_TEXT@@", html.escape(visible_sid)).replace(
         "@@NOTICE@@", html.escape(notice)
     ).replace("@@BUTTON_ATTR@@", button_attr).replace(
-        "@@BUTTON_LABEL@@", html.escape(holder_button(holder))
+        "@@BUTTON_LABEL@@", html.escape(button)
+    ).replace(
+        "@@SERVER_JS@@", json.dumps(server)
     ).replace(
         "@@SID_JS@@", json.dumps(sid_js)
     ).replace("@@HOLD_JS@@", hold_js).replace("@@RUN_JS@@", run_js).replace(
@@ -5190,8 +5353,9 @@ class Handler(BaseHTTPRequestHandler):
     def _take(self):
         # The button posts this. It does not run on connect. Quit only a
         # cmdline holder (a CLI or an orphan). A grok with an ergosphere.py
-        # ancestor belongs to a web session and is not signalled. The page
-        # then posts /resume.
+        # ancestor belongs to a web session and is not signalled, except
+        # with server=1: the take-over of another server's own grok, asked
+        # for after a confirm on the page. The page then posts /resume.
         # Only a UUID-shaped id with a session directory on disk is taken.
         self._drain_body()
         qs = parse_qs(urlparse(self.path).query, keep_blank_values=False)
@@ -5199,7 +5363,10 @@ class Handler(BaseHTTPRequestHandler):
         if not SID_TOKEN_RE.match(sid) or session_dir_for(sid) is None:
             self._json(400, {"ok": False, "error": "unknown session"})
             return
-        ok, info = release_holder(sid)
+        if one_query(qs, "server") == "1":
+            ok, info = take_from_server(sid)
+        else:
+            ok, info = release_holder(sid)
         if not ok and info.get("error") == "no holder":
             self._json(404, info)
             return
@@ -5406,7 +5573,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 if holder:
                     notice = busy_notice(sid, holder)
-                    can_quit = holder_can_quit(holder)
+                    server = held_server(holder)
+                    can_quit = holder_can_quit(holder) or server is not None
                     self._send_frame(2, notice.replace("\n", "\r\n").encode("utf-8"))
                     note = json.dumps({
                         "type": "status",
@@ -5416,7 +5584,8 @@ class Handler(BaseHTTPRequestHandler):
                         "via": holder["via"],
                         "kind": holder.get("kind") or "cli",
                         "canQuit": can_quit,
-                        "button": holder_button(holder) if can_quit else "",
+                        "button": (TAKEOVER_LABEL if server else holder_button(holder)) if can_quit else "",
+                        "server": server,
                         "notice": notice,
                     })
                     self._send_frame(1, note.encode("utf-8"))
