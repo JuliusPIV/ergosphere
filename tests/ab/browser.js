@@ -28,7 +28,7 @@ function countWheelReports() {
   };
 }
 
-// The stand-in's status line on the last row as {off, max, rows, cols, n},
+// The stand-in's status line on the last row as {off, max, rows, cols, n, last},
 // plus the page terminal's size and the wheel reports the page sent.
 async function status(p) {
   const r = await p.evaluate(() => {
@@ -40,7 +40,7 @@ async function status(p) {
   });
   const m = STATUS.exec(r.text);
   const s = {text: r.text.trim(), termRows: r.rows, termCols: r.cols, sent: r.sent};
-  return m ? {...s, ok: true, off: +m[1], max: +m[2], rows: +m[3], cols: +m[4], n: +m[5]} : {...s, ok: false};
+  return m ? {...s, ok: true, off: +m[1], max: +m[2], rows: +m[3], cols: +m[4], n: +m[5], last: m[6]} : {...s, ok: false};
 }
 const fitted = s => s.ok && s.rows === s.termRows && s.cols === s.termCols;
 // The stand-in, at the page's size, has handled every wheel report the page
@@ -148,6 +148,30 @@ async function run() {
     ({s, met} = await until(p, caughtUp(before)));
     checks.wheel_scroll = check(met && s.off < before.off,
       met ? `3 notches up: moved ${s.off - before.off}` : `not handled: ${seen(s)}`);
+
+    // grok's scroll bar is the last column: drag it from the bottom row of
+    // the view to the top row.  The stand-in sets last=release when it has
+    // handled the drag's release, and every motion before it, so that
+    // reading is the drag's end state.  On a page that sends grok no drag
+    // the wait runs out.
+    const cw = g.w / s.cols, ch = g.h / s.rows, bx = g.x + g.w - cw / 2;
+    const low = g.y + g.h - ch * 1.5, high = g.y + ch / 2;
+    async function barDrag(ya, yb) {
+      await p.mouse.move(bx, ya);
+      await p.mouse.down();
+      await p.mouse.move(bx, yb, {steps: 10});
+      await p.mouse.up();
+    }
+    const fromOff = s.off;
+    await barDrag(low, high);
+    ({s, met} = await until(p, x => fitted(x) && x.last === 'release' && x.off <= x.max / 20));
+    checks.bar_drag = check(met, `bar to top: off ${fromOff}->${s.off} of ${s.max} last=${s.last}`);
+    // Back to the bottom, so the later checks start where grok started.
+    if (met) {
+      await barDrag(high, low);
+      ({s, met} = await until(p, x => fitted(x) && x.last === 'release' && x.off === x.max));
+      if (!met) checks.bar_drag = check(false, `bar back to bottom: off ${s.off} of ${s.max} last=${s.last}`);
+    }
 
     const r0 = s.rows, c0 = s.cols;
     await p.setViewportSize({width: 900, height: 600});
