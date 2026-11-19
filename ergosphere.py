@@ -3342,9 +3342,31 @@ function renderAgents() {
   fillOptions(el("add-name"), free, "");
   el("add").disabled = !free.length;
 }
+var restarting = false;
+// Bumped by every poll and every restart click, so a reply from a poll that
+// started before a newer poll or a restart attempt is dropped.
+var pollSeq = 0;
 function renderRestart() {
   say("sessions", "Running in this server: " + state.sessions + ". Restart needs zero.");
-  el("restart").disabled = state.sessions !== 0;
+  el("restart").disabled = restarting || state.sessions !== 0;
+}
+// /session-info with no id reads only this server's LIVE table (no /proc
+// scan), so a 2 s poll is cheap. alive matches the restart gate's count.
+function pollSessions() {
+  if (restarting || document.hidden) return;
+  var seq = ++pollSeq;
+  fetch("/session-info", {cache: "no-store"}).then(function (resp) {
+    return resp.ok ? resp.json() : null;
+  }).then(function (data) {
+    var i, n = 0;
+    if (seq !== pollSeq || restarting || !data || !Array.isArray(data.sessions)) return;
+    for (i = 0; i < data.sessions.length; i++) if (data.sessions[i].alive) n++;
+    if (n !== state.sessions) {
+      state.sessions = n;
+      say("restart-msg", "");
+      renderRestart();
+    }
+  }).catch(function () {});
 }
 function agentResult(res) {
   if (res.ok && res.data.agents) {
@@ -3435,11 +3457,14 @@ function waitFor(origin, oldStart, tries) {
   });
 }
 el("restart").addEventListener("click", function () {
+  restarting = true;
+  pollSeq++;
   el("restart").disabled = true;
   say("restart-msg", "Restarting...");
   fetch("/health", {cache: "no-store"}).then(function (resp) { return resp.json(); }).then(function (health) {
     return post({action: "restart"}).then(function (res) {
       if (!res.ok) {
+        restarting = false;
         say("restart-msg", res.data.error || "could not restart");
         if (typeof res.data.sessions === "number") {
           state.sessions = res.data.sessions;
@@ -3456,6 +3481,7 @@ el("restart").addEventListener("click", function () {
       waitFor(location.protocol + "//" + host + ":" + res.data.port, health.started, 60);
     });
   }).catch(function () {
+    restarting = false;
     say("restart-msg", "could not restart");
     el("restart").disabled = false;
   });
@@ -3463,6 +3489,7 @@ el("restart").addEventListener("click", function () {
 renderServer();
 renderAgents();
 renderRestart();
+setInterval(pollSessions, 2000);
 </script>
 </body>
 </html>
@@ -3560,7 +3587,11 @@ html, body { height: 100%; margin: 0; background: #111; color: #ddd; font: 14px 
    scroll bar can never move, and the page itself must never scroll. The
    normal screen keeps its scrollback (the wheel, or a touch drag). */
 html, body { overflow: hidden; overscroll-behavior: none; }
-#wrap { height: calc(100dvh - 28px); }
+#wrap { height: calc(var(--vvh, 100dvh) - 28px); }
+/* The page sits on the visible part of the screen: the script sets --vvh
+   and --vv-top from visualViewport, which a phone keyboard shrinks and iOS
+   pans. Fixed boxes are placed against the layout viewport. */
+body { position: fixed; left: 0; right: 0; top: var(--vv-top, 0px); }
 #term .xterm-viewport { overflow-y: hidden; }
 /* The browser neither pans nor zooms on the terminal: a one-finger drag is
    grok scrolling and a pinch changes the terminal text size (the script). */
@@ -3574,7 +3605,7 @@ html, body { overflow: hidden; overscroll-behavior: none; }
 #title { flex: 1 1 0; min-width: 7.5rem; }
 #title::before { content: "| "; }
 #version, #sid, #title-gap { display: none; }
-#wrap { height: calc(100vh - 56px); height: calc(100dvh - 56px); }
+#wrap { height: calc(100vh - 56px); height: calc(var(--vvh, 100dvh) - 56px); }
 }
 </style>
 </head>
@@ -3982,10 +4013,25 @@ function onPinchEnd(ev) {
   if (ev.touches.length >= 2) return;
   endPinch();
 }
-window.addEventListener("resize", function () {
+// A phone keyboard shrinks only the visual viewport (Chrome on Android
+// since 108, Safari on iOS), and iOS pans it to show the focused field. The
+// page follows it and refits, so grok redraws its input line above the
+// keyboard and again at full height when the keyboard closes.
+function followViewport() {
+  var vv = window.visualViewport;
+  if (vv) {
+    var root = document.documentElement.style;
+    root.setProperty("--vvh", vv.height + "px");
+    root.setProperty("--vv-top", vv.offsetTop + "px");
+  }
   if (!termOpened) return;
   try { fit.fit(); } catch (err) {}
-});
+}
+window.addEventListener("resize", followViewport);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", followViewport);
+  window.visualViewport.addEventListener("scroll", followViewport);
+}
 function resumeAskOpen() {
   return !document.getElementById("resume-ask").hidden;
 }
