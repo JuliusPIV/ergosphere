@@ -4,8 +4,10 @@
 # AB_PORT_B free ports, AB_OUT a writable folder.  Each side runs its own
 # ergosphere.py with a throwaway HOME, one seeded session and the stand-in grok
 # TUI (fakegrok.py), then the shared checks from this folder.  Writes
-# $AB_OUT/summary.txt.  Exit 1 when a check passes on A and fails on B, or the run
-# itself breaks.  Optional: AB_CHROME (browser binary), NODE_PATH (playwright).
+# $AB_OUT/summary.txt.  Exit 1 when a check passes on A and fails on B, when the
+# browser checks break on B or run fewer checks than on A, or the run itself
+# breaks.  No browser or playwright on the host is only a warning.
+# Optional: AB_CHROME (browser binary), NODE_PATH (playwright).
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # A fresh id per run: Ergosphere finds a session's holder machine-wide via
@@ -62,7 +64,7 @@ run_side() { # label code-dir port
     NODE_PATH="$pw_path" timeout 300 node "$HERE/browser.js" "$port" "$SID" >"$w/browser.json" 2>"$w/browser.err" || brc=$?
     [ -s "$w/browser.json" ] || printf '{"error":"browser.js exited %s with no result"}\n' "$brc" >"$w/browser.json"
   else
-    printf '{"error":"%s"}\n' "$browser_off" >"$w/browser.json"
+    printf '{"unavailable":"%s"}\n' "$browser_off" >"$w/browser.json"
   fi
   kill "$pid" 2>/dev/null
   for _ in $(seq 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
