@@ -67,7 +67,7 @@ def main():
             if os.path.exists(PIDF) and os.path.getsize(PIDF):
                 break
             time.sleep(0.05)
-        if not os.path.getsize(PIDF):
+        if not (os.path.exists(PIDF) and os.path.getsize(PIDF)):
             failures.append("the spawn never reached its pre-exec block")
             return report(failures)
         child = int(open(PIDF).read())
@@ -82,7 +82,6 @@ def main():
 
         os.close(os.open(FIFO, os.O_WRONLY))  # the mount recovers
         stop.join(10)
-        time.sleep(0.5)
         if alive(child):
             failures.append("the pending child is still running after stop: pid %d" % child)
             os.kill(child, 9)
