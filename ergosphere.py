@@ -1481,18 +1481,20 @@ def kill_proc(proc):
 
 
 def kill_all():
+    # Take the running groks first: on STOP their readers leave LIVE.
+    with LIVE_LOCK:
+        lives = list(LIVE.values())
+        LIVE.clear()
+    for live in lives:
+        live.shutdown()
     # A spawn in flight has no LIVE entry, and its child can be stuck before exec
     # on a hung mount. Wait for it: its open_live sees STOP and kills the child.
     # Returning first lets the server exit with that child unowned.
     while True:
         with LIVE_LOCK:
             if not STARTING:
-                lives = list(LIVE.values())
-                LIVE.clear()
                 break
         time.sleep(0.1)
-    for live in lives:
-        live.shutdown()
 
 
 class SessionBusy(RuntimeError):

@@ -57,8 +57,13 @@ def main():
         kwargs["preexec_fn"] = block_before_exec
         return real_popen(*args, **kwargs)
 
-    subprocess.Popen = blocking_popen
     failures = []
+    # A running session whose grok ignores SIGHUP, started before spawns block.
+    running_sid = str(uuid.uuid4())
+    hardy = [sys.executable, "-c", "import signal,time; signal.signal(signal.SIGHUP, signal.SIG_IGN); time.sleep(120)",
+             "--resume", running_sid]
+    running, _ = erg.open_live(running_sid, hardy, TMP, 80, 24)
+    subprocess.Popen = blocking_popen
     sid = str(uuid.uuid4())
     cmd = [sys.executable, "-c", "import time; time.sleep(120)", "--resume", sid]
     threading.Thread(target=lambda: erg.open_live(sid, cmd, TMP, 80, 24), daemon=True).start()
@@ -79,12 +84,21 @@ def main():
         stop.join(1.0)
         if not stop.is_alive():
             failures.append("stop returned while a spawn was still pending: its child is unowned")
+        # Its reader leaves LIVE on STOP; stop must still own that grok.
+        for _ in range(100):
+            with erg.LIVE_LOCK:
+                if running_sid not in erg.LIVE:
+                    break
+            time.sleep(0.05)
 
         os.close(os.open(FIFO, os.O_WRONLY))  # the mount recovers
         stop.join(10)
         if alive(child):
             failures.append("the pending child is still running after stop: pid %d" % child)
             os.kill(child, 9)
+        if running.proc.poll() is None:
+            failures.append("a session running before stop is still running after it: pid %d" % running.proc.pid)
+            running.proc.kill()
 
         # A launch after stop is refused before any spawn. Run it in a thread: if it
         # spawns instead, its pre-exec block would hang this test.
