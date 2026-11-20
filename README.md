@@ -72,7 +72,7 @@ With a terminal it asks `Automatic (recommended) or Manual? [A/m]`. **Automatic*
 
 **2. Open it.** On the same machine, go to **http://localhost:9241/**. From another computer, see [Remote access](#-remote-access).
 
-**3. Work.** Pick a session and press <kbd>Enter</kbd>, or press <kbd>Alt</kbd>+<kbd>N</kbd> to start a new one.
+**3. Work.** Pick a session and press <kbd>Enter</kbd>, or click **+ New Agent** (<kbd>Alt</kbd>+<kbd>N</kbd>) to start a new one.
 
 <details>
 <summary><b>Pick the directory, port and listen address yourself</b></summary>
@@ -107,13 +107,14 @@ All options are in the [installer reference](#installer-options).
 <tr><td width="34%">🖥️ <b>The real grok TUI</b></td><td>Each session is the interactive <code>grok</code> program in a pseudo-terminal, drawn by xterm.js. Every grok key and slash command works. Nothing is re-implemented.</td></tr>
 <tr><td>♾️ <b>Sessions outlive the tab</b></td><td>Closing the tab does not stop grok. Reattach from any browser or device that reaches the same Ergosphere, and the screen is redrawn exactly as grok has it. Every view of a session shares one live process.</td></tr>
 <tr><td>🔒 <b>One grok per session, never two</b></td><td>Ergosphere never starts a second grok for a session that is already running. Opening it again attaches to the one that exists.</td></tr>
-<tr><td>🗂️ <b>Every session at a glance</b></td><td>The session list groups sessions into <b>Active</b>, <b>Idle</b> and <b>Older</b>. Type in the filter box and the list narrows as you type, by title, session ID or working directory.</td></tr>
-<tr><td>⚡ <b>New sessions in one dialog</b></td><td>Pick the agent, working directory, model and reasoning effort, then <b>Ask</b>, <b>Auto</b> or <b>Always approve</b>. The dialog remembers the last model and effort you used.</td></tr>
+<tr><td>🗂️ <b>Every session at a glance</b></td><td>The session list groups sessions into <b>Working now</b> (grok is mid-turn), <b>Idle</b> (grok is open and waiting) and <b>Older</b> (no grok running). Type in the filter box and the list narrows as you type, by title, session ID or working directory.</td></tr>
+<tr><td>⚡ <b>New sessions in one dialog</b></td><td>Pick the agent, working directory, model and reasoning effort, then <b>ask</b>, <b>auto</b> or <b>always approve</b>. The dialog remembers the last model and effort you used.</td></tr>
 <tr><td>🔁 <b>From the CLI to the browser</b></td><td>Started a session in a terminal? When a grok CLI on the same machine holds it, the page offers <b>Quit that CLI and resume here</b>.</td></tr>
-<tr><td>🛡️ <b>Safe resume</b></td><td>A stopped session always resumes in <b>Ask</b> mode, whatever mode it had before. Switch to Auto or Always approve in the TUI when you want them.</td></tr>
+<tr><td>🛡️ <b>Safe resume</b></td><td>A stopped session always resumes in <b>ask</b> mode, whatever mode it had before. Switch to <b>auto</b> or <b>always approve</b> in the TUI when you want them.</td></tr>
 <tr><td>🏷️ <b>Knows its name</b></td><td>The chat bar shows the session name before its ID and follows <code>/rename</code> within a few seconds. The browser tab title matches.</td></tr>
 <tr><td>📋 <b>Copy and paste that behave</b></td><td><kbd>Ctrl</kbd>+<kbd>C</kbd> copies a selection and otherwise interrupts grok, like a terminal. <kbd>Ctrl</kbd>+<kbd>V</kbd> pastes. Copying works on plain HTTP pages too.</td></tr>
 <tr><td>🖱️ <b>Mouse included</b></td><td>The mouse wheel and clicks reach grok. Drag to select text.</td></tr>
+<tr><td>📱 <b>Works on phones</b></td><td>Drag one finger on the terminal to scroll grok; a quick flick keeps scrolling and slows to a stop. Pinch with two fingers to change the terminal text size, from 8 to 28 px; each browser remembers the size for the next session. When the on-screen keyboard opens, the terminal shrinks to the space above it, so grok's input line stays in view. Dragging grok's scroll bar takes a mouse; on a phone, drag anywhere on the terminal instead.</td></tr>
 <tr><td>⚙️ <b>Settings without editing files</b></td><td>A Settings page changes the listen address and port, and adds, changes or removes agents and their working directories. A port already in use is refused, and if the new address cannot be used at restart, Ergosphere falls back to the previous one.</td></tr>
 <tr><td>🧱 <b>Safe by default</b></td><td>Listens on 127.0.0.1 only. Checks Host and Origin, refuses to be framed, and a foreign website cannot start sessions. Only a button on an Ergosphere page (<b>Create</b>, <b>Resume</b>, or <b>Quit that CLI and resume here</b>) starts grok; opening a link never does.</td></tr>
 <tr><td>📦 <b>One-line installer</b></td><td>Checks prerequisites, installs, starts and reads everything back. Safe to run again: it replaces only files that changed.</td></tr>
@@ -126,7 +127,7 @@ All options are in the [installer reference](#installer-options).
 | Session list | <kbd>↑</kbd> <kbd>↓</kbd> | Select a session |
 | Session list | <kbd>Enter</kbd> | Open it |
 | Session list | <kbd>Ctrl</kbd>+<kbd>Enter</kbd> | Open it in a new tab |
-| Session list | <kbd>Alt</kbd>+<kbd>N</kbd> | New session |
+| Session list | <kbd>Alt</kbd>+<kbd>N</kbd> | Open the **+ New Agent** dialog |
 | Session | <kbd>Ctrl</kbd>+<kbd>C</kbd> | Copy the selection, or interrupt grok when nothing is selected |
 | Session | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> | Copy the selection |
 | Session | <kbd>Ctrl</kbd>+<kbd>V</kbd> | Paste |
@@ -139,12 +140,12 @@ All options are in the [installer reference](#installer-options).
 <table>
 <tr>
 <td width="50%" valign="top">
-<img src="docs/images/session-list.png" alt="Ergosphere session list filtered by typing webapp: one Active, one Idle and two Older sessions, each with last update, title, session ID and working directory">
-<p align="center"><b>Session list</b><br><sub>Active, Idle and Older, filtered as you type.</sub></p>
+<img src="docs/images/session-list.png" alt="Ergosphere session list filtered by typing webapp: sessions in three groups, each with last update, title, session ID and working directory">
+<p align="center"><b>Session list</b><br><sub>Working now, Idle and Older, filtered as you type.</sub></p>
 </td>
 <td width="50%" valign="top">
-<img src="docs/images/new-session.png" alt="New-session dialog over the session list, with agent reviewer, its working directory filled in, model grok-4.6, effort high and Approval set to ask">
-<p align="center"><b>New session</b><br><sub>Agent, folder, model, effort and approval mode.</sub></p>
+<img src="docs/images/new-session.png" alt="New Agent dialog over the session list, with agent reviewer, its working directory filled in, model grok-4.6, effort high and Approval set to ask">
+<p align="center"><b>+ New Agent</b><br><sub>Agent, folder, model, effort and approval mode.</sub></p>
 </td>
 </tr>
 <tr>
@@ -212,15 +213,15 @@ Then open http://localhost:9241/. The install summary prints the exact command f
 **Option B: listen on the network.** Install with `--bind 0.0.0.0 --yes` for every address of the machine, or `--bind 192.0.2.10 --yes` for one address. Manual mode asks the same question, and the Settings page can change it later. The install summary prints the URLs that reach it.
 
 > [!WARNING]
-> **Ergosphere v0.1 has no login. Anyone who can reach the port can run grok as the user that runs Ergosphere.** Only listen on a trusted network, or put a firewall or VPN in front of it.
+> **Ergosphere has no login yet. Anyone who can reach the port can run grok as the user that runs Ergosphere.** Only listen on a trusted network, or put a firewall or VPN in front of it.
 
 ### 🛡️ Security model at a glance
 
-| Threat | v0.1 |
+| Threat | Protection |
 |---|---|
 | A random website you visit tries to start or drive grok | **Blocked.** Host and Origin are checked, the page cannot be framed, and only a button on an Ergosphere page (Create, Resume, or Quit that CLI and resume here) starts grok. Opening a link never does. |
 | A crafted link opens a session page | **Nothing starts.** A link only shows the page; a stopped session waits for your Resume click. |
-| Someone on the network reaches the port | **Not protected.** There is no login in v0.1. Keep the default `127.0.0.1` or use an SSH tunnel, firewall or VPN. |
+| Someone on the network reaches the port | **Not protected.** Ergosphere has no login yet. Keep the default `127.0.0.1` or use an SSH tunnel, firewall or VPN. |
 | Another local user on the same machine | **Not protected.** Loopback is shared by local users and containers. |
 | A reverse proxy with its own login | **Supported** with a bearer token. See [behind a reverse proxy](#advanced-behind-a-reverse-proxy). |
 
@@ -247,9 +248,9 @@ Yes. Both attach to the same live grok.
 </details>
 
 <details>
-<summary><b>Why did my session come back in Ask mode?</b></summary>
+<summary><b>Why did my session come back in ask mode?</b></summary>
 
-On purpose. A stopped session always resumes in Ask, so nothing runs without your approval until you choose otherwise in the TUI.
+On purpose. A stopped session always resumes in <b>ask</b>, so nothing runs without your approval until you choose otherwise in the TUI.
 </details>
 
 <details>
@@ -275,7 +276,7 @@ The install summary prints the process ID and a `kill <pid>` command. To remove 
 <details>
 <summary><b>Does it need a login?</b></summary>
 
-grok must already be signed in on the server. Ergosphere itself has no login in v0.1, which is why it listens on 127.0.0.1 by default.
+grok must already be signed in on the server. Ergosphere itself has no login yet, which is why it listens on 127.0.0.1 by default.
 </details>
 
 <details>
@@ -386,6 +387,16 @@ Everything lives in one file, `ergosphere.json`, next to `ergosphere.py`. The Se
 {"bind": "127.0.0.1", "port": 9241, "agents": {"my-agent": "/absolute/path/to/work"}}
 ```
 
+### Which code is running
+
+`curl -s http://127.0.0.1:<port>/health` reports `version` and `code_sha256`. `code_sha256` is not the sha256 of `ergosphere.py`, so `sha256sum ergosphere.py` never matches it. It is the sha256 of the four files' raw sha256 digests, joined in this order: `ergosphere.py`, `vendor/addon-fit.js`, `vendor/xterm.css`, `vendor/xterm.js`. To recompute it, run this from the install directory:
+
+```bash
+python3 -c 'import hashlib as h; print(h.sha256(b"".join(h.sha256(open(f, "rb").read()).digest() for f in ("ergosphere.py", "vendor/addon-fit.js", "vendor/xterm.css", "vendor/xterm.js"))).hexdigest())'
+```
+
+To check a server against a release, run the same command in the extracted release tarball (`https://github.com/JuliusPIV/ergosphere/archive/refs/tags/vA.B.C.tar.gz`). Do not use `ergosphere.py` from `raw.githubusercontent.com`: the release tarball's copy has the version filled in, so its hash differs.
+
 ### Troubleshooting
 
 From the install directory:
@@ -399,14 +410,16 @@ python3 ergosphere.py           # runs in the foreground; prints ERGOSPHERE_READ
 |---|---|
 | `grok not on PATH` | Install grok for this user, or start Ergosphere from a shell where `grok` works. |
 | Something went wrong and you want details | The log is `ergosphere.log` in the install directory. |
-| A permission mode does not start as expected | grok flags can change between versions. On grok 1.0.70, Ask is `--permission-mode default`, Auto is `--permission-mode auto` and Always approve is `--always-approve`. Check `grok --help` on newer versions. |
+| A permission mode does not start as expected | grok flags can change between versions. On grok 1.0.70, **ask** is `--permission-mode default`, **auto** is `--permission-mode auto` and **always approve** is `--always-approve`. Check `grok --help` on newer versions. |
 
 ### Known limits
 
-- No login in v0.1. On a shared machine, other local users and containers that share loopback can reach 127.0.0.1 too.
+- Ergosphere has no login yet. On a shared machine, other local users and containers that share loopback can reach 127.0.0.1 too.
 - Serving directly on ports 80 or 443, or behind a proxy that drops the port from the Host header, is not supported.
-- Takeover works only for a grok CLI on the same machine. Ergosphere does not attach to sessions run by another Ergosphere server.
+- Takeover works only on the same machine: a session held by a grok CLI or by another Ergosphere server there can be taken over, one on another machine cannot.
 - Plain HTTP by default.
+- On a phone, pinch-zooming the page outside the terminal also refits the terminal to fewer rows, which resizes grok for every view of that session ([#158](https://github.com/JuliusPIV/ergosphere/issues/158)). Pinch on the terminal itself to change the text size.
+- Clicking a link inside grok does not open it: grok shows "Can't open links without a display" ([#34](https://github.com/JuliusPIV/ergosphere/issues/34)).
 - Linux only. WSL2 is untested. macOS is not supported yet.
 
 ### Advanced: behind a reverse proxy
@@ -414,6 +427,8 @@ python3 ergosphere.py           # runs in the foreground; prints ERGOSPHERE_READ
 For a reverse proxy that handles its own authentication, set `ERGOSPHERE_TOKEN` to the path of a file holding a one-line token. Ergosphere then requires `Authorization: Bearer <token>`, and the proxy must send that header. Browsers do not send it, so use this only behind a proxy. The installer refuses to run while `ERGOSPHERE_TOKEN` is set; start the server yourself in that setup.
 
 To keep the install directory read-only, set `ERGOSPHERE_CONFIG` to the path of the config file. Ergosphere then reads and writes that file, and its `.bak`, instead of `ergosphere.json` next to `ergosphere.py`. Unset means `ergosphere.json` in the install directory.
+
+Point it at a file outside the install directory, for example `~/.config/ergosphere/ergosphere.json`. A new install directory that already holds that file, and nothing else from Ergosphere, is a non-empty directory that is not an Ergosphere install. That is refused on purpose, because the installer's own writes could replace or corrupt a file there.
 
 ### Uninstall
 
@@ -433,7 +448,7 @@ Your sessions in `~/.grok/sessions` belong to grok and stay.
 |---|---|
 | [Grok CLI](https://x.ai/news/grok-build-cli) | The agent Ergosphere puts in your browser. Install it and sign in first. |
 | [xterm.js](https://github.com/xtermjs/xterm.js) | The terminal that draws grok in the page. Vendored, MIT. |
-| [dcg (Destructive Command Guard)](https://github.com/Dicklesworthstone/destructive_command_guard) | A hook that blocks destructive shell commands before an agent runs them. It supports grok, which matters when you let a session run in Auto or Always approve. |
+| [dcg (Destructive Command Guard)](https://github.com/Dicklesworthstone/destructive_command_guard) | A hook that blocks destructive shell commands before an agent runs them. It supports grok, which matters when you let a session run in **auto** or **always approve**. |
 
 ---
 

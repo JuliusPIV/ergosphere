@@ -168,13 +168,18 @@ async function normalScreen(p) {
   }));
 }
 const viewTop = p => p.evaluate(() => term.buffer.active.viewportY);
-// One finger: down, a single move event, up at once; then let a fling run.
-async function oneMove(cdp, x, ya, yb) {
+// One finger: down, a single move event, up at once; then wait until the
+// fling has stopped. Returns what the move alone sent and whether it stopped.
+async function oneMove(p, cdp, x, ya, yb) {
   await cdp.send('Input.dispatchTouchEvent', {type: 'touchStart', touchPoints: [{x, y: ya}]});
   await wait(30);
   await cdp.send('Input.dispatchTouchEvent', {type: 'touchMove', touchPoints: [{x, y: yb}]});
+  const moveSent = await p.evaluate(() => SENT.join(''));
   await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
-  await wait(1500);
+  const end = Date.now() + 10000;
+  let settled = false;
+  while (!(settled = await p.evaluate(() => window.fling == null)) && Date.now() < end) await wait(50);
+  return {moveSent, settled};
 }
 (async () => {
   const b = await chromium.launch({executablePath: chrome, ignoreDefaultArgs: ['--hide-scrollbars']});
@@ -212,7 +217,7 @@ async function oneMove(cdp, x, ya, yb) {
   res.scrollY = await p.evaluate(() => scrollY);
   // A flick delivered as one 200px move: it scrolls, and the fling goes on.
   await p.evaluate(() => { SENT.length = 0; });
-  await oneMove(cdp, x, y0, y0 + 200);
+  res.oneMove = await oneMove(p, cdp, x, y0, y0 + 200);
   res.oneMoveSent = await p.evaluate(() => SENT.join(''));
   // Two fingers: no wheel report and no preventDefault (left for pinch).
   // Count preventDefault itself: xterm's cancel also stops propagation, so a
@@ -248,7 +253,7 @@ async function oneMove(cdp, x, ya, yb) {
   await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
   await wait(400);
   res.mobile.normalTopAfterDrag = await viewTop(p);
-  await oneMove(cdp, x, y0, y0 + 200);
+  res.mobile.normalOneMove = await oneMove(p, cdp, x, y0, y0 + 200);
   res.mobile.normalTopAfterOneMove = await viewTop(p);
   await ctx.close();
   // Pinch in a fresh page: two fingers change the font size and refit, grok
@@ -415,9 +420,15 @@ def check_browser():
     n = res["mobile"]["normal"]
     if not res["mobile"]["normalTopAfterDrag"] < n["base"]:
         fails.append("mobile: a drag does not scroll the normal screen's history (top %s, base %s)" % (res["mobile"]["normalTopAfterDrag"], n["base"]))
+    for name, om in (("alternate", res["oneMove"]), ("normal", res["mobile"]["normalOneMove"])):
+        if not om["settled"]:
+            fails.append("%s screen: the fling after a 200px flick did not stop within 10s" % name)
+    # The move alone sends a few reports; the fling must clearly add to them.
+    at_move = len(re.findall(r"\x1b\[<64;\d+;\d+M", res["oneMove"]["moveSent"]))
     ones = re.findall(r"\x1b\[<64;\d+;\d+M", res["oneMoveSent"])
-    if len(ones) < 4:
-        fails.append("a 200px flick in one move event sent %d wheel-up reports, want the move plus a fling" % len(ones))
+    if not at_move or len(ones) < 2 * at_move:
+        fails.append("a 200px flick in one move event sent %d wheel-up reports, %d from the move alone; "
+                     "want the move plus a fling of at least as many again" % (len(ones), at_move))
     if not res["mobile"]["normalTopAfterOneMove"] < res["mobile"]["normalTopAfterDrag"]:
         fails.append("normal screen: a 200px flick in one move event did not scroll (top %s, was %s)" % (
             res["mobile"]["normalTopAfterOneMove"], res["mobile"]["normalTopAfterDrag"]))

@@ -810,6 +810,23 @@ def release_holder(sid):
     return term_holder(sid, holder, raw)
 
 
+def open_pidfd(pid):
+    """A pidfd for pid, or None where pidfds are unavailable (Python < 3.9, Linux < 5.3).
+
+    Raises ProcessLookupError when pid is gone.
+    """
+    opener = getattr(os, "pidfd_open", None)
+    if opener is None or not hasattr(signal, "pidfd_send_signal"):
+        return None
+    try:
+        return opener(pid)
+    except ProcessLookupError:
+        raise
+    except OSError:
+        # ENOSYS on an old kernel, or a seccomp filter: the os.kill path.
+        return None
+
+
 def term_holder(sid, holder, raw):
     """SIGTERM the holder grok after checking raw (its command line) names sid; wait for exit."""
     pid = holder["pid"]
@@ -823,13 +840,42 @@ def term_holder(sid, holder, raw):
             "pid": pid,
             "via": holder["via"],
         }
+    # raw was read earlier, and the pid can be reused since.  A pidfd pins
+    # the process: the command line read after it opens is that process's
+    # (while it lives), and a signal through it never reaches a new one.
     try:
-        os.kill(pid, signal.SIGTERM)
+        pidfd = open_pidfd(pid)
+    except ProcessLookupError:
+        return True, {"ok": True, "pid": pid, "already": "gone"}
+    try:
+        again = read_proc_cmdline(pid)
+        if not again:
+            return True, {"ok": True, "pid": pid, "already": "gone"}
+        if not grok_cmdline(again) or not cmdline_contains_sid(again, sid):
+            print("take refuse pid=%s sid=%s changed before the signal" % (pid, sid), flush=True)
+            return False, {"ok": False, "error": "that grok changed; try again", "pid": pid}
+        via = "kill"
+        if pidfd is not None:
+            try:
+                signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+                via = "pidfd"
+            except OSError as exc:
+                # ENOSYS or EPERM here can be a seccomp filter on this one
+                # syscall.  os.kill, right after the re-read, then does what
+                # main did: it signals, or a holder of another user stays
+                # EPERM and is refused below.
+                if exc.errno not in (errno.ENOSYS, errno.EPERM):
+                    raise
+        if via == "kill":
+            os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         return True, {"ok": True, "pid": pid}
     except (PermissionError, OSError) as exc:
         return False, {"ok": False, "error": "cannot signal that pid: %s" % exc, "pid": pid}
-    print("take sigterm pid=%s sid=%s" % (pid, sid), flush=True)
+    finally:
+        if pidfd is not None:
+            os.close(pidfd)
+    print("take sigterm pid=%s sid=%s via=%s" % (pid, sid, via), flush=True)
     deadline = time.time() + 12
     while time.time() < deadline:
         if pid_gone(pid) or not cmdline_contains_sid(read_proc_cmdline(pid), sid):
@@ -1083,7 +1129,7 @@ def load_config(migrate=True):
     legacy = path.with_name(LEGACY_AGENTS_NAME)
     if not legacy.exists():
         # stderr, so --check output stays the same lines as before.
-        print("config: no %s, using defaults and no agents" % CONFIG_NAME, file=sys.stderr, flush=True)
+        print("config: no %s, using defaults and no agents" % path, file=sys.stderr, flush=True)
         return check_config({}, str(path))
     try:
         agents = check_agents_map(read_json_file(legacy), str(legacy))
@@ -1752,8 +1798,11 @@ class Live:
     def _read(self):
         hold = b""
         try:
+            # poll, not select: select() raises ValueError for an fd >= 1024.
+            poller = select.poll()
+            poller.register(self.master, select.POLLIN)
             while not STOP.is_set() and not self.closed:
-                ready, _, _ = select.select([self.master], [], [], 0.4)
+                ready = poller.poll(400)
                 if not ready:
                     if self.proc.poll() is not None:
                         break
@@ -3596,12 +3645,8 @@ el("restart").addEventListener("click", function () {
       if (!res.ok) {
         restarting = false;
         say("restart-msg", res.data.error || "could not restart");
-        if (typeof res.data.sessions === "number") {
-          state.sessions = res.data.sessions;
-          renderRestart();
-        } else {
-          el("restart").disabled = false;
-        }
+        if (typeof res.data.sessions === "number") state.sessions = res.data.sessions;
+        renderRestart();
         return;
       }
       var host = location.hostname;
@@ -3613,7 +3658,7 @@ el("restart").addEventListener("click", function () {
   }).catch(function () {
     restarting = false;
     say("restart-msg", "could not restart");
-    el("restart").disabled = false;
+    renderRestart();
   });
 });
 renderServer();
@@ -3654,7 +3699,7 @@ document.getElementById("pick").hidden = false;
 """.replace("@@VERSION@@", html.escape(VERSION))
 
 
-def chat_page(resume="", holder=None, running=False, title=""):
+def chat_page(resume="", holder=None, running=False, title="", ask=False):
     # Full-height xterm. Leaving this page drops the socket and does not
     # ask the server to kill grok. A reload or a second window reattaches.
     # running: this server already has the grok process. Only then does the
@@ -3858,6 +3903,9 @@ var hold = @@HOLD_JS@@;
 // Another Ergosphere server's own grok holds it: {pid, host, port, tls}, or null.
 var heldServer = @@SERVER_JS@@;
 var running = @@RUN_JS@@;
+// Stopped and its folder exists: ask to resume on load (#52). A missing
+// folder makes every Resume fail (#43), so that page does not ask.
+var askOnLoad = @@ASK_JS@@;
 var termOpened = false;
 var sawOutput = false;
 var sessionReady = false;
@@ -4377,6 +4425,7 @@ function showEnded() {
 var retryTimer = null;
 function resumeSession(tries) {
   tries = tries || 0;
+  closeResumeAsk();
   ended = false;
   startTitlePoll();
   stopping = false;
@@ -4600,6 +4649,10 @@ document.getElementById("stop").addEventListener("click", function () {
   stopping = true;
   setStatus("quitting", false);
   if (sock && sock.readyState === 1) sock.send(JSON.stringify({type: "stop"}));
+  // A closed socket (failed before grok's first output) has no onclose left to
+  // end "quitting": attach again so onopen sends the stop, or onclose ends it.
+  // /term only attaches. A held page is left as it was (#134).
+  else if (!hold && (!sock || sock.readyState > 1)) connect();
 });
 // A link to the other server's page, only where this page's own host reaches it.
 function serverUrl(info) {
@@ -4682,7 +4735,15 @@ startTitlePoll();
 if (sid) pollTitle();
 if (hold) { showHeldServer(heldServer); pollHold(); }
 if (!hold && running) { ensureTerm(); requestAnimationFrame(connect); }
-else if (!hold) { ensureTerm(); setSid(sid); showEnded(); }
+// A stopped session: fit the terminal to the page (only connect() and resize
+// fit otherwise) and ask to resume at once, not only on a click (#52).
+else if (!hold) {
+  ensureTerm();
+  try { fit.fit(); } catch (err) {}
+  setSid(sid);
+  showEnded();
+  if (askOnLoad) openResumeAsk();
+}
 </script>
 </body>
 </html>
@@ -4699,6 +4760,8 @@ else if (!hold) { ensureTerm(); setSid(sid); showEnded(); }
     ).replace(
         "@@SID_JS@@", json.dumps(sid_js)
     ).replace("@@HOLD_JS@@", hold_js).replace("@@RUN_JS@@", run_js).replace(
+        "@@ASK_JS@@", "true" if ask else "false"
+    ).replace(
         "@@TITLE@@", html.escape(title)
     ).replace("@@DOC_TITLE@@", html.escape(doc_title)).replace(
         "@@VERSION@@", html.escape(VERSION)
@@ -5055,7 +5118,10 @@ class Handler(BaseHTTPRequestHandler):
             page_title = saved.get("title") if isinstance(saved, dict) else ""
             if not isinstance(page_title, str):
                 page_title = ""
-            self._html(chat_page(resume, holder, running, page_title))
+            # The same folder check /resume makes: only a stopped session it
+            # could start gets the resume prompt on load (#52, #43).
+            ask = isinstance(saved, dict) and existing_dir(saved.get("cwd"))
+            self._html(chat_page(resume, holder, running, page_title, ask))
             return
         if path in VENDOR_FILES:
             self._vendor(path)

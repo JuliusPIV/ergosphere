@@ -29,7 +29,7 @@ Reruns are safe: only files whose sha256 differs are replaced, `ergosphere.json`
 
 ## Remote access
 
-Default bind is `127.0.0.1`. From another computer use an SSH tunnel (`ssh -N -L 9241:127.0.0.1:9241 you@your-server`, then http://localhost:9241/), or bind a network address with `--bind ... --yes` or the Settings page. v0.1 has no login: anyone who can reach the port can run grok as the server user.
+Default bind is `127.0.0.1`. From another computer use an SSH tunnel (`ssh -N -L 9241:127.0.0.1:9241 you@your-server`, then http://localhost:9241/), or bind a network address with `--bind ... --yes` or the Settings page. Ergosphere has no login yet: anyone who can reach the port can run grok as the server user.
 
 ## Troubleshooting
 

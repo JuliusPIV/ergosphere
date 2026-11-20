@@ -3,7 +3,7 @@
   python3 -B ab.py http <port> <session-id>   -> JSON checks on stdout
   python3 -B ab.py summary <A-dir> <B-dir>    -> summary text on stdout;
                                                  exit 1 when a check passes on A and fails on B,
-                                                 or B's browser checks break or run fewer than A's
+                                                 or B's browser checks break or miss a check in ORDER
 Stdlib only.
 """
 import json
@@ -13,7 +13,8 @@ import urllib.error
 import urllib.request
 
 TITLE = "AB seeded session"
-ORDER = ["health", "session_list", "open_session", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios"]
+ORDER = ["health", "session_list", "open_session", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios", "resume_box"]
+HTTP_CHECKS = ("health", "session_list", "open_session")
 
 
 def get(base, path):
@@ -96,13 +97,16 @@ def summary(adir, bdir):
         why = lambda r: str(r.get("browser") and "ran" or r.get("unavailable") or r.get("error") or "no result")
         lines.append("BROWSER CHECKS DID NOT RUN (A: %s; B: %s)" % (why(abrowser)[:150], why(bbrowser)[:150]))
     # No browser on this host is a warning; a browser.js that breaks on B, or
-    # B running fewer page checks than A, fails the run.
+    # that ran but left out a page check in ORDER, fails the run.  Both sides
+    # run B's browser.js, so a check dropped there is missing on A too:
+    # comparing A's count with B's cannot catch it.
     broken = []
     if not bbrowser.get("browser") and not bbrowser.get("unavailable"):
         broken.append("browser checks broke on B: %s" % str(bbrowser.get("error") or "no result")[:300])
-    na, nb = len(abrowser.get("checks") or {}), len(bbrowser.get("checks") or {})
-    if nb < na:
-        broken.append("B ran %d browser checks, A ran %d" % (nb, na))
+    if bbrowser.get("browser"):
+        missing = [n for n in ORDER if n not in HTTP_CHECKS and n not in (bbrowser.get("checks") or {})]
+        if missing:
+            broken.append("B did not report browser check(s): %s" % ", ".join(missing))
     width = 36
     lines.append("")
     lines.append("%-14s %-*s %-*s %s" % ("check", width, "A", width, "B", "same"))
