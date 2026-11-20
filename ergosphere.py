@@ -2125,6 +2125,18 @@ def session_state(sid, with_turn=True, scan=None):
     return out
 
 
+def wait_for_spawn(sid):
+    # A spawn in flight has no LIVE entry, and it runs with LIVE_LOCK released.
+    # An attach that asks now would see the session as ended. Wait here, with no
+    # lock held, as attach did when the spawn held LIVE_LOCK. STOP ends the wait:
+    # open_live then drops sid from STARTING.
+    while True:
+        with LIVE_LOCK:
+            if sid not in STARTING:
+                return
+        time.sleep(0.05)
+
+
 def running_here(state):
     """This server's own grok is starting or running (alone, or beside a holder)."""
     return bool(state.get("here"))
@@ -5087,6 +5099,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(resume, str) or not SID_TOKEN_RE.match(resume):
                 self._html(chat_pick_page())
                 return
+            wait_for_spawn(resume)
             state = session_state(resume, with_turn=False)
             running = running_here(state)
             holder = None if running else state["holder"]
@@ -5357,6 +5370,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         # One state answers it (session_state). Reply after LIVE_LOCK is
         # released: a slow client must not hold it.
+        wait_for_spawn(sid)
         state = session_state(sid, with_turn=False)
         if running_here(state):
             self._json(200, {"ok": True, "id": sid})
@@ -5601,6 +5615,7 @@ class Handler(BaseHTTPRequestHandler):
         live = None
         client = None
         try:
+            wait_for_spawn(sid)
             state = session_state(sid, with_turn=False)
             holder = state["holder"]
             if running_here(state):
