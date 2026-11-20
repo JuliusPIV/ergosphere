@@ -422,7 +422,9 @@ def check_kill_run():
 def check_kill_no_pidfd():
     # On an interpreter without pidfd the kill check must SKIP (None), not raise
     # and abort the other checks in main().
-    with mock.patch.object(os, "pidfd_open", None), mock.patch.object(signal, "pidfd_send_signal", None):
+    # create=True: on 3.8 these attributes do not exist at all, and patch.object
+    # would otherwise raise AttributeError here, before the try below.
+    with mock.patch.object(os, "pidfd_open", None, create=True), mock.patch.object(signal, "pidfd_send_signal", None, create=True):
         try:
             got = check_kill_run()
         except Exception as e:
