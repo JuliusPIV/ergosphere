@@ -2146,6 +2146,38 @@ def wait_for_spawn(sid):
         time.sleep(0.05)
 
 
+def resume_reply(sid):
+    # /resume reply (code, body), or None when a start of sid began after this
+    # request looked (open_live: SessionBusy "starting"): look again once done.
+    wait_for_spawn(sid)
+    state = session_state(sid, with_turn=False)
+    if running_here(state):
+        return (200, {"ok": True, "id": sid})
+    if state["state"] == "stopping":
+        return (409, {"ok": False, "stopping": True, "state": "stopping",
+                      "error": "session is still stopping; try again in a moment"})
+    if state["holder"]:
+        return (409, {"ok": False, "held": True, "state": state["state"],
+                      "error": "session is already running"})
+    row = find_session(sid)
+    if row is None:
+        return (404, {"ok": False, "error": "unknown session"})
+    cwd = row.get("cwd")
+    if not existing_dir(cwd):
+        return (400, {"ok": False, "error": "session cwd is not an existing absolute directory"})
+    try:
+        cmd = grok_argv(None, None, cwd, sid)
+        open_live(sid, cmd, cwd, 80, 24)
+    except SessionBusy as exc:
+        if exc.state == "starting":
+            return None
+        return (409, {"ok": False, "state": exc.state, "held": exc.state != "stopping",
+                      "stopping": exc.state == "stopping", "error": str(exc)})
+    except (RuntimeError, OSError) as exc:
+        return (400, {"ok": False, "error": str(exc)[:300]})
+    return (200, {"ok": True, "id": sid})
+
+
 def running_here(state):
     """This server's own grok is starting or running (alone, or beside a holder)."""
     return bool(state.get("here"))
@@ -5402,39 +5434,8 @@ class Handler(BaseHTTPRequestHandler):
         # released: a slow client must not hold it.
         reply = None
         while reply is None:
-            reply = self._resume_once(sid)
+            reply = resume_reply(sid)
         self._json(*reply)
-
-    def _resume_once(self, sid):
-        # (code, body), or None when a start of sid began after this request
-        # looked (open_live: SessionBusy "starting"): look again once it is done.
-        wait_for_spawn(sid)
-        state = session_state(sid, with_turn=False)
-        if running_here(state):
-            return (200, {"ok": True, "id": sid})
-        if state["state"] == "stopping":
-            return (409, {"ok": False, "stopping": True, "state": "stopping",
-                          "error": "session is still stopping; try again in a moment"})
-        if state["holder"]:
-            return (409, {"ok": False, "held": True, "state": state["state"],
-                          "error": "session is already running"})
-        row = find_session(sid)
-        if row is None:
-            return (404, {"ok": False, "error": "unknown session"})
-        cwd = row.get("cwd")
-        if not existing_dir(cwd):
-            return (400, {"ok": False, "error": "session cwd is not an existing absolute directory"})
-        try:
-            cmd = grok_argv(None, None, cwd, sid)
-            open_live(sid, cmd, cwd, 80, 24)
-        except SessionBusy as exc:
-            if exc.state == "starting":
-                return None
-            return (409, {"ok": False, "state": exc.state, "held": exc.state != "stopping",
-                          "stopping": exc.state == "stopping", "error": str(exc)})
-        except (RuntimeError, OSError) as exc:
-            return (400, {"ok": False, "error": str(exc)[:300]})
-        return (200, {"ok": True, "id": sid})
 
     def _take(self):
         # The button posts this. It does not run on connect. Quit only a

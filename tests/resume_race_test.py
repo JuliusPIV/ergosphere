@@ -41,7 +41,6 @@ def resume(erg, sid, box):
         _json_object=lambda: {"id": sid},
         _json=lambda code, body: replies.append(code),
     )
-    handler._resume_once = lambda s: erg.Handler._resume_once(handler, s)
     erg.Handler._resume(handler)
     box[threading.current_thread().name] = replies[0] if replies else None
 
