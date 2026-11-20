@@ -361,7 +361,7 @@ Pass options after `| bash -s --`.
 | `--bind ADDR` | Listen address: an IPv4 address of this machine, `0.0.0.0`, or `localhost`. Default: the address saved in `ergosphere.json`, else `127.0.0.1`. |
 | `--yes` | Approve a listen address other than loopback without asking. |
 | `--version vA.B.C` | Install that release instead of the latest one (pin or roll back). The rerun command it prints keeps it. |
-| `--check` | Run the checks only. Change nothing. |
+| `--check` | Run the checks only. Downloads the release to a temp dir and checks its files are all there. Runs nothing from it. Changes nothing. |
 | `--help` | Show the options. |
 
 Prerequisites are checked first and listed when missing. The installer never installs them, and it does not check grok sign-in.

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# install.sh runs the downloaded release's own ergosphere.py --check, against
-# the config this run would write, before it creates or changes anything:
-# a release without vendor/xterm.js and a config the server rejects
-# (last.effort) both stop at the check gate, in a real run and in --check.
+# install.sh checks the downloaded release before it creates or changes
+# anything. A release without vendor/xterm.js stops at the check gate, in a
+# real run and in --check. A real run also runs the release's own
+# ergosphere.py --check against the config it would write, so a config the
+# server rejects (last.effort) stops there too. --check runs nothing from the
+# download: a planted ergosphere.py that writes a marker never runs under it.
 #
 # Run: ERGOSPHERE_TEST_PORT=<spare port> bash tests/install_verify_release_test.sh
 # No network: the packages are served from 127.0.0.1 and grok is a stub that
@@ -37,6 +39,11 @@ pack() {
 mkdir -p "$work/bin" "$work/www"
 pack good
 pack novendor vendor/xterm.js
+mark="$work/planted-ran"
+pack planted
+printf 'open(%s, "w").close()\nraise SystemExit("planted release ran")\n' "'$mark'" \
+  >"$work/pkg-planted/ergosphere-test/ergosphere.py"
+tar -czf "$work/www/planted.tar.gz" -C "$work/pkg-planted" ergosphere-test
 printf '#!/bin/sh\necho "grok 0.0.0-test"\n' >"$work/bin/grok"
 chmod +x "$work/bin/grok"
 
@@ -74,26 +81,46 @@ expect_blocked() {
   if grep -qE '^(install|config): ' <<<"$out"; then bad "$name: files or config were written"; fi
 }
 
+bad_effort() {
+  mkdir -p "$1/state"
+  printf '{"port": %s, "agents": {}, "last": {"model": "", "effort": "not valid!"}}\n' "$port" >"$1/state/ergosphere.json"
+}
+
 for mode in --auto --check; do
   h="$work/v$mode"
   out=$(inst "$h" novendor "$h/state/ergosphere.json" "$mode"); rc=$?
-  expect_blocked "missing vendor/xterm.js $mode" "$h" "$h/state/ergosphere.json" "missing vendor file: xterm.js" "$rc" "$out"
+  expect_blocked "missing vendor/xterm.js $mode" "$h" "$h/state/ergosphere.json" "archive is missing vendor/xterm.js" "$rc" "$out"
   if [[ -e "$h/state" ]]; then bad "missing vendor/xterm.js $mode: config folder was created"; else ok "missing vendor/xterm.js $mode: no config written"; fi
-
-  h="$work/e$mode"
-  mkdir -p "$h/state"
-  printf '{"port": %s, "agents": {}, "last": {"model": "", "effort": "not valid!"}}\n' "$port" >"$h/state/ergosphere.json"
-  before=$(sha256sum <"$h/state/ergosphere.json")
-  out=$(inst "$h" good "$h/state/ergosphere.json" "$mode"); rc=$?
-  expect_blocked "last.effort not valid $mode" "$h" "$h/state/ergosphere.json" "last.effort is not an effort level" "$rc" "$out"
-  if [[ "$(sha256sum <"$h/state/ergosphere.json")" == "$before" && "$(ls -A "$h/state")" == ergosphere.json ]]; then
-    ok "last.effort not valid $mode: config unchanged"
-  else
-    bad "last.effort not valid $mode: config folder changed"
-  fi
 done
 
-# A good release still passes the check.
+# The real run catches a config the server rejects before any copy.
+h="$work/effort"
+bad_effort "$h"
+before=$(sha256sum <"$h/state/ergosphere.json")
+out=$(inst "$h" good "$h/state/ergosphere.json" --auto); rc=$?
+expect_blocked "last.effort not valid" "$h" "$h/state/ergosphere.json" "$h/state/ergosphere.json last.effort is not an effort level" "$rc" "$out"
+if [[ "$(sha256sum <"$h/state/ergosphere.json")" == "$before" && "$(ls -A "$h/state")" == ergosphere.json ]]; then
+  ok "last.effort not valid: config unchanged"
+else
+  bad "last.effort not valid: config folder changed"
+fi
+
+# --check runs nothing from the download; the real run does run its --check.
+h="$work/plant-check"
+out=$(inst "$h" planted "$h/state/ergosphere.json" --check); rc=$?
+if [[ "$rc" -eq 0 && "$out" == *"ready: checks passed"* && ! -e "$mark" && ! -e "$h/app" ]]; then
+  ok "planted release: --check ran nothing from it"
+else
+  bad "planted release --check: rc $rc, marker $([[ -e "$mark" ]] && echo written || echo absent)"
+  printf '%s\n' "$out" | tail -n 8
+fi
+h="$work/plant-auto"
+out=$(inst "$h" planted "$h/state/ergosphere.json" --auto); rc=$?
+if [[ -e "$mark" ]]; then ok "planted release: the real run runs its --check"; else bad "planted release: the real run did not run its --check"; fi
+expect_blocked "planted release --auto" "$h" "$h/state/ergosphere.json" "planted release ran" "$rc" "$out"
+rm -f -- "$mark"
+
+# A good release still passes --check.
 h="$work/good"
 out=$(inst "$h" good "$h/state/ergosphere.json" --check); rc=$?
 if [[ "$rc" -eq 0 && "$out" == *"ready: checks passed"* && ! -e "$h/app" && ! -e "$h/state" ]]; then
@@ -104,33 +131,24 @@ else
 fi
 
 # An unreadable legacy cwd-defaults.json is ignored when ergosphere.json exists
-# (the server and cfg_py both prefer the primary file), so it must not block.
+# (the server and cfg_py both prefer the primary file): the release check
+# still runs and reports the primary file's problem.
 h="$work/unreadable-legacy"
-mkdir -p "$h/state"
-printf '{"port": %s, "agents": {}}\n' "$port" >"$h/state/ergosphere.json"
+bad_effort "$h"
 printf '{"x": "/tmp"}\n' >"$h/state/cwd-defaults.json"
 chmod 000 "$h/state/cwd-defaults.json"
-out=$(inst "$h" good "$h/state/ergosphere.json" --check); rc=$?
-if [[ "$rc" -eq 0 && "$out" == *"ready: checks passed"* ]]; then
-  ok "unreadable legacy file ignored when ergosphere.json exists"
-else
-  bad "unreadable legacy file blocks a run that has ergosphere.json: rc $rc"
-  printf '%s\n' "$out" | tail -n 8
-fi
+out=$(inst "$h" good "$h/state/ergosphere.json" --auto); rc=$?
+expect_blocked "unreadable legacy file" "$h" "$h/state/ergosphere.json" "last.effort is not an effort level" "$rc" "$out"
+chmod 644 "$h/state/cwd-defaults.json"
 
 # A relative TMPDIR makes the staging dir relative. The release check runs
 # after install.sh cds into it, so the staging paths must still resolve.
 h="$work/reltmp"
-mkdir -p "$h/state" "$work/cwd/tmp"
-printf '{"port": %s, "agents": {}}\n' "$port" >"$h/state/ergosphere.json"
+bad_effort "$h"
+mkdir -p "$work/cwd/tmp"
 out=$(cd "$work/cwd" && env -u ERGOSPHERE_PORT HOME="$h" PATH="$work/bin:$PATH" TMPDIR=tmp \
   ERGOSPHERE_CONFIG="$h/state/ergosphere.json" ERGOSPHERE_INSTALL_SOURCE_URL="$www/good.tar.gz" \
-  bash "$repo/install.sh" --dir "$h/app" --port "$port" --check </dev/null 2>&1); rc=$?
-if [[ "$rc" -eq 0 && "$out" == *"ready: checks passed"* ]]; then
-  ok "relative TMPDIR: release check runs from the staging dir"
-else
-  bad "relative TMPDIR: release check failed: rc $rc"
-  printf '%s\n' "$out" | tail -n 8
-fi
+  bash "$repo/install.sh" --dir "$h/app" --port "$port" --auto </dev/null 2>&1); rc=$?
+expect_blocked "relative TMPDIR" "$h" "$h/state/ergosphere.json" "last.effort is not an effort level" "$rc" "$out"
 
 exit "$fail"

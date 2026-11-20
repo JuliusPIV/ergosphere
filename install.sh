@@ -28,7 +28,8 @@ ergosphere.json next to ergosphere.py. A rerun keeps them;
 --bind and --port change only those two keys.
   --yes        approve a non-loopback bind without asking
   --version vA.B.C  install this release instead of the latest (pin or roll back)
-  --check      run the checks only (downloads the release to a temp dir); change nothing
+  --check      run the checks only: download the release to a temp dir and check
+               its files are all there; run nothing from it, change nothing
   --help       this help
 EOF
 }
@@ -711,12 +712,24 @@ download() {
   SRC=${hits[0]%/ergosphere.py}
 }
 
-# Before anything changes: the release's own --check (vendor files, grok, the
-# server's config validators) against the config this run would write, built
-# in STAGE from copies. The server's --check never migrates or writes config.
+# Before anything changes. --check only looks at the downloaded files and runs
+# nothing from them. A real run also runs the release's own --check (vendor
+# files, grok, the server's config validators) against the config this run
+# would write, built in STAGE from copies; that --check never writes config.
 verify_release() {
-  local out sb=0 sp=0 cand legacy
+  local out sb=0 sp=0 cand legacy f missing=()
   download
+  for f in vendor/xterm.js vendor/xterm.css vendor/addon-fit.js; do
+    if [[ ! -f "$SRC/$f" ]]; then missing+=("$f"); fi
+  done
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    row invalid release "archive is missing ${missing[*]}"
+    return 0
+  fi
+  if [[ "$WANT_CHECK" -eq 1 ]]; then
+    row ok release "archive holds ergosphere.py and its vendor files (--check runs nothing from it)"
+    return 0
+  fi
   cand="$STAGE/cfg/ergosphere.json" legacy="$STAGE/cfg/cwd-defaults.json"
   mkdir -- "$STAGE/cfg" || fail download "could not create $STAGE/cfg"
   # Copy only the file the server would read: the legacy file is ignored once
