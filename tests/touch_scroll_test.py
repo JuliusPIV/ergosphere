@@ -350,11 +350,19 @@ def run_pids(home):
     return pids
 
 
+def have_pidfd():
+    # os.pidfd_open and signal.pidfd_send_signal arrived in Python 3.9. Without
+    # them a PID cannot be pinned, so kill_if_run must not signal it blind.
+    return callable(getattr(os, "pidfd_open", None)) and callable(getattr(signal, "pidfd_send_signal", None))
+
+
 def kill_if_run(pid, home):
     # A PID can be reused once its process is reaped, so the snapshot may name
     # someone else by now. An open pidfd pins the process the PID names, so the
     # HOME check and the signal hit the same process. Signal one process, not a
     # group: a group ID could be reused too.
+    if not have_pidfd():
+        return
     try:
         fd = os.pidfd_open(pid)
     except OSError:
@@ -386,6 +394,8 @@ def check_kill_run():
     # The PID list is a snapshot: by the time kill_run signals a PID, it can
     # belong to an unrelated process (the run's own process exited and the
     # PID was reused). Such a process must survive.
+    if not have_pidfd():
+        return None  # SKIP: no pidfd on this Python (3.8 and older), so nothing is signalled
     other = subprocess.Popen(["sleep", "30"], env=dict(os.environ, HOME="/nonexistent-unrelated"))
     calls = []
 
@@ -407,6 +417,19 @@ def check_kill_run():
     if alive:
         return []
     return ["kill_run SIGKILLed an unrelated process (pid %d) named by a stale PID list" % other.pid]
+
+
+def check_kill_no_pidfd():
+    # On an interpreter without pidfd the kill check must SKIP (None), not raise
+    # and abort the other checks in main().
+    with mock.patch.object(os, "pidfd_open", None), mock.patch.object(signal, "pidfd_send_signal", None):
+        try:
+            got = check_kill_run()
+        except Exception as e:
+            return ["check_kill_run raised %s without pidfd" % type(e).__name__]
+    if got is None:
+        return []
+    return ["check_kill_run returned %r without pidfd, expected SKIP (None)" % (got,)]
 
 
 def free_port():
@@ -564,7 +587,7 @@ def main():
     page = erg.chat_page("", None, True, "")
     script = page_script(page)
     fails = []
-    for name, got in (("kill", check_kill_run()), ("css", check_css(page)), ("syntax", check_node_syntax(script)),
+    for name, got in (("kill", check_kill_run()), ("kill-no-pidfd", check_kill_no_pidfd()), ("css", check_css(page)), ("syntax", check_node_syntax(script)),
                       ("gutter", check_gutter(script)), ("browser", check_browser())):
         if got is None:
             print("SKIP %s" % name)
