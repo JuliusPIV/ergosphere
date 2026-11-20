@@ -36,11 +36,11 @@ KNOWN = {
 VENDORED = ["vendor/xterm.js", "vendor/xterm.css", "vendor/addon-fit.js"]
 
 
-def check():
-    """Yield (ok, message) per check."""
+def check(root=ROOT):
+    """Yield (ok, message) per check of the tree at root."""
     try:
-        deps = json.loads((ROOT / "package.json").read_text())["dependencies"]
-        lock = json.loads((ROOT / "package-lock.json").read_text())["packages"]
+        deps = json.loads((root / "package.json").read_text())["dependencies"]
+        lock = json.loads((root / "package-lock.json").read_text())["packages"]
     except (OSError, ValueError, KeyError) as e:
         yield False, "package.json / package-lock.json missing or unreadable: %s" % e
         return
@@ -58,7 +58,7 @@ def check():
         for path, want in known["files"].items():
             covered.add(path)
             try:
-                got = hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
+                got = hashlib.sha256((root / path).read_bytes()).hexdigest()
             except OSError as e:
                 got = "unreadable (%s)" % e
             yield got == want, "%s is %s@%s (sha256 %s)" % (path, name, version, got)
