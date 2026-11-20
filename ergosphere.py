@@ -5400,38 +5400,41 @@ class Handler(BaseHTTPRequestHandler):
             return
         # One state answers it (session_state). Reply after LIVE_LOCK is
         # released: a slow client must not hold it.
+        reply = None
+        while reply is None:
+            reply = self._resume_once(sid)
+        self._json(*reply)
+
+    def _resume_once(self, sid):
+        # (code, body), or None when a start of sid began after this request
+        # looked (open_live: SessionBusy "starting"): look again once it is done.
         wait_for_spawn(sid)
         state = session_state(sid, with_turn=False)
         if running_here(state):
-            self._json(200, {"ok": True, "id": sid})
-            return
+            return (200, {"ok": True, "id": sid})
         if state["state"] == "stopping":
-            self._json(409, {"ok": False, "stopping": True, "state": "stopping",
-                             "error": "session is still stopping; try again in a moment"})
-            return
+            return (409, {"ok": False, "stopping": True, "state": "stopping",
+                          "error": "session is still stopping; try again in a moment"})
         if state["holder"]:
-            self._json(409, {"ok": False, "held": True, "state": state["state"],
-                             "error": "session is already running"})
-            return
+            return (409, {"ok": False, "held": True, "state": state["state"],
+                          "error": "session is already running"})
         row = find_session(sid)
         if row is None:
-            self._json(404, {"ok": False, "error": "unknown session"})
-            return
+            return (404, {"ok": False, "error": "unknown session"})
         cwd = row.get("cwd")
         if not existing_dir(cwd):
-            self._json(400, {"ok": False, "error": "session cwd is not an existing absolute directory"})
-            return
+            return (400, {"ok": False, "error": "session cwd is not an existing absolute directory"})
         try:
             cmd = grok_argv(None, None, cwd, sid)
             open_live(sid, cmd, cwd, 80, 24)
         except SessionBusy as exc:
-            self._json(409, {"ok": False, "state": exc.state, "held": exc.state not in ("stopping", "starting"),
-                             "stopping": exc.state == "stopping", "error": str(exc)})
-            return
+            if exc.state == "starting":
+                return None
+            return (409, {"ok": False, "state": exc.state, "held": exc.state != "stopping",
+                          "stopping": exc.state == "stopping", "error": str(exc)})
         except (RuntimeError, OSError) as exc:
-            self._json(400, {"ok": False, "error": str(exc)[:300]})
-            return
-        self._json(200, {"ok": True, "id": sid})
+            return (400, {"ok": False, "error": str(exc)[:300]})
+        return (200, {"ok": True, "id": sid})
 
     def _take(self):
         # The button posts this. It does not run on connect. Quit only a
