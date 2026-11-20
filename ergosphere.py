@@ -2146,11 +2146,24 @@ def wait_for_spawn(sid):
         time.sleep(0.05)
 
 
+def settled_state(sid, with_turn=True):
+    """session_state once no start of sid is in flight.
+
+    Every reply that could say "ended" (chat page, /term, /holder, /resume)
+    reads this: a start that began after wait_for_spawn reads "starting" with
+    nothing here yet, so wait for it too and look again.
+    """
+    while True:
+        wait_for_spawn(sid)
+        state = session_state(sid, with_turn=with_turn)
+        if state["state"] != "starting" or state["here"]:
+            return state
+
+
 def resume_reply(sid):
     # /resume reply (code, body), or None when a start of sid began after this
     # request looked (open_live: SessionBusy "starting"): look again once done.
-    wait_for_spawn(sid)
-    state = session_state(sid, with_turn=False)
+    state = settled_state(sid, with_turn=False)
     if running_here(state):
         return (200, {"ok": True, "id": sid})
     if state["state"] == "stopping":
@@ -5158,8 +5171,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(resume, str) or not SID_TOKEN_RE.match(resume):
                 self._html(chat_pick_page())
                 return
-            wait_for_spawn(resume)
-            state = session_state(resume, with_turn=False)
+            state = settled_state(resume, with_turn=False)
             running = running_here(state)
             holder = None if running else state["holder"]
             saved = find_session(resume)
@@ -5500,7 +5512,7 @@ class Handler(BaseHTTPRequestHandler):
         if not SID_TOKEN_RE.match(sid):
             self._json(400, {"ok": False, "error": "unknown session"})
             return
-        state = session_state(sid, with_turn=False)
+        state = settled_state(sid, with_turn=False)
         holder = state["holder"]
         here = running_here(state)
         if not holder:
@@ -5649,8 +5661,7 @@ class Handler(BaseHTTPRequestHandler):
         live = None
         client = None
         try:
-            wait_for_spawn(sid)
-            state = session_state(sid, with_turn=False)
+            state = settled_state(sid, with_turn=False)
             holder = state["holder"]
             if running_here(state):
                 with LIVE_LOCK:
