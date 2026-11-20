@@ -690,6 +690,9 @@ approve_bind() {
 download() {
   local url="${ERGOSPHERE_INSTALL_SOURCE_URL:-$SOURCE_URL}" hits types
   STAGE=$(mktemp -d "${TMPDIR:-/tmp}/ergosphere-install.XXXXXX") || fail download "could not create a temp dir"
+  # Absolute, because verify_release cds into STAGE before running the release
+  # check, and a relative TMPDIR would make SRC and the config path wrong there.
+  STAGE=$(cd -- "$STAGE" && pwd) || fail download "could not resolve the temp dir"
   printf 'download: %s\n' "$url"
   "$CURL" --proto '=http,https' -fsSL --connect-timeout 15 --max-time 120 \
     -o "$STAGE/src.tar.gz" -- "$url" || fail download "could not fetch $url"

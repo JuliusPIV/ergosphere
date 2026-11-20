@@ -118,4 +118,19 @@ else
   printf '%s\n' "$out" | tail -n 8
 fi
 
+# A relative TMPDIR makes the staging dir relative. The release check runs
+# after install.sh cds into it, so the staging paths must still resolve.
+h="$work/reltmp"
+mkdir -p "$h/state" "$work/cwd/tmp"
+printf '{"port": %s, "agents": {}}\n' "$port" >"$h/state/ergosphere.json"
+out=$(cd "$work/cwd" && env -u ERGOSPHERE_PORT HOME="$h" PATH="$work/bin:$PATH" TMPDIR=tmp \
+  ERGOSPHERE_CONFIG="$h/state/ergosphere.json" ERGOSPHERE_INSTALL_SOURCE_URL="$www/good.tar.gz" \
+  bash "$repo/install.sh" --dir "$h/app" --port "$port" --check </dev/null 2>&1); rc=$?
+if [[ "$rc" -eq 0 && "$out" == *"ready: checks passed"* ]]; then
+  ok "relative TMPDIR: release check runs from the staging dir"
+else
+  bad "relative TMPDIR: release check failed: rc $rc"
+  printf '%s\n' "$out" | tail -n 8
+fi
+
 exit "$fail"
