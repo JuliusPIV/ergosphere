@@ -44,6 +44,7 @@ const document = {
 const intervals = [];
 let infoBody = null;
 let refusal = null;
+let healthDown = false;
 let hold = false;
 let held = null;
 function reply(body, status) {
@@ -53,7 +54,9 @@ function reply(body, status) {
 function fetch(url) {
   if (url === '/session-info' && hold) return new Promise((r) => { held = r; });
   if (url === '/session-info') return reply(infoBody);
-  // Restart: refused with step.refuse, else /health never answers.
+  // Restart: /health fails with step.healthDown, is refused with step.refuse,
+  // else /health never answers.
+  if (healthDown && url === '/health') return Promise.reject(new Error('down'));
   if (refusal && url === '/health') return reply({started: 1});
   if (refusal && url === '/settings') return reply(refusal, 409);
   return new Promise(() => {});
@@ -68,6 +71,7 @@ const settle = () => new Promise((r) => setImmediate(() => setImmediate(() => se
   const out = [];
   for (const step of steps) {
     refusal = step.refuse || null;
+    healthDown = !!step.healthDown;
     infoBody = step.body;
     hold = !!step.hold;
     if (step.click) { nodes.restart.listeners.click(); await settle(); }
@@ -150,6 +154,11 @@ def main():
     # ends again.  The poll must not re-enable the button.
     steps.append({"click": True, "body": {"sessions": [{"id": "e", "alive": True}]}})
     steps.append({"body": {"sessions": []}})
+    # #156: with one session running, the restart's /health check fails, or
+    # the restart is refused without a count.  Restart must stay disabled,
+    # also after the next poll at the same count.
+    steps.append({"click": True, "healthDown": True, "body": one})
+    steps.append({"click": True, "refuse": {"ok": False, "error": "could not restart"}, "body": one})
     erg.LIVE.clear()
 
     state["sessions"] = 1
@@ -191,7 +200,14 @@ def main():
         print("FAIL poll reply older than a refusal: page shows %r, button %s, message %r" % (
             stale["text"], "disabled" if stale["disabled"] else "enabled", stale["msg"]))
         failed += 1
-    last = got[-1]
+    for name, seen in (("restart check failed", got[-2]), ("refused without a count", got[-1])):
+        if seen["disabled"] and seen["text"].startswith("Running in this server: 1."):
+            print("PASS %s with 1 session: button disabled" % name)
+        else:
+            print("FAIL %s with 1 session: page shows %r, button %s" % (
+                name, seen["text"], "disabled" if seen["disabled"] else "enabled"))
+            failed += 1
+    last = got[-3]
     if last["disabled"]:
         print("PASS restart in progress: polls (1 then 0) leave the button disabled")
     else:

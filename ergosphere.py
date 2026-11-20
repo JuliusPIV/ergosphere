@@ -1083,7 +1083,7 @@ def load_config(migrate=True):
     legacy = path.with_name(LEGACY_AGENTS_NAME)
     if not legacy.exists():
         # stderr, so --check output stays the same lines as before.
-        print("config: no %s, using defaults and no agents" % CONFIG_NAME, file=sys.stderr, flush=True)
+        print("config: no %s, using defaults and no agents" % path, file=sys.stderr, flush=True)
         return check_config({}, str(path))
     try:
         agents = check_agents_map(read_json_file(legacy), str(legacy))
@@ -3596,12 +3596,8 @@ el("restart").addEventListener("click", function () {
       if (!res.ok) {
         restarting = false;
         say("restart-msg", res.data.error || "could not restart");
-        if (typeof res.data.sessions === "number") {
-          state.sessions = res.data.sessions;
-          renderRestart();
-        } else {
-          el("restart").disabled = false;
-        }
+        if (typeof res.data.sessions === "number") state.sessions = res.data.sessions;
+        renderRestart();
         return;
       }
       var host = location.hostname;
@@ -3613,7 +3609,7 @@ el("restart").addEventListener("click", function () {
   }).catch(function () {
     restarting = false;
     say("restart-msg", "could not restart");
-    el("restart").disabled = false;
+    renderRestart();
   });
 });
 renderServer();
