@@ -1083,7 +1083,7 @@ def load_config(migrate=True):
     legacy = path.with_name(LEGACY_AGENTS_NAME)
     if not legacy.exists():
         # stderr, so --check output stays the same lines as before.
-        print("config: no %s, using defaults and no agents" % CONFIG_NAME, file=sys.stderr, flush=True)
+        print("config: no %s, using defaults and no agents" % path, file=sys.stderr, flush=True)
         return check_config({}, str(path))
     try:
         agents = check_agents_map(read_json_file(legacy), str(legacy))
