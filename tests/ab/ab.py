@@ -2,7 +2,8 @@
 
   python3 -B ab.py http <port> <session-id>   -> JSON checks on stdout
   python3 -B ab.py summary <A-dir> <B-dir>    -> summary text on stdout;
-                                                 exit 1 when a check passes on A and fails on B
+                                                 exit 1 when a check passes on A and fails on B,
+                                                 or B's browser checks break or run fewer than A's
 Stdlib only.
 """
 import json
@@ -89,12 +90,19 @@ def summary(adir, bdir):
     b, binfo, bbrowser = side(bdir)
     lines = ["Ergosphere A/B: A = base, B = PR combined with base, stand-in grok TUI, throwaway HOME"]
     lines.append("code_sha256 A=%s B=%s" % (ainfo.get("code_sha256") or "-", binfo.get("code_sha256") or "-"))
-    browser_ran = abrowser.get("browser") and bbrowser.get("browser")
-    if browser_ran:
+    if abrowser.get("browser") and bbrowser.get("browser"):
         lines.append("browser: headless Chromium %s ran the page checks" % abrowser["browser"])
     else:
-        why = abrowser.get("error") or bbrowser.get("error") or "no result"
-        lines.append("BROWSER CHECKS DID NOT RUN (%s): only the HTTP-level checks below ran" % why[:300])
+        why = lambda r: str(r.get("browser") and "ran" or r.get("unavailable") or r.get("error") or "no result")
+        lines.append("BROWSER CHECKS DID NOT RUN (A: %s; B: %s)" % (why(abrowser)[:150], why(bbrowser)[:150]))
+    # No browser on this host is a warning; a browser.js that breaks on B, or
+    # B running fewer page checks than A, fails the run.
+    broken = []
+    if not bbrowser.get("browser") and not bbrowser.get("unavailable"):
+        broken.append("browser checks broke on B: %s" % str(bbrowser.get("error") or "no result")[:300])
+    na, nb = len(abrowser.get("checks") or {}), len(bbrowser.get("checks") or {})
+    if nb < na:
+        broken.append("B ran %d browser checks, A ran %d" % (nb, na))
     width = 36
     lines.append("")
     lines.append("%-14s %-*s %-*s %s" % ("check", width, "A", width, "B", "same"))
@@ -118,8 +126,10 @@ def summary(adir, bdir):
         lines.append("result: %d check(s) differ: %s" % (len(differ), ", ".join(differ)))
     if regress:
         lines.append("REGRESSION: passes on A, fails on B: %s" % ", ".join(regress))
+    for why in broken:
+        lines.append("BROWSER FAILURE: %s" % why)
     print("\n".join(lines))
-    return 1 if regress else 0
+    return 1 if regress or broken else 0
 
 
 def main(argv):

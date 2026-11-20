@@ -133,7 +133,12 @@ async function keyboardCheck(b, device, kb, pan) {
 
 async function run() {
   const exe = process.env.AB_CHROME || undefined;
-  const b = await chromium.launch(exe ? {executablePath: exe} : {});
+  let b;
+  try {
+    b = await chromium.launch(exe ? {executablePath: exe} : {});
+  } catch (e) {
+    return {unavailable: String(e && e.message || e).split('\n')[0]};
+  }
   const checks = {};
   try {
     let ctx = await b.newContext({viewport: {width: 1280, height: 800}});
