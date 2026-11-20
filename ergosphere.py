@@ -4678,7 +4678,15 @@ startTitlePoll();
 if (sid) pollTitle();
 if (hold) { showHeldServer(heldServer); pollHold(); }
 if (!hold && running) { ensureTerm(); requestAnimationFrame(connect); }
-else if (!hold) { ensureTerm(); setSid(sid); showEnded(); }
+// A stopped session: fit the terminal to the page (only connect() and resize
+// fit otherwise) and ask to resume at once, not only on a click (#52).
+else if (!hold) {
+  ensureTerm();
+  try { fit.fit(); } catch (err) {}
+  setSid(sid);
+  showEnded();
+  openResumeAsk();
+}
 </script>
 </body>
 </html>
