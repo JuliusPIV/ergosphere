@@ -131,6 +131,37 @@ async function keyboardCheck(b, device, kb, pan) {
   }
 }
 
+// Quit, open the "Resume this session?" box from the ended terminal, then
+// press the bar's Resume instead: the box must close once grok is live (#57).
+async function resumeBoxCheck(b) {
+  const ctx = await b.newContext({viewport: {width: 1280, height: 800}});
+  try {
+    const {p, s, met} = await openPage(ctx);
+    if (!met) return check(false, `no grok view at page size: ${seen(s)}`);
+    const page = () => p.evaluate(() => ({bar: document.getElementById('stop').textContent,
+      status: document.getElementById('status').textContent,
+      box: !document.getElementById('resume-ask').hidden}));
+    const pageUntil = async pred => {
+      const end = Date.now() + WAIT;
+      let r = await page();
+      while (!pred(r) && Date.now() < end) { await wait(50); r = await page(); }
+      return {r, met: pred(r)};
+    };
+    await p.click('#stop');
+    let q = await pageUntil(r => r.bar === 'Resume' && r.status === 'Ended');
+    if (!q.met) return check(false, `Quit did not end it: ${q.r.status}`);
+    await p.click('#term', {position: {x: 20, y: 20}});
+    q = await pageUntil(r => r.box);
+    if (!q.met) return check(false, 'ended terminal click opened no box');
+    await p.click('#stop');
+    q = await pageUntil(r => r.bar === 'Quit' && r.status === 'Running');
+    if (!q.met) return check(false, `bar Resume not live: ${q.r.status}`);
+    return check(!q.r.box, q.r.box ? 'box still open over live grok' : 'box closed, grok live');
+  } finally {
+    await ctx.close();
+  }
+}
+
 async function run() {
   const exe = process.env.AB_CHROME || undefined;
   const b = await chromium.launch(exe ? {executablePath: exe} : {});
@@ -206,6 +237,8 @@ async function run() {
     await ctx.close();
     checks.keyboard_android = await keyboardCheck(b, 'Pixel 7', 320, false);
     checks.keyboard_ios = await keyboardCheck(b, 'iPhone 14', 300, true);
+    // Last: it quits and resumes the session the other checks share.
+    checks.resume_box = await resumeBoxCheck(b);
     return {browser: b.version(), checks};
   } finally {
     await b.close();
