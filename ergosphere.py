@@ -83,6 +83,9 @@ VENDOR_FILES = {
 # One live grok per CLI session id. Closing a browser socket does not remove it.
 LIVE = {}
 LIVE_LOCK = threading.Lock()
+# Session ids whose grok is being spawned, with LIVE_LOCK released: a cwd on a
+# hung mount must not block every other launch. Guarded by LIVE_LOCK.
+STARTING = set()
 STOP = threading.Event()
 # Set once a restart is accepted. No new grok starts after that.
 RESTART = threading.Event()
@@ -1964,14 +1967,31 @@ def open_live(sid, cmd, cwd, cols, rows):
             return live, True
         if live is not None and live_state(live) == "stopping":
             raise SessionBusy("stopping", "session is still stopping; try again in a moment")
+        if sid in STARTING:
+            raise SessionBusy("starting", "session is still starting; try again in a moment")
         if holder:
             raise SessionBusy(holder_state(holder), "session is already open in another grok")
         if live is not None:
             LIVE.pop(sid, None)
+        STARTING.add(sid)
+    try:
         proc, master = spawn_grok(cmd, cwd, cols, rows)
-        live = Live(sid, proc, master, cwd)
-        LIVE[sid] = live
-        live.start()
+    except BaseException:
+        with LIVE_LOCK:
+            STARTING.discard(sid)
+        raise
+    with LIVE_LOCK:
+        STARTING.discard(sid)
+        stopping = STOP.is_set()
+        if not stopping:
+            live = Live(sid, proc, master, cwd)
+            LIVE[sid] = live
+            live.start()
+    if stopping:
+        # kill_all already ran: this grok would outlive the server.
+        kill_proc(proc)
+        os.close(master)
+        raise RuntimeError("Ergosphere is stopping")
     # Log after release: a stalled log write must not block other launches.
     print("term pid=%s sid=%s cmd=%s" % (proc.pid, sid, " ".join(cmd)), flush=True)
     return live, False
@@ -2056,12 +2076,16 @@ def session_state(sid, with_turn=True, scan=None):
     """
     with LIVE_LOCK:
         live = LIVE.get(sid)
+        spawning = sid in STARTING
     here = live_state(live)
     if scan is None:
         scan = ProcScan()
     holder = session_holder(sid, scan)
     out = {"id": sid, "state": "stopped", "pid": None, "turn": None, "holder": holder,
            "here": here in ("starting", "running")}
+    if spawning and not here:
+        out["state"] = "starting"
+        return out
     if here == "stopping":
         out["state"] = "stopping"
         out["pid"] = live.proc.pid
@@ -3309,7 +3333,8 @@ def running_sessions():
     # stopping (live_state). The restart gate counts the same way.
     with LIVE_LOCK:
         lives = list(LIVE.values())
-    return sum(1 for live in lives if live_state(live))
+        spawning = len(STARTING)
+    return spawning + sum(1 for live in lives if live_state(live))
 
 
 def settings_overrides(args):
@@ -5176,7 +5201,7 @@ class Handler(BaseHTTPRequestHandler):
     def _settings_restart(self):
         # Only with zero grok sessions. RESTART stops new launches until exec.
         with LIVE_LOCK:
-            busy = sum(1 for live in LIVE.values() if live_state(live))
+            busy = len(STARTING) + sum(1 for live in LIVE.values() if live_state(live))
             if not busy:
                 RESTART.set()
         if busy:
@@ -5338,7 +5363,7 @@ class Handler(BaseHTTPRequestHandler):
             cmd = grok_argv(None, None, cwd, sid)
             open_live(sid, cmd, cwd, 80, 24)
         except SessionBusy as exc:
-            self._json(409, {"ok": False, "state": exc.state, "held": exc.state != "stopping",
+            self._json(409, {"ok": False, "state": exc.state, "held": exc.state not in ("stopping", "starting"),
                              "stopping": exc.state == "stopping", "error": str(exc)})
             return
         except (RuntimeError, OSError) as exc:
