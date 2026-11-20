@@ -9,6 +9,13 @@ fail=0
 has()   { if grep -qF -- "$2" <<<"$1"; then echo "ok:   $3"; else echo "FAIL: $3"; fail=1; fi; }
 lacks() { if grep -qF -- "$2" <<<"$1"; then echo "FAIL: $3"; fail=1; else echo "ok:   $3"; fi; }
 
+# #99: the README's recompute command for /health code_sha256 must give what the server reports.
+recompute='import hashlib as h; print(h.sha256(b"".join(h.sha256(open(f, "rb").read()).digest() for f in ("ergosphere.py", "vendor/addon-fit.js", "vendor/xterm.css", "vendor/xterm.js"))).hexdigest())'
+has "$readme" "python3 -c '$recompute'" 'README gives the code_sha256 recompute command'
+want="$(cd "$root" && python3 -B -c 'import ergosphere; print(ergosphere.runtime_fingerprint())')"
+got="$(cd "$root" && python3 -B -c "$recompute")"
+if [ -n "$want" ] && [ "$got" = "$want" ]; then echo "ok:   that command gives the server's code_sha256"; else echo "FAIL: that command gives the server's code_sha256"; fail=1; fi
+
 # No release so far has a login; a version number in the claim goes stale.
 lacks "$readme" 'v0.1'                    'README ties no-login to no version'
 lacks "$skill"  'v0.1'                    'SKILL.md ties no-login to no version'
