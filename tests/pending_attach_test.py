@@ -69,9 +69,16 @@ def main():
             failures.append("the spawn never reached its pre-exec block")
             return report(failures)
 
-        # The spawn publishes about 1 s after the page request arrives.
+        # The spawn publishes once the page request has asked about the session:
+        # the fix waits in wait_for_spawn, the old code reads session_state.
+        asked = threading.Event()
+        for name in ("wait_for_spawn", "session_state"):
+            real = getattr(erg, name, None)
+            if real is not None:
+                setattr(erg, name, lambda *a, _real=real, **k: (asked.set(), _real(*a, **k))[1])
+
         def release():
-            time.sleep(1.0)
+            asked.wait(10)
             os.close(os.open(FIFO, os.O_WRONLY))
 
         threading.Thread(target=release, daemon=True).start()

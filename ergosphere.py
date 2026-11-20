@@ -1493,8 +1493,14 @@ def kill_all():
     while True:
         with LIVE_LOCK:
             if not STARTING:
+                lives = list(LIVE.values())
+                LIVE.clear()
                 break
         time.sleep(0.1)
+    # Without STOP (main's finally after serve_forever) such a spawn added its
+    # grok to LIVE instead.
+    for live in lives:
+        live.shutdown()
 
 
 class SessionBusy(RuntimeError):

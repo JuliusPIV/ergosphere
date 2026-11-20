@@ -137,11 +137,17 @@ def run(code, port, work):
         code_, body = request(base, "/launch", {"cwd": os.path.join(work, "work"), "approval": "ask"})
         checks["slow_launch"] = check(code_ == 200 and body.get("ok") is True,
                                       "launch: %s %s" % (code_, body.get("error", "")))
-        code_, body = request(base, "/resume", {"id": slow})
-        checks["slow_second_start"] = check(code_ == 409 and body.get("state") == "starting",
-                                            "second resume: %s %s" % (code_, body.get("state") or body.get("error")))
+        # A second Resume of the starting session (another tab) waits for that
+        # start and attaches to it: 200, never a second grok.
+        again = {}
+        second = threading.Thread(target=lambda: again.update(
+            zip(("code", "body"), request(base, "/resume", {"id": slow}, timeout=120))), daemon=True)
+        second.start()
         writer = os.open(fifo, os.O_WRONLY)
         first.join(60)
+        second.join(60)
+        checks["slow_second_start"] = check(again.get("code") == 200,
+                                            "second resume: %s %s" % (again.get("code"), (again.get("body") or {}).get("error", "")))
         up = wait_for(lambda: state(slow).startswith("running"))
         checks["slow_one_grok"] = check(slow_reply.get("code") == 200 and up and groks_for(slow) == 1,
                                         "first %s, running %s, groks %d" % (slow_reply.get("code"), up, groks_for(slow)))
