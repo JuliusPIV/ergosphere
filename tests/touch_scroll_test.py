@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -327,6 +328,44 @@ async function oneMove(p, cdp, x, ya, yb) {
 BROWSER_WAIT_S = 15  # WAIT in BROWSER_JS, in seconds
 
 
+def run_pids(home):
+    # Our own processes started with this run's throwaway HOME: the server,
+    # the stand-in grok (its own session), node and Chrome all inherit it.
+    mark = ("\0HOME=%s\0" % home).encode()
+    pids = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit() or int(d) == os.getpid():
+            continue
+        try:
+            with open("/proc/%s/environ" % d, "rb") as f:
+                env = b"\0" + f.read()
+        except OSError:
+            continue
+        if mark in env:
+            pids.append(int(d))
+    return pids
+
+
+def kill_run(home):
+    # Kill what the run left (also after a failure or a timeout), then wait
+    # until it is gone. Returns how many were left before and after.
+    left = run_pids(home)
+    for pid in left:
+        try:
+            if os.getpgid(pid) == pid:
+                os.killpg(pid, signal.SIGKILL)
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    end = time.monotonic() + 10
+    still = run_pids(home)
+    while still and time.monotonic() < end:
+        time.sleep(0.05)
+        still = run_pids(home)
+    return len(left), len(still)
+
+
 def free_port():
     if os.environ.get("ERGOSPHERE_TEST_PORT"):
         return int(os.environ["ERGOSPHERE_TEST_PORT"])
@@ -413,6 +452,10 @@ def check_browser():
             srv.wait(10)
         except subprocess.TimeoutExpired:
             srv.kill()
+            srv.wait()
+        left, still = kill_run(home)
+        if left:
+            print("note: killed %d processes the run left behind, %d still running" % (left, still))
         shutil.rmtree(tmp, ignore_errors=True)
     print("browser: %s" % json.dumps(res))
     fails = []
@@ -472,6 +515,8 @@ def check_browser():
 
 
 def main():
+    # SIGTERM (a runner's timeout) runs the cleanup in check_browser too.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     erg = load()
     page = erg.chat_page("", None, True, "")
     script = page_script(page)
