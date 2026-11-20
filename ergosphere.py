@@ -2024,6 +2024,12 @@ def list_live():
     return rows
 
 
+def live_info():
+    # Settings polls this. "running" is the restart gate's count, so a spawn
+    # still in STARTING (no LIVE row yet) is counted on the page too.
+    return {"sessions": list_live(), "running": running_sessions()}
+
+
 _TURN_MARK = b"agent turn in progress"
 
 
@@ -3516,17 +3522,16 @@ function renderRestart() {
   say("sessions", "Running in this server: " + state.sessions + ". Restart needs zero.");
   el("restart").disabled = restarting || state.sessions !== 0;
 }
-// /session-info with no id reads only this server's LIVE table (no /proc
-// scan), so a 2 s poll is cheap. alive matches the restart gate's count.
+// /session-info with no id reads only this server's tables (no /proc scan),
+// so a 2 s poll is cheap. "running" is the restart gate's own count.
 function pollSessions() {
   if (restarting || document.hidden) return;
   var seq = ++pollSeq;
   fetch("/session-info", {cache: "no-store"}).then(function (resp) {
     return resp.ok ? resp.json() : null;
   }).then(function (data) {
-    var i, n = 0;
-    if (seq !== pollSeq || restarting || !data || !Array.isArray(data.sessions)) return;
-    for (i = 0; i < data.sessions.length; i++) if (data.sessions[i].alive) n++;
+    if (seq !== pollSeq || restarting || !data || typeof data.running !== "number") return;
+    var n = data.running;
     if (n !== state.sessions) {
       state.sessions = n;
       say("restart-msg", "");
@@ -5408,7 +5413,7 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(urlparse(self.path).query, keep_blank_values=False)
         want = one_query(qs, "id")
         if not want:
-            self._json(200, {"sessions": list_live()})
+            self._json(200, live_info())
             return
         if not SID_TOKEN_RE.match(want):
             self._json(400, {"error": "unknown session"})
