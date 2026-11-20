@@ -3596,12 +3596,8 @@ el("restart").addEventListener("click", function () {
       if (!res.ok) {
         restarting = false;
         say("restart-msg", res.data.error || "could not restart");
-        if (typeof res.data.sessions === "number") {
-          state.sessions = res.data.sessions;
-          renderRestart();
-        } else {
-          el("restart").disabled = false;
-        }
+        if (typeof res.data.sessions === "number") state.sessions = res.data.sessions;
+        renderRestart();
         return;
       }
       var host = location.hostname;
@@ -3613,7 +3609,7 @@ el("restart").addEventListener("click", function () {
   }).catch(function () {
     restarting = false;
     say("restart-msg", "could not restart");
-    el("restart").disabled = false;
+    renderRestart();
   });
 });
 renderServer();
