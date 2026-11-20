@@ -4373,6 +4373,7 @@ function showEnded() {
 var retryTimer = null;
 function resumeSession(tries) {
   tries = tries || 0;
+  closeResumeAsk();
   ended = false;
   startTitlePoll();
   stopping = false;
