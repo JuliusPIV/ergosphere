@@ -103,4 +103,19 @@ else
   printf '%s\n' "$out" | tail -n 8
 fi
 
+# An unreadable legacy cwd-defaults.json is ignored when ergosphere.json exists
+# (the server and cfg_py both prefer the primary file), so it must not block.
+h="$work/unreadable-legacy"
+mkdir -p "$h/state"
+printf '{"port": %s, "agents": {}}\n' "$port" >"$h/state/ergosphere.json"
+printf '{"x": "/tmp"}\n' >"$h/state/cwd-defaults.json"
+chmod 000 "$h/state/cwd-defaults.json"
+out=$(inst "$h" good "$h/state/ergosphere.json" --check); rc=$?
+if [[ "$rc" -eq 0 && "$out" == *"ready: checks passed"* ]]; then
+  ok "unreadable legacy file ignored when ergosphere.json exists"
+else
+  bad "unreadable legacy file blocks a run that has ergosphere.json: rc $rc"
+  printf '%s\n' "$out" | tail -n 8
+fi
+
 exit "$fail"

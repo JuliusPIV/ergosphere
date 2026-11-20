@@ -714,8 +714,13 @@ verify_release() {
   download
   cand="$STAGE/cfg/ergosphere.json" legacy="$STAGE/cfg/cwd-defaults.json"
   mkdir -- "$STAGE/cfg" || fail download "could not create $STAGE/cfg"
-  if [[ -e "$CFG_FILE" ]]; then cp -- "$CFG_FILE" "$cand" || fail check "could not read $CFG_FILE"; fi
-  if [[ -e "$LEGACY_FILE" ]]; then cp -- "$LEGACY_FILE" "$legacy" || fail check "could not read $LEGACY_FILE"; fi
+  # Copy only the file the server would read: the legacy file is ignored once
+  # ergosphere.json exists, so an unreadable one must not block the run.
+  if [[ -e "$CFG_FILE" ]]; then
+    cp -- "$CFG_FILE" "$cand" || fail check "could not read $CFG_FILE"
+  elif [[ -e "$LEGACY_FILE" ]]; then
+    cp -- "$LEGACY_FILE" "$legacy" || fail check "could not read $LEGACY_FILE"
+  fi
   if [[ -n "$ARG_BIND" ]]; then sb=1; fi
   if [[ -n "$ARG_PORT" ]]; then sp=1; fi
   if ! out=$(cfg_py write "$cand" "$legacy" "$BIND" "$PORT" "$sb" "$sp" "$AGENT" "$AGENT_DIR" 2>&1); then
