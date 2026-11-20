@@ -810,6 +810,23 @@ def release_holder(sid):
     return term_holder(sid, holder, raw)
 
 
+def open_pidfd(pid):
+    """A pidfd for pid, or None where pidfds are unavailable (Python < 3.9, Linux < 5.3).
+
+    Raises ProcessLookupError when pid is gone.
+    """
+    opener = getattr(os, "pidfd_open", None)
+    if opener is None or not hasattr(signal, "pidfd_send_signal"):
+        return None
+    try:
+        return opener(pid)
+    except ProcessLookupError:
+        raise
+    except OSError:
+        # ENOSYS on an old kernel, or a seccomp filter: the os.kill path.
+        return None
+
+
 def term_holder(sid, holder, raw):
     """SIGTERM the holder grok after checking raw (its command line) names sid; wait for exit."""
     pid = holder["pid"]
@@ -823,13 +840,42 @@ def term_holder(sid, holder, raw):
             "pid": pid,
             "via": holder["via"],
         }
+    # raw was read earlier, and the pid can be reused since.  A pidfd pins
+    # the process: the command line read after it opens is that process's
+    # (while it lives), and a signal through it never reaches a new one.
     try:
-        os.kill(pid, signal.SIGTERM)
+        pidfd = open_pidfd(pid)
+    except ProcessLookupError:
+        return True, {"ok": True, "pid": pid, "already": "gone"}
+    try:
+        again = read_proc_cmdline(pid)
+        if not again:
+            return True, {"ok": True, "pid": pid, "already": "gone"}
+        if not grok_cmdline(again) or not cmdline_contains_sid(again, sid):
+            print("take refuse pid=%s sid=%s changed before the signal" % (pid, sid), flush=True)
+            return False, {"ok": False, "error": "that grok changed; try again", "pid": pid}
+        via = "kill"
+        if pidfd is not None:
+            try:
+                signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+                via = "pidfd"
+            except OSError as exc:
+                # ENOSYS or EPERM here can be a seccomp filter on this one
+                # syscall.  os.kill, right after the re-read, then does what
+                # main did: it signals, or a holder of another user stays
+                # EPERM and is refused below.
+                if exc.errno not in (errno.ENOSYS, errno.EPERM):
+                    raise
+        if via == "kill":
+            os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         return True, {"ok": True, "pid": pid}
     except (PermissionError, OSError) as exc:
         return False, {"ok": False, "error": "cannot signal that pid: %s" % exc, "pid": pid}
-    print("take sigterm pid=%s sid=%s" % (pid, sid), flush=True)
+    finally:
+        if pidfd is not None:
+            os.close(pidfd)
+    print("take sigterm pid=%s sid=%s via=%s" % (pid, sid, via), flush=True)
     deadline = time.time() + 12
     while time.time() < deadline:
         if pid_gone(pid) or not cmdline_contains_sid(read_proc_cmdline(pid), sid):
