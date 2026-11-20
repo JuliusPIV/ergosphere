@@ -29,6 +29,7 @@ import tempfile
 import time
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 FORBIDDEN_PORTS = {9241, 9242, 9119, 9120, 9121}
@@ -328,22 +329,43 @@ async function oneMove(p, cdp, x, ya, yb) {
 BROWSER_WAIT_S = 15  # WAIT in BROWSER_JS, in seconds
 
 
+def has_home(pid, home):
+    # True while process pid still has this run's throwaway HOME in its environment.
+    mark = ("\0HOME=%s\0" % home).encode()
+    try:
+        with open("/proc/%d/environ" % pid, "rb") as f:
+            return mark in b"\0" + f.read()
+    except OSError:
+        return False
+
+
 def run_pids(home):
     # Our own processes started with this run's throwaway HOME: the server,
     # the stand-in grok (its own session), node and Chrome all inherit it.
-    mark = ("\0HOME=%s\0" % home).encode()
+    # A snapshot only: kill_run checks each PID again before it signals it.
     pids = []
     for d in os.listdir("/proc"):
-        if not d.isdigit() or int(d) == os.getpid():
-            continue
-        try:
-            with open("/proc/%s/environ" % d, "rb") as f:
-                env = b"\0" + f.read()
-        except OSError:
-            continue
-        if mark in env:
+        if d.isdigit() and int(d) != os.getpid() and has_home(int(d), home):
             pids.append(int(d))
     return pids
+
+
+def kill_if_run(pid, home):
+    # A PID can be reused once its process is reaped, so the snapshot may name
+    # someone else by now. An open pidfd pins the process the PID names, so the
+    # HOME check and the signal hit the same process. Signal one process, not a
+    # group: a group ID could be reused too.
+    try:
+        fd = os.pidfd_open(pid)
+    except OSError:
+        return  # already gone
+    try:
+        if has_home(pid, home):
+            signal.pidfd_send_signal(fd, signal.SIGKILL)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def kill_run(home):
@@ -351,19 +373,40 @@ def kill_run(home):
     # until it is gone. Returns how many were left before and after.
     left = run_pids(home)
     for pid in left:
-        try:
-            if os.getpgid(pid) == pid:
-                os.killpg(pid, signal.SIGKILL)
-            else:
-                os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
+        kill_if_run(pid, home)
     end = time.monotonic() + 10
     still = run_pids(home)
     while still and time.monotonic() < end:
         time.sleep(0.05)
         still = run_pids(home)
     return len(left), len(still)
+
+
+def check_kill_run():
+    # The PID list is a snapshot: by the time kill_run signals a PID, it can
+    # belong to an unrelated process (the run's own process exited and the
+    # PID was reused). Such a process must survive.
+    other = subprocess.Popen(["sleep", "30"], env=dict(os.environ, HOME="/nonexistent-unrelated"))
+    calls = []
+
+    def stale(home):
+        calls.append(home)
+        return [other.pid] if len(calls) == 1 else []
+
+    try:
+        with mock.patch.dict(globals(), {"run_pids": stale}):
+            kill_run(tempfile.mkdtemp())
+        try:
+            other.wait(timeout=5)  # a SIGKILL lands asynchronously, so give it time
+            alive = False
+        except subprocess.TimeoutExpired:
+            alive = True
+    finally:
+        other.kill()
+        other.wait()
+    if alive:
+        return []
+    return ["kill_run SIGKILLed an unrelated process (pid %d) named by a stale PID list" % other.pid]
 
 
 def free_port():
@@ -521,7 +564,7 @@ def main():
     page = erg.chat_page("", None, True, "")
     script = page_script(page)
     fails = []
-    for name, got in (("css", check_css(page)), ("syntax", check_node_syntax(script)),
+    for name, got in (("kill", check_kill_run()), ("css", check_css(page)), ("syntax", check_node_syntax(script)),
                       ("gutter", check_gutter(script)), ("browser", check_browser())):
         if got is None:
             print("SKIP %s" % name)
