@@ -15,7 +15,7 @@
 set -u
 repo=$(cd "$(dirname "$0")/.." && pwd)
 mode=${1:-}
-port=${ERGOSPHERE_TEST_PORT:-9560}
+port=${ERGOSPHERE_TEST_PORT:-$(python3 -I "$repo/tests/free_port.py" 3)}
 busy=$((port + 1))
 free=$((port + 2))
 if [[ "$mode" == --netns ]]; then

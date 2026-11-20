@@ -3,8 +3,8 @@
 #
 # Run: [ERGOSPHERE_TEST_PORT_BASE=<first spare port>] bash tests/run_all.sh
 # Each test that reads ERGOSPHERE_TEST_PORT gets its own port: BASE, BASE+1, ...
-# when BASE is set, else a free loopback port from the OS (never 9119-9121,
-# 9241 or 9242).  Each test gets TERM after ERGOSPHERE_TEST_TIMEOUT seconds (300)
+# when BASE is set, else a free loopback port from tests/free_port.py, with the
+# next two free as well (some tests use them).  Each test gets TERM after ERGOSPHERE_TEST_TIMEOUT seconds (300)
 # and KILL 10 s later.  No tests found is a failure.
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -12,16 +12,13 @@ base=${ERGOSPHERE_TEST_PORT_BASE:-}
 limit=${ERGOSPHERE_TEST_TIMEOUT:-300}
 next=0 failed=() total=0
 
-free_port() {
-  python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
-}
 
 for t in tests/*_test.py tests/*_test.sh; do
   [ -e "$t" ] || continue
   case "$t" in *.py) run=(python3 -B "$t");; *) run=(bash "$t");; esac
   port_env=()
   if grep -q ERGOSPHERE_TEST_PORT "$t"; then
-    if [ -n "$base" ]; then port=$((base + next)); next=$((next + 1)); else port=$(free_port); fi
+    if [ -n "$base" ]; then port=$((base + next)); next=$((next + 1)); else port=$(python3 -I tests/free_port.py 3) || exit 1; fi
     port_env=("ERGOSPHERE_TEST_PORT=$port")
   fi
   echo "=== $t${port_env[*]:+ (${port_env[*]})}"

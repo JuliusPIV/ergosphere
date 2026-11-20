@@ -10,7 +10,7 @@
 # starts is stopped at the end.
 set -u
 repo=$(cd "$(dirname "$0")/.." && pwd)
-port=${ERGOSPHERE_TEST_PORT:-9550}
+port=${ERGOSPHERE_TEST_PORT:-$(python3 -I "$repo/tests/free_port.py" 3)}
 new=$((port + 1))
 work=$(mktemp -d "${TMPDIR:-/tmp}/ergosphere-port-taken-test.XXXXXX")
 pids=()

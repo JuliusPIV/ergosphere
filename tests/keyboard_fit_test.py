@@ -28,11 +28,14 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FORBIDDEN_PORTS = {9241, 9242, 9119, 9120, 9121}
-SID = "11911911-0b0a-4908-8706-050403020119"
+# A fresh id per run: Ergosphere finds a session's holder machine-wide via
+# /proc, so a fixed id makes concurrent runs on one machine block each other.
+SID = str(uuid.uuid4())
 
 BROWSER_JS = r"""
 const {chromium, devices} = require('playwright');

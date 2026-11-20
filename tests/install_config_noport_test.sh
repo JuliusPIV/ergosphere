@@ -10,7 +10,7 @@
 # Every server it starts is stopped at the end.
 set -u
 repo=$(cd "$(dirname "$0")/.." && pwd)
-port=${ERGOSPHERE_TEST_PORT:-9550}
+port=${ERGOSPHERE_TEST_PORT:-$(python3 -I "$repo/tests/free_port.py" 3)}
 work=$(mktemp -d "${TMPDIR:-/tmp}/ergosphere-noport-test.XXXXXX")
 real_curl=$(command -v curl)
 pids=()
