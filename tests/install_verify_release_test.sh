@@ -59,13 +59,14 @@ for _ in $(seq 50); do [[ -s "$work/www.port" ]] && break; sleep 0.1; done
 www="http://127.0.0.1:$(cat "$work/www.port")"
 
 # inst HOME PKG CONFIG [installer args...]: prints the output, returns its rc.
+# setsid: no controlling terminal, so nothing can be answered on /dev/tty.
 inst() {
   local home=$1 pkg=$2 cfg=$3
   shift 3
   mkdir -p "$home"
   env -u ERGOSPHERE_PORT HOME="$home" PATH="$work/bin:$PATH" TMPDIR="$work" ERGOSPHERE_CONFIG="$cfg" \
     ERGOSPHERE_INSTALL_SOURCE_URL="$www/$pkg.tar.gz" \
-    bash "$repo/install.sh" --dir "$home/app" --port "$port" "$@" </dev/null 2>&1
+    setsid -w bash "$repo/install.sh" --dir "$home/app" --port "$port" "$@" </dev/null 2>&1
 }
 
 # expect_blocked NAME HOME CONFIG WANT RC OUT: refused at the gate, nothing made.
@@ -118,6 +119,17 @@ h="$work/plant-auto"
 out=$(inst "$h" planted "$h/state/ergosphere.json" --auto); rc=$?
 if [[ -e "$mark" ]]; then ok "planted release: the real run runs its --check"; else bad "planted release: the real run did not run its --check"; fi
 expect_blocked "planted release --auto" "$h" "$h/state/ergosphere.json" "planted release ran" "$rc" "$out"
+rm -f -- "$mark"
+# A non-loopback bind with no --yes and no terminal stops at the approval,
+# before the real run executes anything from the download.
+h="$work/plant-bind"
+out=$(inst "$h" planted "$h/state/ergosphere.json" --auto --bind 0.0.0.0); rc=$?
+if [[ "$rc" -ne 0 && ! -e "$mark" && ! -e "$h/app" && "$out" == *"needs confirmation on a terminal, or --yes"* ]]; then
+  ok "planted release, unapproved bind: stopped at the approval, nothing ran"
+else
+  bad "planted release, unapproved bind: rc $rc, marker $([[ -e "$mark" ]] && echo written || echo absent)"
+  printf '%s\n' "$out" | tail -n 8
+fi
 rm -f -- "$mark"
 
 # A good release still passes --check.

@@ -992,12 +992,14 @@ main() {
   [[ -n "${HOME:-}" || "$DEST" != "$DEFAULT_DEST" ]] || fail check "HOME is not set; pass --dir"
   load_config
   if [[ "$WANT_CHECK" -eq 0 && "$MODE" == manual ]]; then ask_manual; fi
+  # Every question comes before check_target, whose release check runs the
+  # downloaded ergosphere.py in a real run.
+  if [[ "$WANT_CHECK" -eq 0 ]]; then approve_bind; fi
   check_target
   if [[ "$WANT_CHECK" -eq 1 ]]; then
     printf 'ready: checks passed, nothing changed\n'
     return 0
   fi
-  approve_bind
   install_files
   write_config
   start_server
