@@ -23,4 +23,7 @@ has   "$readme" '**+ New Agent**'         'README names the + New Agent button'
 lacks "$readme" '| New session |'         'keyboard table names no New session action'
 # Since #135 a session held by another Ergosphere server on this machine can be taken over.
 lacks "$readme" 'does not attach to sessions run by another Ergosphere server' 'Known limits allows takeover from another server'
+# #115: the installer refuses a fresh install dir that already holds the ERGOSPHERE_CONFIG file.
+has   "$readme" 'Point it at a file outside the install directory, for example' 'README says to keep ERGOSPHERE_CONFIG outside the install dir'
+has   "$readme" 'is refused on purpose'  'README says a non-Ergosphere non-empty install dir is refused on purpose'
 exit "$fail"
