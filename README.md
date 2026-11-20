@@ -114,6 +114,7 @@ All options are in the [installer reference](#installer-options).
 <tr><td>🏷️ <b>Knows its name</b></td><td>The chat bar shows the session name before its ID and follows <code>/rename</code> within a few seconds. The browser tab title matches.</td></tr>
 <tr><td>📋 <b>Copy and paste that behave</b></td><td><kbd>Ctrl</kbd>+<kbd>C</kbd> copies a selection and otherwise interrupts grok, like a terminal. <kbd>Ctrl</kbd>+<kbd>V</kbd> pastes. Copying works on plain HTTP pages too.</td></tr>
 <tr><td>🖱️ <b>Mouse included</b></td><td>The mouse wheel and clicks reach grok. Drag to select text.</td></tr>
+<tr><td>📱 <b>Works on phones</b></td><td>Drag one finger on the terminal to scroll grok; a quick flick keeps scrolling and slows to a stop. Pinch with two fingers to change the terminal text size, from 8 to 28 px; each browser remembers the size for the next session. When the on-screen keyboard opens, the terminal shrinks to the space above it, so grok's input line stays in view. Dragging grok's scroll bar takes a mouse; on a phone, drag anywhere on the terminal instead.</td></tr>
 <tr><td>⚙️ <b>Settings without editing files</b></td><td>A Settings page changes the listen address and port, and adds, changes or removes agents and their working directories. A port already in use is refused, and if the new address cannot be used at restart, Ergosphere falls back to the previous one.</td></tr>
 <tr><td>🧱 <b>Safe by default</b></td><td>Listens on 127.0.0.1 only. Checks Host and Origin, refuses to be framed, and a foreign website cannot start sessions. Only a button on an Ergosphere page (<b>Create</b>, <b>Resume</b>, or <b>Quit that CLI and resume here</b>) starts grok; opening a link never does.</td></tr>
 <tr><td>📦 <b>One-line installer</b></td><td>Checks prerequisites, installs, starts and reads everything back. Safe to run again: it replaces only files that changed.</td></tr>
@@ -386,6 +387,16 @@ Everything lives in one file, `ergosphere.json`, next to `ergosphere.py`. The Se
 {"bind": "127.0.0.1", "port": 9241, "agents": {"my-agent": "/absolute/path/to/work"}}
 ```
 
+### Which code is running
+
+`curl -s http://127.0.0.1:<port>/health` reports `version` and `code_sha256`. `code_sha256` is not the sha256 of `ergosphere.py`, so `sha256sum ergosphere.py` never matches it. It is the sha256 of the four files' raw sha256 digests, joined in this order: `ergosphere.py`, `vendor/addon-fit.js`, `vendor/xterm.css`, `vendor/xterm.js`. To recompute it, run this from the install directory:
+
+```bash
+python3 -c 'import hashlib as h; print(h.sha256(b"".join(h.sha256(open(f, "rb").read()).digest() for f in ("ergosphere.py", "vendor/addon-fit.js", "vendor/xterm.css", "vendor/xterm.js"))).hexdigest())'
+```
+
+To check a server against a release, run the same command in the extracted release tarball (`https://github.com/JuliusPIV/ergosphere/archive/refs/tags/vA.B.C.tar.gz`). Do not use `ergosphere.py` from `raw.githubusercontent.com`: the release tarball's copy has the version filled in, so its hash differs.
+
 ### Troubleshooting
 
 From the install directory:
@@ -407,6 +418,7 @@ python3 ergosphere.py           # runs in the foreground; prints ERGOSPHERE_READ
 - Serving directly on ports 80 or 443, or behind a proxy that drops the port from the Host header, is not supported.
 - Takeover works only on the same machine: a session held by a grok CLI or by another Ergosphere server there can be taken over, one on another machine cannot.
 - Plain HTTP by default.
+- On a phone, pinch-zooming the page outside the terminal also refits the terminal to fewer rows, which resizes grok for every view of that session ([#158](https://github.com/JuliusPIV/ergosphere/issues/158)). Pinch on the terminal itself to change the text size.
 - Clicking a link inside grok does not open it: grok shows "Can't open links without a display" ([#34](https://github.com/JuliusPIV/ergosphere/issues/34)).
 - Linux only. WSL2 is untested. macOS is not supported yet.
 
@@ -415,6 +427,8 @@ python3 ergosphere.py           # runs in the foreground; prints ERGOSPHERE_READ
 For a reverse proxy that handles its own authentication, set `ERGOSPHERE_TOKEN` to the path of a file holding a one-line token. Ergosphere then requires `Authorization: Bearer <token>`, and the proxy must send that header. Browsers do not send it, so use this only behind a proxy. The installer refuses to run while `ERGOSPHERE_TOKEN` is set; start the server yourself in that setup.
 
 To keep the install directory read-only, set `ERGOSPHERE_CONFIG` to the path of the config file. Ergosphere then reads and writes that file, and its `.bak`, instead of `ergosphere.json` next to `ergosphere.py`. Unset means `ergosphere.json` in the install directory.
+
+Point it at a file outside the install directory, for example `~/.config/ergosphere/ergosphere.json`. A new install directory that already holds that file, and nothing else from Ergosphere, is a non-empty directory that is not an Ergosphere install. That is refused on purpose, because the installer's own writes could replace or corrupt a file there.
 
 ### Uninstall
 
