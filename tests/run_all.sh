@@ -14,9 +14,8 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 base=${ERGOSPHERE_TEST_PORT_BASE:-}
 limit=${ERGOSPHERE_TEST_TIMEOUT:-300}
-next=0 failed=() skipped=() total=0
-out=$(mktemp) || exit 1
-trap 'rm -f "$out"' EXIT
+next=0 failed=() skipped=() total=0 out=""
+trap '[ -z "$out" ] || rm -f "$out"' EXIT
 
 pw_path="${NODE_PATH:-}"
 for d in "$(npm root -g 2>/dev/null)" /usr/local/lib/*/node_modules; do
@@ -45,6 +44,8 @@ for t in tests/*_test.py tests/*_test.sh; do
   fi
   echo "=== $t${port_env[*]:+ (${port_env[*]})}"
   start=$SECONDS
+  # A fresh file per test: a process an earlier test left behind still writes to its own.
+  out=$(mktemp) || exit 1
   env ${port_env[@]+"${port_env[@]}"} timeout -k 10 "$limit" "${run[@]}" >"$out"
   rc=$?
   # A file, not a pipe to tee: a server a test leaves behind would hold a pipe open.
@@ -53,6 +54,7 @@ for t in tests/*_test.py tests/*_test.sh; do
   echo "=== $t rc=$rc $((SECONDS - start))s"
   [ "$rc" -eq 0 ] || failed+=("$t (rc=$rc)")
   grep -Eq '^(SKIP|skip:)' "$out" && skipped+=("$t")
+  rm -f "$out"
 done
 
 if [ "$total" -eq 0 ]; then echo "FAIL: no tests found in tests/"; exit 1; fi
