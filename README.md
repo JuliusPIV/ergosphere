@@ -386,6 +386,16 @@ Everything lives in one file, `ergosphere.json`, next to `ergosphere.py`. The Se
 {"bind": "127.0.0.1", "port": 9241, "agents": {"my-agent": "/absolute/path/to/work"}}
 ```
 
+### Which code is running
+
+`curl -s http://127.0.0.1:<port>/health` reports `version` and `code_sha256`. `code_sha256` is not the sha256 of `ergosphere.py`, so `sha256sum ergosphere.py` never matches it. It is the sha256 of the four files' raw sha256 digests, joined in this order: `ergosphere.py`, `vendor/addon-fit.js`, `vendor/xterm.css`, `vendor/xterm.js`. To recompute it, run this from the install directory:
+
+```bash
+python3 -c 'import hashlib as h; print(h.sha256(b"".join(h.sha256(open(f, "rb").read()).digest() for f in ("ergosphere.py", "vendor/addon-fit.js", "vendor/xterm.css", "vendor/xterm.js"))).hexdigest())'
+```
+
+To check a server against a release, run the same command in the extracted release tarball (`https://github.com/JuliusPIV/ergosphere/archive/refs/tags/vA.B.C.tar.gz`). Do not use `ergosphere.py` from `raw.githubusercontent.com`: the release tarball's copy has the version filled in, so its hash differs.
+
 ### Troubleshooting
 
 From the install directory:
