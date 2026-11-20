@@ -253,6 +253,9 @@ async function oneMove(p, cdp, x, ya, yb) {
     await cdp.send('Input.dispatchTouchEvent', {type: 'touchMove', touchPoints: [{x: x - 40, y: y0 + 20 * i, id: 1}, {x: x + 40, y: y0 + 20 * i, id: 2}]});
     await wait(30);
   }
+  // Hold still before lifting, as the slow drag does: a lift at speed starts
+  // Chrome's own fling, and the tap below would only stop it, not focus.
+  await wait(150);
   await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
   await flingStopped(p);
   res.twoSent = await p.evaluate(() => SENT.join(''));
