@@ -28,7 +28,7 @@ ergosphere.json next to ergosphere.py. A rerun keeps them;
 --bind and --port change only those two keys.
   --yes        approve a non-loopback bind without asking
   --version vA.B.C  install this release instead of the latest (pin or roll back)
-  --check      run the checks only; change nothing
+  --check      run the checks only (downloads the release to a temp dir); change nothing
   --help       this help
 EOF
 }
