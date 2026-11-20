@@ -565,7 +565,9 @@ load_config() {
   OLD_BIND=$BIND OLD_PORT=$PORT
   if [[ -n "$ARG_BIND" ]]; then set_bind "$ARG_BIND"; fi
   if [[ -n "$ARG_PORT" ]]; then set_port "$ARG_PORT"; fi
-  if [[ "$CFG_SOURCE" != json ]]; then OLD_BIND=$BIND OLD_PORT=$PORT; fi
+  # With no ergosphere.py in the install dir no server from it can be running,
+  # so there is no old address to probe (a config without a port means 9241).
+  if [[ "$CFG_SOURCE" != json || ! -f "$DEST/ergosphere.py" ]]; then OLD_BIND=$BIND OLD_PORT=$PORT; fi
 }
 
 # Checks that depend on the chosen settings. Still before any download.
