@@ -3653,7 +3653,7 @@ document.getElementById("pick").hidden = false;
 """.replace("@@VERSION@@", html.escape(VERSION))
 
 
-def chat_page(resume="", holder=None, running=False, title=""):
+def chat_page(resume="", holder=None, running=False, title="", ask=False):
     # Full-height xterm. Leaving this page drops the socket and does not
     # ask the server to kill grok. A reload or a second window reattaches.
     # running: this server already has the grok process. Only then does the
@@ -3857,6 +3857,9 @@ var hold = @@HOLD_JS@@;
 // Another Ergosphere server's own grok holds it: {pid, host, port, tls}, or null.
 var heldServer = @@SERVER_JS@@;
 var running = @@RUN_JS@@;
+// Stopped and its folder exists: ask to resume on load (#52). A missing
+// folder makes every Resume fail (#43), so that page does not ask.
+var askOnLoad = @@ASK_JS@@;
 var termOpened = false;
 var sawOutput = false;
 var sessionReady = false;
@@ -4686,7 +4689,15 @@ startTitlePoll();
 if (sid) pollTitle();
 if (hold) { showHeldServer(heldServer); pollHold(); }
 if (!hold && running) { ensureTerm(); requestAnimationFrame(connect); }
-else if (!hold) { ensureTerm(); setSid(sid); showEnded(); }
+// A stopped session: fit the terminal to the page (only connect() and resize
+// fit otherwise) and ask to resume at once, not only on a click (#52).
+else if (!hold) {
+  ensureTerm();
+  try { fit.fit(); } catch (err) {}
+  setSid(sid);
+  showEnded();
+  if (askOnLoad) openResumeAsk();
+}
 </script>
 </body>
 </html>
@@ -4703,6 +4714,8 @@ else if (!hold) { ensureTerm(); setSid(sid); showEnded(); }
     ).replace(
         "@@SID_JS@@", json.dumps(sid_js)
     ).replace("@@HOLD_JS@@", hold_js).replace("@@RUN_JS@@", run_js).replace(
+        "@@ASK_JS@@", "true" if ask else "false"
+    ).replace(
         "@@TITLE@@", html.escape(title)
     ).replace("@@DOC_TITLE@@", html.escape(doc_title)).replace(
         "@@VERSION@@", html.escape(VERSION)
@@ -5059,7 +5072,10 @@ class Handler(BaseHTTPRequestHandler):
             page_title = saved.get("title") if isinstance(saved, dict) else ""
             if not isinstance(page_title, str):
                 page_title = ""
-            self._html(chat_page(resume, holder, running, page_title))
+            # The same folder check /resume makes: only a stopped session it
+            # could start gets the resume prompt on load (#52, #43).
+            ask = isinstance(saved, dict) and existing_dir(saved.get("cwd"))
+            self._html(chat_page(resume, holder, running, page_title, ask))
             return
         if path in VENDOR_FILES:
             self._vendor(path)
