@@ -4600,6 +4600,10 @@ document.getElementById("stop").addEventListener("click", function () {
   stopping = true;
   setStatus("quitting", false);
   if (sock && sock.readyState === 1) sock.send(JSON.stringify({type: "stop"}));
+  // A closed socket (failed before grok's first output) has no onclose left to
+  // end "quitting": attach again so onopen sends the stop, or onclose ends it.
+  // /term only attaches. A held page is left as it was (#134).
+  else if (!hold && (!sock || sock.readyState > 1)) connect();
 });
 // A link to the other server's page, only where this page's own host reaches it.
 function serverUrl(info) {
