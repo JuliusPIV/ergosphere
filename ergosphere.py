@@ -854,10 +854,20 @@ def term_holder(sid, holder, raw):
         if not grok_cmdline(again) or not cmdline_contains_sid(again, sid):
             print("take refuse pid=%s sid=%s changed before the signal" % (pid, sid), flush=True)
             return False, {"ok": False, "error": "that grok changed; try again", "pid": pid}
-        if pidfd is None:
+        via = "kill"
+        if pidfd is not None:
+            try:
+                signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+                via = "pidfd"
+            except OSError as exc:
+                # ENOSYS or EPERM here can be a seccomp filter on this one
+                # syscall.  os.kill, right after the re-read, then does what
+                # main did: it signals, or a holder of another user stays
+                # EPERM and is refused below.
+                if exc.errno not in (errno.ENOSYS, errno.EPERM):
+                    raise
+        if via == "kill":
             os.kill(pid, signal.SIGTERM)
-        else:
-            signal.pidfd_send_signal(pidfd, signal.SIGTERM)
     except ProcessLookupError:
         return True, {"ok": True, "pid": pid}
     except (PermissionError, OSError) as exc:
@@ -865,7 +875,7 @@ def term_holder(sid, holder, raw):
     finally:
         if pidfd is not None:
             os.close(pidfd)
-    print("take sigterm pid=%s sid=%s pidfd=%s" % (pid, sid, pidfd is not None), flush=True)
+    print("take sigterm pid=%s sid=%s via=%s" % (pid, sid, via), flush=True)
     deadline = time.time() + 12
     while time.time() < deadline:
         if pid_gone(pid) or not cmdline_contains_sid(read_proc_cmdline(pid), sid):

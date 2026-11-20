@@ -13,6 +13,7 @@ ERGOSPHERE_CODE=<path to ergosphere.py> tests another copy (A/B).
 Skips (exit 0) where unprivileged user namespaces are not allowed.
 """
 import ctypes
+import errno
 import importlib.util
 import os
 import shutil
@@ -112,7 +113,7 @@ def check_legit_quit(erg, grok):
     run = Run(erg, grok)
     try:
         ok, info = erg.term_holder(run.sid, run.holder, run.raw)
-        code = run.grok.wait(timeout=10)
+        code = run.grok.wait(timeout=10) if ok else run.grok.poll()
         if not ok or code != 0:
             return "checked grok not quit: %r, exit %s" % (info, code)
     finally:
@@ -178,12 +179,52 @@ def without_pidfd(check):
     return run
 
 
+def pidfd_signal_fails(err, kill_err=None):
+    """pidfd_send_signal raises err (a seccomp filter: ENOSYS or EPERM); os.kill raises kill_err if set."""
+    def wrap(check):
+        def run(erg, grok):
+            real_send, real_kill = signal.pidfd_send_signal, os.kill
+
+            def send(fd, sig, *rest):
+                raise OSError(err, os.strerror(err))
+
+            def kill(pid, sig):
+                if kill_err and sig == signal.SIGTERM:
+                    raise PermissionError(kill_err, os.strerror(kill_err))
+                return real_kill(pid, sig)
+
+            signal.pidfd_send_signal, os.kill = send, kill
+            try:
+                return check(erg, grok)
+            finally:
+                signal.pidfd_send_signal, os.kill = real_send, real_kill
+        return run
+    return wrap
+
+
+def check_other_user_refused(erg, grok):
+    # The holder belongs to another user: every signal is EPERM, so it is refused.
+    run = Run(erg, grok)
+    try:
+        ok, info = erg.term_holder(run.sid, run.holder, run.raw)
+        alive = run.grok.poll() is None
+        if ok or not alive or "cannot signal" not in str(info.get("error")):
+            return "another user's grok: term_holder %r, still running %s" % (info, alive)
+    finally:
+        run.done()
+    return None
+
+
 CHECKS = [
     ("legit quit (pidfd)", check_legit_quit),
     ("pid reused before the signal", check_reused_before_signal),
     ("pid reused after the pidfd opened", check_reused_after_pidfd),
     ("legit quit (no pidfd fallback)", without_pidfd(check_legit_quit)),
     ("pid reused before the signal (no pidfd fallback)", without_pidfd(check_reused_before_signal)),
+    ("legit quit (pidfd_send_signal ENOSYS)", pidfd_signal_fails(errno.ENOSYS)(check_legit_quit)),
+    ("legit quit (pidfd_send_signal EPERM by policy)", pidfd_signal_fails(errno.EPERM)(check_legit_quit)),
+    ("another user's grok (every signal EPERM) refused",
+     pidfd_signal_fails(errno.EPERM, errno.EPERM)(check_other_user_refused)),
 ]
 
 
