@@ -405,7 +405,7 @@ python3 ergosphere.py           # runs in the foreground; prints ERGOSPHERE_READ
 
 - Ergosphere has no login yet. On a shared machine, other local users and containers that share loopback can reach 127.0.0.1 too.
 - Serving directly on ports 80 or 443, or behind a proxy that drops the port from the Host header, is not supported.
-- Takeover works only for a grok CLI on the same machine. Ergosphere does not attach to sessions run by another Ergosphere server.
+- Takeover works only on the same machine: a session held by a grok CLI or by another Ergosphere server there can be taken over, one on another machine cannot.
 - Plain HTTP by default.
 - Clicking a link inside grok does not open it: grok shows "Can't open links without a display" ([#34](https://github.com/JuliusPIV/ergosphere/issues/34)).
 - Linux only. WSL2 is untested. macOS is not supported yet.
