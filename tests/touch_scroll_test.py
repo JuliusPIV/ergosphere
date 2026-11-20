@@ -146,6 +146,30 @@ BROWSER_JS = r"""
 const {chromium, devices} = require('playwright');
 const [url, chrome] = process.argv.slice(1);
 const wait = ms => new Promise(r => setTimeout(r, ms));
+// Settle steps wait for a page condition with a deadline, never a fixed
+// sleep: on a loaded machine a fixed sleep can end before the page fits or
+// the fling stops (#187, #190). The short sleeps left pace the input events.
+const WAIT = 15000;
+async function until(p, fn, arg) {
+  const end = Date.now() + WAIT;
+  let ok;
+  while (!(ok = await p.evaluate(fn, arg)) && Date.now() < end) await wait(50);
+  return !!ok;
+}
+const fitted = () => {
+  let want = null;
+  try { want = fit.proposeDimensions() || null; } catch (err) {}
+  return !!want && term.cols === want.cols && term.rows === want.rows;
+};
+// Loaded: grok's socket is open, its alternate screen is drawn and the
+// terminal is fitted to the page (not xterm's default 80x24).
+const loaded = p => until(p, () => {
+  let want = null;
+  try { want = fit.proposeDimensions() || null; } catch (err) {}
+  return !!sock && sock.readyState === 1 && term.buffer.active.type === 'alternate'
+    && !!want && term.cols === want.cols && term.rows === want.rows;
+});
+const flingStopped = p => until(p, () => window.fling == null);
 async function measure(p) {
   return p.evaluate(() => {
     const se = document.scrollingElement;
@@ -176,29 +200,26 @@ async function oneMove(p, cdp, x, ya, yb) {
   await cdp.send('Input.dispatchTouchEvent', {type: 'touchMove', touchPoints: [{x, y: yb}]});
   const moveSent = await p.evaluate(() => SENT.join(''));
   await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
-  const end = Date.now() + 10000;
-  let settled = false;
-  while (!(settled = await p.evaluate(() => window.fling == null)) && Date.now() < end) await wait(50);
-  return {moveSent, settled};
+  return {moveSent, settled: await flingStopped(p)};
 }
 (async () => {
   const b = await chromium.launch({executablePath: chrome, ignoreDefaultArgs: ['--hide-scrollbars']});
-  const res = {};
+  const res = {loaded: {}};
   let ctx = await b.newContext({viewport: {width: 1280, height: 800}});
   let p = await ctx.newPage();
-  await p.goto(url); await wait(2500);
+  await p.goto(url); res.loaded.desktop = await loaded(p);
   res.desktop = await measure(p);
   res.desktop.normal = await normalScreen(p);
   const d = await p.evaluate(() => document.querySelector('#term .xterm-screen').getBoundingClientRect().toJSON());
   await p.mouse.move(d.left + d.width / 2, d.top + d.height / 2);
   for (let i = 0; i < 3; i++) { await p.mouse.wheel(0, -200); await wait(80); }
-  await wait(300);
+  await until(p, base => term.buffer.active.viewportY < base, res.desktop.normal.base);
   res.desktop.normalTopAfterWheel = await viewTop(p);
   await ctx.close();
   ctx = await b.newContext({...devices['Pixel 7']});
   p = await ctx.newPage();
   let cdp = await ctx.newCDPSession(p);
-  await p.goto(url); await wait(2500);
+  await p.goto(url); res.loaded.mobile = await loaded(p);
   res.mobile = await measure(p);
   await p.evaluate(() => { window.SENT = []; const s = sock.send.bind(sock);
     sock.send = d => { SENT.push(typeof d === 'string' ? d : new TextDecoder().decode(d)); s(d); }; });
@@ -212,7 +233,7 @@ async function oneMove(p, cdp, x, ya, yb) {
   }
   await wait(150);
   await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
-  await wait(400);
+  await flingStopped(p);
   res.dragSent = await p.evaluate(() => SENT.join(''));
   res.scrollY = await p.evaluate(() => scrollY);
   // A flick delivered as one 200px move: it scrolls, and the fling goes on.
@@ -233,14 +254,14 @@ async function oneMove(p, cdp, x, ya, yb) {
     await wait(30);
   }
   await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
-  await wait(300);
+  await flingStopped(p);
   res.twoSent = await p.evaluate(() => SENT.join(''));
   res.twoPrevented = await p.evaluate(() => PREVENTED);
   // A tap focuses the terminal and sends no wheel report.
   await p.evaluate(() => { SENT.length = 0; document.activeElement && document.activeElement.blur(); });
   await p.touchscreen.tap(x, r.top + 200);
-  await wait(300);
-  res.tapFocused = await p.evaluate(() => !!document.activeElement && document.activeElement.classList.contains('xterm-helper-textarea'));
+  res.tapFocused = await until(p, () => !!document.activeElement && document.activeElement.classList.contains('xterm-helper-textarea'));
+  await flingStopped(p);
   res.tapSent = await p.evaluate(() => SENT.join(''));
   // On the normal screen a drag scrolls xterm's own scrollback.
   res.mobile.normal = await normalScreen(p);
@@ -251,7 +272,7 @@ async function oneMove(p, cdp, x, ya, yb) {
   }
   await wait(150);
   await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
-  await wait(400);
+  await flingStopped(p);
   res.mobile.normalTopAfterDrag = await viewTop(p);
   res.mobile.normalOneMove = await oneMove(p, cdp, x, y0, y0 + 200);
   res.mobile.normalTopAfterOneMove = await viewTop(p);
@@ -262,7 +283,7 @@ async function oneMove(p, cdp, x, ya, yb) {
   ctx = await b.newContext({...devices['Pixel 7']});
   p = await ctx.newPage();
   cdp = await ctx.newCDPSession(p);
-  await p.goto(url); await wait(2500);
+  await p.goto(url); res.loaded.pinch = await loaded(p);
   await p.evaluate(() => { window.SENT = []; const s = sock.send.bind(sock);
     sock.send = d => { SENT.push(typeof d === 'string' ? d : new TextDecoder().decode(d)); s(d); }; });
   const fontState = () => p.evaluate(() => ({font: term.options.fontSize, cols: term.cols, rows: term.rows,
@@ -278,7 +299,7 @@ async function oneMove(p, cdp, x, ya, yb) {
       await wait(30);
     }
     await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
-    await wait(500);
+    await until(p, fitted);
   }
   res.pinch = {start: await fontState()};
   await pinch(100, 150);
@@ -291,13 +312,16 @@ async function oneMove(p, cdp, x, ya, yb) {
   res.pinch.min = await fontState();
   res.pinchSent = await p.evaluate(() => SENT.join(''));
   res.pinch.resizes = await p.evaluate(() => SENT.filter(s => s.startsWith('{"type":"resize"')).length);
-  await p.reload(); await wait(2500);
+  await p.reload(); res.loaded.reload = await loaded(p);
   res.pinch.reload = await fontState();
   await ctx.close();
   await b.close();
   console.log(JSON.stringify(res));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 """
+
+
+BROWSER_WAIT_S = 15  # WAIT in BROWSER_JS, in seconds
 
 
 def free_port():
@@ -389,6 +413,10 @@ def check_browser():
         shutil.rmtree(tmp, ignore_errors=True)
     print("browser: %s" % json.dumps(res))
     fails = []
+    for name, ok in sorted(res["loaded"].items()):
+        if not ok:
+            fails.append("%s: the page did not load within %ds (socket open, alternate screen, terminal fitted)"
+                         % (name, BROWSER_WAIT_S))
     for name in ("desktop", "mobile"):
         m = res[name]
         if m["vpBarPx"] > 0 or m["vpOverflowY"] != "hidden":
@@ -422,7 +450,7 @@ def check_browser():
         fails.append("mobile: a drag does not scroll the normal screen's history (top %s, base %s)" % (res["mobile"]["normalTopAfterDrag"], n["base"]))
     for name, om in (("alternate", res["oneMove"]), ("normal", res["mobile"]["normalOneMove"])):
         if not om["settled"]:
-            fails.append("%s screen: the fling after a 200px flick did not stop within 10s" % name)
+            fails.append("%s screen: the fling after a 200px flick did not stop within %ds" % (name, BROWSER_WAIT_S))
     # The move alone sends a few reports; the fling must clearly add to them.
     at_move = len(re.findall(r"\x1b\[<64;\d+;\d+M", res["oneMove"]["moveSent"]))
     ones = re.findall(r"\x1b\[<64;\d+;\d+M", res["oneMoveSent"])
