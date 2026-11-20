@@ -395,7 +395,7 @@ def check_kill_run():
 
     try:
         with mock.patch.dict(globals(), {"run_pids": stale}):
-            kill_run(tempfile.mkdtemp())
+            kill_run("/nonexistent-ergo-touch-home")  # no process has this HOME
         try:
             other.wait(timeout=5)  # a SIGKILL lands asynchronously, so give it time
             alive = False
