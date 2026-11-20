@@ -444,4 +444,4 @@ Copyright (C) 2026 Julius Perkins
 
 Ergosphere is licensed under the GNU Affero General Public License version 3 only ([AGPL-3.0-only](https://www.gnu.org/licenses/agpl-3.0.html)). See [LICENSE](LICENSE).
 
-The terminal in the browser is [xterm.js](https://github.com/xtermjs/xterm.js) and its fit addon, vendored in `vendor/` under the MIT license, by the xterm.js authors.
+The terminal in the browser is [xterm.js](https://github.com/xtermjs/xterm.js) and its fit addon, vendored in `vendor/` under the MIT license, by the xterm.js authors.  `package.json` and `package-lock.json` name their exact npm versions so vulnerability scanners can check them; nothing installs them.
