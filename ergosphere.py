@@ -5186,21 +5186,27 @@ class Handler(BaseHTTPRequestHandler):
                 "error": "%d grok %s running; restart needs zero" % (busy, "session" if busy == 1 else "sessions"),
             })
             return
-        # The restarted server reads the file, so the reply must too.
+        # Until the shutdown thread starts, any failure (EMFILE in the probe)
+        # must clear RESTART, or the server serves on refusing every launch.
         try:
-            with CONFIG_LOCK:
-                saved = self._saved_config()
-        except ValueError as exc:
+            # The restarted server reads the file, so the reply must too.
+            try:
+                with CONFIG_LOCK:
+                    saved = self._saved_config()
+            except ValueError as exc:
+                problem = ("bad config: %s" % exc)[:300]
+            else:
+                nxt = resolve_endpoint(argparse.Namespace(**vars(self.server.args)), saved)
+                problem = self._endpoint_problem(nxt.bind, nxt.port)
+                if not problem:
+                    print("restart requested; next %s:%s" % (nxt.bind, nxt.port), flush=True)
+        except BaseException:
             RESTART.clear()
-            self._json(409, {"ok": False, "error": ("bad config: %s" % exc)[:300] + "; not restarting"})
-            return
-        nxt = resolve_endpoint(argparse.Namespace(**vars(self.server.args)), saved)
-        problem = self._endpoint_problem(nxt.bind, nxt.port)
+            raise
         if problem:
             RESTART.clear()
             self._json(409, {"ok": False, "error": problem + "; not restarting"})
             return
-        print("restart requested; next %s:%s" % (nxt.bind, nxt.port), flush=True)
         # RESTART is set: the restart must go ahead even if the client is
         # gone and the reply raises, or the server serves on refusing launches.
         try:
