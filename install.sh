@@ -644,6 +644,7 @@ socket.socket().bind((sys.argv[1], 0))' "$BIND" 2>/dev/null; then
     row warn bind "$BIND: anyone who can reach port $PORT can run grok as this user"
   fi
   find_release
+  if [[ ${#BLOCKERS[@]} -eq 0 ]]; then verify_release; fi
   if [[ ${#BLOCKERS[@]} -gt 0 ]]; then
     fail check "blocked by ${BLOCKERS[*]} (see above); nothing was changed"
   fi
@@ -703,6 +704,32 @@ download() {
   hits=("$STAGE"/x/*/ergosphere.py)
   [[ ${#hits[@]} -eq 1 && -f "${hits[0]}" ]] || fail download "archive does not hold one ergosphere.py"
   SRC=${hits[0]%/ergosphere.py}
+}
+
+# Before anything changes: the release's own --check (vendor files, grok, the
+# server's config validators) against the config this run would write, built
+# in STAGE from copies. The server's --check never migrates or writes config.
+verify_release() {
+  local out sb=0 sp=0 cand legacy
+  download
+  cand="$STAGE/cfg/ergosphere.json" legacy="$STAGE/cfg/cwd-defaults.json"
+  mkdir -- "$STAGE/cfg" || fail download "could not create $STAGE/cfg"
+  if [[ -e "$CFG_FILE" ]]; then cp -- "$CFG_FILE" "$cand" || fail check "could not read $CFG_FILE"; fi
+  if [[ -e "$LEGACY_FILE" ]]; then cp -- "$LEGACY_FILE" "$legacy" || fail check "could not read $LEGACY_FILE"; fi
+  if [[ -n "$ARG_BIND" ]]; then sb=1; fi
+  if [[ -n "$ARG_PORT" ]]; then sp=1; fi
+  if ! out=$(cfg_py write "$cand" "$legacy" "$BIND" "$PORT" "$sb" "$sp" "$AGENT" "$AGENT_DIR" 2>&1); then
+    out=${out//"$cand"/"$CFG_FILE"}
+    row invalid config "${out//$'\n'/; }"
+    return 0
+  fi
+  if out=$(cd -- "$STAGE" && unset ERGOSPHERE_PORT && PATH="${GROK%/*}:$PATH" ERGOSPHERE_CONFIG="$cand" \
+      "$PYTHON" -I -B "$SRC/ergosphere.py" --check </dev/null 2>&1); then
+    row ok release "ergosphere.py --check passed with the settings this run writes"
+  else
+    out=${out//"$cand"/"$CFG_FILE"}
+    row invalid release "ergosphere.py --check failed: ${out//$'\n'/; }"
+  fi
 }
 
 # Copies only files whose sha256 differs from the archive, then reads each
@@ -948,7 +975,6 @@ main() {
     return 0
   fi
   approve_bind
-  download
   install_files
   write_config
   start_server

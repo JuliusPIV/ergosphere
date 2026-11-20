@@ -41,6 +41,10 @@ if [ "$v" = dev ]; then ok "archive with no tag reports dev"; else bad "archive 
 # 3. The installer: latest-release lookup and --version, in --check mode (changes nothing).
 mkdir -p "$tmp/bin"
 printf '#!/bin/sh\necho "grok 0.0.0-test"\n' >"$tmp/bin/grok"; chmod +x "$tmp/bin/grok"
+# --check downloads the release it verifies; refuse that GitHub fetch offline.
+# shellcheck disable=SC2016  # $@ and $a belong to the stub
+printf '#!/bin/sh\nfor a in "$@"; do case "$a" in https://github.com/*/archive/*) exit 7 ;; esac; done\nexec %q "$@"\n' \
+  "$(command -v curl)" >"$tmp/bin/curl"; chmod +x "$tmp/bin/curl"
 python3 -I -c '
 import http.server, sys
 class H(http.server.BaseHTTPRequestHandler):
