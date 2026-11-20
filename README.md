@@ -416,6 +416,8 @@ For a reverse proxy that handles its own authentication, set `ERGOSPHERE_TOKEN` 
 
 To keep the install directory read-only, set `ERGOSPHERE_CONFIG` to the path of the config file. Ergosphere then reads and writes that file, and its `.bak`, instead of `ergosphere.json` next to `ergosphere.py`. Unset means `ergosphere.json` in the install directory.
 
+Point it at a file outside the install directory, for example `~/.config/ergosphere/ergosphere.json`. A new install directory that already holds that file, and nothing else from Ergosphere, is a non-empty directory that is not an Ergosphere install. That is refused on purpose, because the installer's own writes could replace or corrupt a file there.
+
 ### Uninstall
 
 Ergosphere keeps everything in its install directory, plus the `ERGOSPHERE_CONFIG` file if you set one. The installer adds no service, cron job, `PATH` entry or shell profile line, and it does not change `~/.grok`.
