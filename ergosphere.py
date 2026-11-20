@@ -1752,8 +1752,11 @@ class Live:
     def _read(self):
         hold = b""
         try:
+            # poll, not select: select() raises ValueError for an fd >= 1024.
+            poller = select.poll()
+            poller.register(self.master, select.POLLIN)
             while not STOP.is_set() and not self.closed:
-                ready, _, _ = select.select([self.master], [], [], 0.4)
+                ready = poller.poll(400)
                 if not ready:
                     if self.proc.poll() is not None:
                         break
