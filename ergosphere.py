@@ -1481,9 +1481,16 @@ def kill_proc(proc):
 
 
 def kill_all():
-    with LIVE_LOCK:
-        lives = list(LIVE.values())
-        LIVE.clear()
+    # A spawn in flight has no LIVE entry, and its child can be stuck before exec
+    # on a hung mount. Wait for it: its open_live sees STOP and kills the child.
+    # Returning first lets the server exit with that child unowned.
+    while True:
+        with LIVE_LOCK:
+            if not STARTING:
+                lives = list(LIVE.values())
+                LIVE.clear()
+                break
+        time.sleep(0.1)
     for live in lives:
         live.shutdown()
 
@@ -1962,6 +1969,8 @@ def open_live(sid, cmd, cwd, cols, rows):
     with LIVE_LOCK:
         if RESTART.is_set():
             raise RuntimeError("Ergosphere is restarting")
+        if STOP.is_set():
+            raise RuntimeError("Ergosphere is stopping")
         live = LIVE.get(sid)
         if live is not None and live.alive():
             return live, True
@@ -1981,16 +1990,18 @@ def open_live(sid, cmd, cwd, cols, rows):
             STARTING.discard(sid)
         raise
     with LIVE_LOCK:
-        STARTING.discard(sid)
         stopping = STOP.is_set()
         if not stopping:
+            STARTING.discard(sid)
             live = Live(sid, proc, master, cwd)
             LIVE[sid] = live
             live.start()
     if stopping:
-        # kill_all already ran: this grok would outlive the server.
+        # kill_all is waiting on STARTING: this grok must die before sid leaves it.
         kill_proc(proc)
         os.close(master)
+        with LIVE_LOCK:
+            STARTING.discard(sid)
         raise RuntimeError("Ergosphere is stopping")
     # Log after release: a stalled log write must not block other launches.
     print("term pid=%s sid=%s cmd=%s" % (proc.pid, sid, " ".join(cmd)), flush=True)
