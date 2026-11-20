@@ -8,7 +8,7 @@
 # shellcheck disable=SC2088  # a literal ~ is the input under test
 set -u
 repo=$(cd "$(dirname "$0")/.." && pwd)
-port=${ERGOSPHERE_TEST_PORT:-$(python3 -I "$repo/tests/free_port.py" 3)}
+port=${ERGOSPHERE_TEST_PORT:-$(python3 -I "$repo/tests/free_port.py" 3)} || exit 1
 work=$(mktemp -d "${TMPDIR:-/tmp}/ergosphere-home-test.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 fail=0

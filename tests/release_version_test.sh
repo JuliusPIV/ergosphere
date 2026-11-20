@@ -11,7 +11,7 @@ fail=0
 ok()  { echo "ok:   $1"; }
 bad() { echo "FAIL: $1"; fail=1; }
 tmp=$(mktemp -d)
-port=${ERGOSPHERE_TEST_PORT:-$(python3 -I "$root/tests/free_port.py")}
+port=${ERGOSPHERE_TEST_PORT:-$(python3 -I "$root/tests/free_port.py")} || exit 1
 stub_pid=""
 trap '[ -n "$stub_pid" ] && kill "$stub_pid" 2>/dev/null; rm -rf "$tmp"' EXIT
 

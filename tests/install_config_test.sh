@@ -8,7 +8,7 @@
 # only answers --version. Every server it starts is stopped at the end.
 set -u
 repo=$(cd "$(dirname "$0")/.." && pwd)
-port=${ERGOSPHERE_TEST_PORT:-$(python3 -I "$repo/tests/free_port.py" 3)}
+port=${ERGOSPHERE_TEST_PORT:-$(python3 -I "$repo/tests/free_port.py" 3)} || exit 1
 work=$(mktemp -d "${TMPDIR:-/tmp}/ergosphere-install-test.XXXXXX")
 pids=()
 fail=0
