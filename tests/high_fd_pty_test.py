@@ -64,7 +64,7 @@ def pty_fds(pid):
     found = []
     for name in os.listdir("/proc/%d/fd" % pid):
         try:
-            if os.readlink("/proc/%d/fd/%s" % (pid, name)) == "/dev/ptmx":
+            if os.path.basename(os.readlink("/proc/%d/fd/%s" % (pid, name))) == "ptmx":
                 found.append(int(name))
         except OSError:
             pass
