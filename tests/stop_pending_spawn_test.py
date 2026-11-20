@@ -66,7 +66,18 @@ def main():
     subprocess.Popen = blocking_popen
     sid = str(uuid.uuid4())
     cmd = [sys.executable, "-c", "import time; time.sleep(120)", "--resume", sid]
-    threading.Thread(target=lambda: erg.open_live(sid, cmd, TMP, 80, 24), daemon=True).start()
+    pending = {}
+
+    def pending_start():
+        # Caught here: a traceback still being written at interpreter exit aborts it.
+        try:
+            erg.open_live(sid, cmd, TMP, 80, 24)
+            pending["value"] = "started"
+        except RuntimeError as exc:
+            pending["value"] = str(exc)
+
+    starter = threading.Thread(target=pending_start, daemon=True)
+    starter.start()
     try:
         for _ in range(200):
             if os.path.exists(PIDF) and os.path.getsize(PIDF):
@@ -93,6 +104,9 @@ def main():
 
         os.close(os.open(FIFO, os.O_WRONLY))  # the mount recovers
         stop.join(10)
+        starter.join(10)
+        if "stopping" not in pending.get("value", ""):
+            failures.append("the pending start was not refused as stopping: %r" % pending.get("value"))
         if alive(child):
             failures.append("the pending child is still running after stop: pid %d" % child)
             os.kill(child, 9)
