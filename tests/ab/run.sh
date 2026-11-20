@@ -59,6 +59,7 @@ run_side() { # label code-dir port
   done
   grep -q ERGOSPHERE_READY "$w/server.log" || log "$label: server not ready: $(tail -n 3 "$w/server.log")"
   python3 -B "$HERE/ab.py" http "$port" "$SID" >"$w/http.json" 2>"$w/http.err"
+  python3 -B "$HERE/ab.py" vendor "$code" >"$w/vendor.json" 2>"$w/vendor.err"
   if [ -z "$browser_off" ]; then
     brc=0
     NODE_PATH="$pw_path" timeout 300 node "$HERE/browser.js" "$port" "$SID" >"$w/browser.json" 2>"$w/browser.err" || brc=$?
