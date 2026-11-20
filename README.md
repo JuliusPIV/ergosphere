@@ -108,9 +108,9 @@ All options are in the [installer reference](#installer-options).
 <tr><td>♾️ <b>Sessions outlive the tab</b></td><td>Closing the tab does not stop grok. Reattach from any browser or device that reaches the same Ergosphere, and the screen is redrawn exactly as grok has it. Every view of a session shares one live process.</td></tr>
 <tr><td>🔒 <b>One grok per session, never two</b></td><td>Ergosphere never starts a second grok for a session that is already running. Opening it again attaches to the one that exists.</td></tr>
 <tr><td>🗂️ <b>Every session at a glance</b></td><td>The session list groups sessions into <b>Working now</b> (grok is mid-turn), <b>Idle</b> (grok is open and waiting) and <b>Older</b> (no grok running). Type in the filter box and the list narrows as you type, by title, session ID or working directory.</td></tr>
-<tr><td>⚡ <b>New sessions in one dialog</b></td><td>Pick the agent, working directory, model and reasoning effort, then <b>Ask</b>, <b>Auto</b> or <b>Always approve</b>. The dialog remembers the last model and effort you used.</td></tr>
+<tr><td>⚡ <b>New sessions in one dialog</b></td><td>Pick the agent, working directory, model and reasoning effort, then <b>ask</b>, <b>auto</b> or <b>always approve</b>. The dialog remembers the last model and effort you used.</td></tr>
 <tr><td>🔁 <b>From the CLI to the browser</b></td><td>Started a session in a terminal? When a grok CLI on the same machine holds it, the page offers <b>Quit that CLI and resume here</b>.</td></tr>
-<tr><td>🛡️ <b>Safe resume</b></td><td>A stopped session always resumes in <b>Ask</b> mode, whatever mode it had before. Switch to Auto or Always approve in the TUI when you want them.</td></tr>
+<tr><td>🛡️ <b>Safe resume</b></td><td>A stopped session always resumes in <b>ask</b> mode, whatever mode it had before. Switch to <b>auto</b> or <b>always approve</b> in the TUI when you want them.</td></tr>
 <tr><td>🏷️ <b>Knows its name</b></td><td>The chat bar shows the session name before its ID and follows <code>/rename</code> within a few seconds. The browser tab title matches.</td></tr>
 <tr><td>📋 <b>Copy and paste that behave</b></td><td><kbd>Ctrl</kbd>+<kbd>C</kbd> copies a selection and otherwise interrupts grok, like a terminal. <kbd>Ctrl</kbd>+<kbd>V</kbd> pastes. Copying works on plain HTTP pages too.</td></tr>
 <tr><td>🖱️ <b>Mouse included</b></td><td>The mouse wheel and clicks reach grok. Drag to select text.</td></tr>
@@ -248,9 +248,9 @@ Yes. Both attach to the same live grok.
 </details>
 
 <details>
-<summary><b>Why did my session come back in Ask mode?</b></summary>
+<summary><b>Why did my session come back in ask mode?</b></summary>
 
-On purpose. A stopped session always resumes in Ask, so nothing runs without your approval until you choose otherwise in the TUI.
+On purpose. A stopped session always resumes in <b>ask</b>, so nothing runs without your approval until you choose otherwise in the TUI.
 </details>
 
 <details>
@@ -410,7 +410,7 @@ python3 ergosphere.py           # runs in the foreground; prints ERGOSPHERE_READ
 |---|---|
 | `grok not on PATH` | Install grok for this user, or start Ergosphere from a shell where `grok` works. |
 | Something went wrong and you want details | The log is `ergosphere.log` in the install directory. |
-| A permission mode does not start as expected | grok flags can change between versions. On grok 1.0.70, Ask is `--permission-mode default`, Auto is `--permission-mode auto` and Always approve is `--always-approve`. Check `grok --help` on newer versions. |
+| A permission mode does not start as expected | grok flags can change between versions. On grok 1.0.70, **ask** is `--permission-mode default`, **auto** is `--permission-mode auto` and **always approve** is `--always-approve`. Check `grok --help` on newer versions. |
 
 ### Known limits
 
@@ -448,7 +448,7 @@ Your sessions in `~/.grok/sessions` belong to grok and stay.
 |---|---|
 | [Grok CLI](https://x.ai/news/grok-build-cli) | The agent Ergosphere puts in your browser. Install it and sign in first. |
 | [xterm.js](https://github.com/xtermjs/xterm.js) | The terminal that draws grok in the page. Vendored, MIT. |
-| [dcg (Destructive Command Guard)](https://github.com/Dicklesworthstone/destructive_command_guard) | A hook that blocks destructive shell commands before an agent runs them. It supports grok, which matters when you let a session run in Auto or Always approve. |
+| [dcg (Destructive Command Guard)](https://github.com/Dicklesworthstone/destructive_command_guard) | A hook that blocks destructive shell commands before an agent runs them. It supports grok, which matters when you let a session run in **auto** or **always approve**. |
 
 ---
 

@@ -41,4 +41,13 @@ lacks "$readme" 'does not attach to sessions run by another Ergosphere server' '
 # #115: the installer refuses a fresh install dir that already holds the ERGOSPHERE_CONFIG file.
 has   "$readme" 'Point it at a file outside the install directory, for example' 'README says to keep ERGOSPHERE_CONFIG outside the install dir'
 has   "$readme" 'is refused on purpose'  'README says a non-Ergosphere non-empty install dir is refused on purpose'
+# The README spells the approval modes as the + New Agent dialog labels them (#163).
+labels="$(sed -n 's/.*name="approval" value="[^"]*"[^>]*> \([^<]*\)<\/label>.*/\1/p' "$root/ergosphere.py")"
+[ "$(grep -c . <<<"$labels")" -eq 3 ] || { echo "FAIL: dialog has 3 approval labels"; fail=1; }
+while IFS= read -r label; do
+  [ -n "$label" ] && has "$readme" "<b>$label</b>" "README names the dialog's '$label' mode"
+done <<<"$labels"
+for word in '<b>Ask</b>' '<b>Auto</b>' '<b>Always approve</b>' 'Ask is `' 'Auto is `' 'Always approve is `' 'Auto or Always approve' 'in Ask mode' 'resumes in Ask,'; do
+  lacks "$readme" "$word" "README does not spell a mode as $word"
+done
 exit "$fail"

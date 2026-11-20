@@ -5,8 +5,8 @@
 # ergosphere.py with a throwaway HOME, one seeded session and the stand-in grok
 # TUI (fakegrok.py), then the shared checks from this folder.  Writes
 # $AB_OUT/summary.txt.  Exit 1 when a check passes on A and fails on B, when the
-# browser checks break on B or run fewer checks than on A, or the run itself
-# breaks.  No browser or playwright on the host is only a warning.
+# browser checks break on B or leave out a check named in ab.py ORDER, or the
+# run itself breaks.  No browser or playwright on the host is only a warning.
 # Optional: AB_CHROME (browser binary), NODE_PATH (playwright).
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
