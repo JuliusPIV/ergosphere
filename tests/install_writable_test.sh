@@ -142,4 +142,16 @@ else
   printf '%s\n' "$out" | tail -n 8
 fi
 
+# A writable config folder whose name ends in a newline (no folder of the name
+# without it) passes: the nearest-parent walk keeps the name intact.
+h="$work/nlcfg"
+mkdir -p "$h/cfg"$'\n'
+out=$(inst "$h" "$h/cfg"$'\n'"/ergosphere.json" "$work/none" --check); rc=$?
+if [[ "$rc" -eq 0 && "$out" == *"ready: checks passed"* ]]; then
+  ok "config folder name ending in a newline: --check passes"
+else
+  bad "config folder name ending in a newline: rc $rc, want --check to pass"
+  printf '%s\n' "$out" | tail -n 8
+fi
+
 exit "$fail"

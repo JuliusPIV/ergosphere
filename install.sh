@@ -759,11 +759,11 @@ verify_release() {
   fi
 }
 
-# Prints the path itself when it exists, else its nearest existing parent.
+# Sets UP to the path itself when it exists, else its nearest existing parent.
+# A variable, not $( ): that would drop a newline at the end of a folder name.
 existing_up() {
-  local p=$1
-  while [[ ! -e "$p" ]]; do p=${p%/*}; p=${p:-/}; done
-  printf '%s\n' "$p"
+  UP=$1
+  while [[ ! -e "$UP" ]]; do UP=${UP%/*}; UP=${UP:-/}; done
 }
 
 # Prints the free KiB on the filesystem holding $1.
@@ -784,15 +784,16 @@ check_writes() {
     [[ "$(sha_of "$SRC/$rel")" != "$(sha_of "$DEST/$rel")" ]] || continue
     # Rounded up to 4 KiB blocks: a copy takes whole blocks.
     kib=$((kib + 4 * (($(stat -c %s -- "$SRC/$rel") + 4095) / 4096)))
-    dirs+=("$(dirname -- "$DEST/$rel")")
+    dir="$DEST/$rel"
+    dirs+=("${dir%/*}")
   done < <(cd "$SRC" && find . -type f -print0 | sort -z)
   for dir in ${dirs[@]+"${dirs[@]}"}; do
-    up=$(existing_up "$dir")
+    existing_up "$dir"; up=$UP
     # One entry per folder: vendor/ holds several files.
     if [[ ( ! -d "$up" || ! -w "$up" || ! -x "$up" ) && " ${bad[*]-} " != *" $up "* ]]; then bad+=("$up"); fi
   done
   if [[ "$1" == wrote ]]; then
-    cfg_dir=$(existing_up "${CFG_FILE%/*}")
+    existing_up "${CFG_FILE%/*}"; cfg_dir=$UP
     if [[ ! -d "$cfg_dir" || ! -w "$cfg_dir" || ! -x "$cfg_dir" ]]; then bad+=("$cfg_dir"); fi
   fi
   if [[ ${#bad[@]} -gt 0 ]]; then
@@ -801,7 +802,7 @@ check_writes() {
     row ok write "the install and config folders are writable"
   fi
   if (( kib > 0 )); then
-    up=$(existing_up "$DEST")
+    existing_up "$DEST"; up=$UP
     free=$(free_kib "$up")
     if [[ ! "$free" =~ ^[0-9]+$ ]]; then
       row invalid space "could not read the free space of $up"
