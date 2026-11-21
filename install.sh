@@ -28,8 +28,9 @@ ergosphere.json next to ergosphere.py. A rerun keeps them;
 --bind and --port change only those two keys.
   --yes        approve a non-loopback bind without asking
   --version vA.B.C  install this release instead of the latest (pin or roll back)
-  --check      run the checks only: download the release to a temp dir and check
-               its files are all there; run nothing from it, change nothing
+  --check      run the checks only: download the release to a temp dir, check
+               its files are all there and the install and config folders are
+               writable with room for it; run nothing from it, change nothing
   --help       this help
 EOF
 }
@@ -713,7 +714,9 @@ download() {
 }
 
 # Before anything changes. --check only looks at the downloaded files and runs
-# nothing from them. A real run also runs the release's own --check (vendor
+# nothing from them; it and a real run both build the candidate config with
+# this installer's own cfg_py and check writability and free space. A real run
+# also runs the release's own --check (vendor
 # files, grok, the server's config validators) against the config this run
 # would write, built in STAGE from copies; that --check never writes config.
 verify_release() {
@@ -724,10 +727,6 @@ verify_release() {
   done
   if [[ ${#missing[@]} -gt 0 ]]; then
     row invalid release "archive is missing ${missing[*]}"
-    return 0
-  fi
-  if [[ "$WANT_CHECK" -eq 1 ]]; then
-    row ok release "archive holds ergosphere.py and its vendor files (--check runs nothing from it)"
     return 0
   fi
   cand="$STAGE/cfg/ergosphere.json" legacy="$STAGE/cfg/cwd-defaults.json"
@@ -746,12 +745,80 @@ verify_release() {
     row invalid config "${out//$'\n'/; }"
     return 0
   fi
+  check_writes "$out" "$cand"
+  if [[ "$WANT_CHECK" -eq 1 ]]; then
+    row ok release "archive holds ergosphere.py and its vendor files (--check runs nothing from it)"
+    return 0
+  fi
   if out=$(cd -- "$STAGE" && unset ERGOSPHERE_PORT && PATH="${GROK%/*}:$PATH" ERGOSPHERE_CONFIG="$cand" \
       "$PYTHON" -I -B "$SRC/ergosphere.py" --check </dev/null 2>&1); then
     row ok release "ergosphere.py --check passed with the settings this run writes"
   else
     out=${out//"$cand"/"$CFG_FILE"}
     row invalid release "ergosphere.py --check failed: ${out//$'\n'/; }"
+  fi
+}
+
+# Prints the path itself when it exists, else its nearest existing parent.
+existing_up() {
+  local p=$1
+  while [[ ! -e "$p" ]]; do p=${p%/*}; p=${p:-/}; done
+  printf '%s\n' "$p"
+}
+
+# Prints the free KiB on the filesystem holding $1.
+free_kib() {
+  df -Pk -- "$1" 2>/dev/null | awk 'NR == 2 { print $4 }'
+}
+
+# check_writes CFG_RESULT CANDIDATE. Every folder install_files and
+# write_config will write in must be writable now (-w/-x, no probe writes),
+# and each filesystem must hold what is copied there, so a read-only folder or
+# a full disk stops at the gate instead of after half the files are replaced.
+# CFG_RESULT is cfg_py's answer for the candidate config: wrote or kept.
+check_writes() {
+  local rel dir up kib=0 free cfg_dir dirs=() bad=()
+  while IFS= read -r -d '' rel; do
+    rel=${rel#./}
+    if [[ "$rel" == cwd-defaults.json || "$rel" == ergosphere.json || "$rel" == ergosphere.log ]]; then continue; fi
+    [[ "$(sha_of "$SRC/$rel")" != "$(sha_of "$DEST/$rel")" ]] || continue
+    # Rounded up to 4 KiB blocks: a copy takes whole blocks.
+    kib=$((kib + 4 * (($(stat -c %s -- "$SRC/$rel") + 4095) / 4096)))
+    dirs+=("$(dirname -- "$DEST/$rel")")
+  done < <(cd "$SRC" && find . -type f -print0 | sort -z)
+  # The server log is appended to when the server starts.
+  if [[ -e "$DEST/ergosphere.log" && ! -w "$DEST/ergosphere.log" ]]; then bad+=("$DEST/ergosphere.log"); fi
+  for dir in ${dirs[@]+"${dirs[@]}"}; do
+    up=$(existing_up "$dir")
+    # One entry per folder: vendor/ holds several files.
+    if [[ ( ! -d "$up" || ! -w "$up" || ! -x "$up" ) && " ${bad[*]-} " != *" $up "* ]]; then bad+=("$up"); fi
+  done
+  if [[ "$1" == wrote ]]; then
+    cfg_dir=$(existing_up "${CFG_FILE%/*}")
+    if [[ ! -d "$cfg_dir" || ! -w "$cfg_dir" || ! -x "$cfg_dir" ]]; then bad+=("$cfg_dir"); fi
+  fi
+  if [[ ${#bad[@]} -gt 0 ]]; then
+    row invalid write "not writable: ${bad[*]}"
+  else
+    row ok write "the install and config folders are writable"
+  fi
+  if (( kib > 0 )); then
+    up=$(existing_up "$DEST")
+    free=$(free_kib "$up")
+    if [[ ! "$free" =~ ^[0-9]+$ ]]; then
+      row invalid space "could not read the free space of $up"
+    elif (( free < kib )); then
+      row invalid space "$up has $free KiB free, the release needs $kib KiB"
+    fi
+  fi
+  if [[ "$1" == wrote ]]; then
+    kib=$((4 * (($(stat -c %s -- "$2") + 4095) / 4096)))
+    free=$(free_kib "$cfg_dir")
+    if [[ ! "$free" =~ ^[0-9]+$ ]]; then
+      row invalid space "could not read the free space of $cfg_dir"
+    elif (( free < kib )); then
+      row invalid space "$cfg_dir has $free KiB free, the config needs $kib KiB"
+    fi
   fi
 }
 
