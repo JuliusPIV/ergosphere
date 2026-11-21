@@ -236,7 +236,14 @@ def case_saved(c):
     if got != "Ended":
         return "a saved session's /chat shows %s, not Ended" % got
     os.remove(c.ctl)
-    code, body = resume(c.erg, c.sid)
+    # No real grok here (the review sandbox has none on PATH): Resume runs the stand-in.
+    real = c.erg.grok_argv
+    c.erg.grok_argv = lambda agent, approval, cwd, sid, *a, **k: [
+        sys.executable, "-c", GROK, c.ctl, sid, c.folder, cwd]
+    try:
+        code, body = resume(c.erg, c.sid)
+    finally:
+        c.erg.grok_argv = real
     c.erg.kill_all()
     if code != 200:
         return "a saved session's /resume answered %s %r, not 200" % (code, body)
