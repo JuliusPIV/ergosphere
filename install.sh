@@ -261,20 +261,33 @@ for pid in sorted((p for p in os.listdir("/proc") if p.isdigit()), key=int):
         pass' "$1" 2>/dev/null </dev/null || true
 }
 
+# True when BIND is 0.0.0.0 and the port is held on another address (say
+# 127.0.0.2) by something other than this install's server: probe asks only
+# 127.0.0.1, so bind the wildcard as the server does (#150).
+wild_busy() {
+  [[ "$BIND" == 0.0.0.0 ]] || return 1
+  "$PYTHON" -I -c '
+import socket, sys
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("0.0.0.0", int(sys.argv[1])))' "$PORT" 2>/dev/null </dev/null && return 1
+  ! find_own | awk -v p="$PORT" '$2 == p { f = 1 } END { exit !f }'
+}
+
 # True when BIND:PORT answers and is not this install's server. Sets HELD_BY.
 port_taken() {
   local h
   probe "$BIND" "$PORT"
   case "$PROBE" in
-    down) return 1 ;;
+    down) wild_busy || return 1 ;;
     match|moved)
       probe_script
       [[ "$PROBE_SCRIPT" != "$(realpath -m -- "$DEST/ergosphere.py")" ]] || return 1
-      HELD_BY="an Ergosphere installed in ${PROBE_SCRIPT%/ergosphere.py} (pid $PROBE_PID)" ;;
-    *)
-      h=$(port_holder "$PORT")
-      if [[ -n "$h" ]]; then HELD_BY="pid ${h%% *} (${h#* })"; else HELD_BY="a program this user cannot see"; fi ;;
+      HELD_BY="an Ergosphere installed in ${PROBE_SCRIPT%/ergosphere.py} (pid $PROBE_PID)"
+      return 0 ;;
   esac
+  h=$(port_holder "$PORT")
+  if [[ -n "$h" ]]; then HELD_BY="pid ${h%% *} (${h#* })"; else HELD_BY="a program this user cannot see"; fi
   return 0
 }
 
@@ -634,6 +647,7 @@ socket.socket().bind((sys.argv[1], 0))' "$BIND" 2>/dev/null; then
     # With old=1 this install's server was already found and reported above.
     if [[ "$PROBE" == down && "$old" -eq 0 ]]; then probe_own; fi
     if [[ "$PROBE" == match || "$PROBE" == moved ]]; then same_install; fi
+    if [[ "$PROBE" == down || "$PROBE" == moved ]] && wild_busy; then PROBE=other; fi
     case "$PROBE" in
       match) row ok server "Ergosphere from this dir already running on ${BIND}:${PORT}, pid $PROBE_PID" ;;
       moved) row ok server "Ergosphere from this dir running on ${PROBE_AT}, pid $PROBE_PID; it moves to ${BIND}:${PORT}" ;;
