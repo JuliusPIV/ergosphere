@@ -1596,6 +1596,10 @@ def spawn_grok(cmd, cwd, cols, rows):
 def resize_pty(master, proc, cols, rows):
     cols = dim_arg(str(cols), 80)
     rows = dim_arg(str(rows), 24)
+    # -1 is a closed master (see Live._close_master). ioctl raises ValueError
+    # for a negative fd, not OSError, so check it here.
+    if master < 0:
+        return
     try:
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
     except OSError:

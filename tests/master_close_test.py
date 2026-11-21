@@ -162,12 +162,26 @@ def reader_blocked_in_poll():
     return planted_ok(fd)
 
 
+def resize_after_close():
+    # repaint's second resize runs after a shutdown or the reader's exit closed
+    # the master; the -1 left behind must be a no-op, not an escaped error.
+    live, fd = new_live(SLEEP)
+    live.shutdown()
+    try:
+        live.repaint(80, 24)
+        live.resize(100, 30)
+    except Exception as exc:
+        return "resize after close raised %s: %s" % (type(exc).__name__, exc)
+    return None
+
+
 CHECKS = (
     quit_then_reader,
     grok_exit_then_shutdown,
     quit_twice,
     server_stop_then_reader,
     reader_blocked_in_poll,
+    resize_after_close,
 )
 
 
