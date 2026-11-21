@@ -11,6 +11,7 @@ fail=0
 ok()  { echo "ok:   $1"; }
 bad() { echo "FAIL: $1"; fail=1; }
 tmp=$(mktemp -d)
+port=${ERGOSPHERE_TEST_PORT:-$(python3 -I "$root/tests/free_port.py")} || exit 1
 stub_pid=""
 trap '[ -n "$stub_pid" ] && kill "$stub_pid" 2>/dev/null; rm -rf "$tmp"' EXIT
 
@@ -62,7 +63,7 @@ for _ in $(seq 50); do [ -s "$tmp/port" ] && break; sleep 0.1; done
 latest="http://127.0.0.1:$(cat "$tmp/port")/releases/latest"
 run() {
   env -u ERGOSPHERE_PORT -u ERGOSPHERE_INSTALL_SOURCE_URL -u ERGOSPHERE_TOKEN PATH="$tmp/bin:$PATH" \
-    ERGOSPHERE_INSTALL_LATEST_URL="$latest" bash "$root/install.sh" --check --dir "$tmp/dest" --port "${ERGOSPHERE_TEST_PORT:-9560}" "$@" 2>&1 </dev/null
+    ERGOSPHERE_INSTALL_LATEST_URL="$latest" bash "$root/install.sh" --check --dir "$tmp/dest" --port "$port" "$@" 2>&1 </dev/null
 }
 out=$(run)
 if grep -q 'release  *v9\.8\.7 (latest)' <<<"$out"; then ok "lookup finds the latest release"; else bad "lookup: $out"; fi
