@@ -83,6 +83,9 @@ VENDOR_FILES = {
 # One live grok per CLI session id. Closing a browser socket does not remove it.
 LIVE = {}
 LIVE_LOCK = threading.Lock()
+# Session ids whose grok is being spawned, with LIVE_LOCK released: a cwd on a
+# hung mount must not block every other launch. Guarded by LIVE_LOCK.
+STARTING = set()
 STOP = threading.Event()
 # Set once a restart is accepted. No new grok starts after that.
 RESTART = threading.Event()
@@ -1524,9 +1527,24 @@ def kill_proc(proc):
 
 
 def kill_all():
+    # Take the running groks first: on STOP their readers leave LIVE.
     with LIVE_LOCK:
         lives = list(LIVE.values())
         LIVE.clear()
+    for live in lives:
+        live.shutdown()
+    # A spawn in flight has no LIVE entry, and its child can be stuck before exec
+    # on a hung mount. Wait for it: its open_live sees STOP and kills the child.
+    # Returning first lets the server exit with that child unowned.
+    while True:
+        with LIVE_LOCK:
+            if not STARTING:
+                lives = list(LIVE.values())
+                LIVE.clear()
+                break
+        time.sleep(0.1)
+    # Without STOP (main's finally after serve_forever) such a spawn added its
+    # grok to LIVE instead.
     for live in lives:
         live.shutdown()
 
@@ -2008,19 +2026,40 @@ def open_live(sid, cmd, cwd, cols, rows):
     with LIVE_LOCK:
         if RESTART.is_set():
             raise RuntimeError("Ergosphere is restarting")
+        if STOP.is_set():
+            raise RuntimeError("Ergosphere is stopping")
         live = LIVE.get(sid)
         if live is not None and live.alive():
             return live, True
         if live is not None and live_state(live) == "stopping":
             raise SessionBusy("stopping", "session is still stopping; try again in a moment")
+        if sid in STARTING:
+            raise SessionBusy("starting", "session is still starting; try again in a moment")
         if holder:
             raise SessionBusy(holder_state(holder), "session is already open in another grok")
         if live is not None:
             LIVE.pop(sid, None)
+        STARTING.add(sid)
+    try:
         proc, master = spawn_grok(cmd, cwd, cols, rows)
-        live = Live(sid, proc, master, cwd)
-        LIVE[sid] = live
-        live.start()
+    except BaseException:
+        with LIVE_LOCK:
+            STARTING.discard(sid)
+        raise
+    with LIVE_LOCK:
+        stopping = STOP.is_set()
+        if not stopping:
+            STARTING.discard(sid)
+            live = Live(sid, proc, master, cwd)
+            LIVE[sid] = live
+            live.start()
+    if stopping:
+        # kill_all is waiting on STARTING: this grok must die before sid leaves it.
+        kill_proc(proc)
+        os.close(master)
+        with LIVE_LOCK:
+            STARTING.discard(sid)
+        raise RuntimeError("Ergosphere is stopping")
     # Log after release: a stalled log write must not block other launches.
     print("term pid=%s sid=%s cmd=%s" % (proc.pid, sid, " ".join(cmd)), flush=True)
     return live, False
@@ -2040,6 +2079,12 @@ def list_live():
         })
     rows.sort(key=lambda row: row["started"], reverse=True)
     return rows
+
+
+def live_info():
+    # Settings polls this. "running" is the restart gate's count, so a spawn
+    # still in STARTING (no LIVE row yet) is counted on the page too.
+    return {"sessions": list_live(), "running": running_sessions()}
 
 
 _TURN_MARK = b"agent turn in progress"
@@ -2105,12 +2150,16 @@ def session_state(sid, with_turn=True, scan=None):
     """
     with LIVE_LOCK:
         live = LIVE.get(sid)
+        spawning = sid in STARTING
     here = live_state(live)
     if scan is None:
         scan = ProcScan()
     holder = session_holder(sid, scan)
     out = {"id": sid, "state": "stopped", "pid": None, "turn": None, "holder": holder,
            "here": here in ("starting", "running")}
+    if spawning and not here:
+        out["state"] = "starting"
+        return out
     if here == "stopping":
         out["state"] = "stopping"
         out["pid"] = live.proc.pid
@@ -2129,6 +2178,63 @@ def session_state(sid, with_turn=True, scan=None):
         if with_turn:
             out["turn"] = grok_turn(holder["pid"], scan)
     return out
+
+
+def wait_for_spawn(sid):
+    # A spawn in flight has no LIVE entry, and it runs with LIVE_LOCK released.
+    # An attach that asks now would see the session as ended. Wait here, with no
+    # lock held, as attach did when the spawn held LIVE_LOCK. STOP ends the wait:
+    # open_live then drops sid from STARTING.
+    while True:
+        with LIVE_LOCK:
+            if sid not in STARTING:
+                return
+        time.sleep(0.05)
+
+
+def settled_state(sid, with_turn=True):
+    """session_state once no start of sid is in flight.
+
+    Every reply that could say "ended" (chat page, /term, /holder, /resume)
+    reads this: a start that began after wait_for_spawn reads "starting" with
+    nothing here yet, so wait for it too and look again.
+    """
+    while True:
+        wait_for_spawn(sid)
+        state = session_state(sid, with_turn=with_turn)
+        if state["state"] != "starting" or state["here"]:
+            return state
+
+
+def resume_reply(sid):
+    # /resume reply (code, body), or None when a start of sid began after this
+    # request looked (open_live: SessionBusy "starting"): look again once done.
+    state = settled_state(sid, with_turn=False)
+    if running_here(state):
+        return (200, {"ok": True, "id": sid})
+    if state["state"] == "stopping":
+        return (409, {"ok": False, "stopping": True, "state": "stopping",
+                      "error": "session is still stopping; try again in a moment"})
+    if state["holder"]:
+        return (409, {"ok": False, "held": True, "state": state["state"],
+                      "error": "session is already running"})
+    row = find_session(sid)
+    if row is None:
+        return (404, {"ok": False, "error": "unknown session"})
+    cwd = row.get("cwd")
+    if not existing_dir(cwd):
+        return (400, {"ok": False, "error": "session cwd is not an existing absolute directory"})
+    try:
+        cmd = grok_argv(None, None, cwd, sid)
+        open_live(sid, cmd, cwd, 80, 24)
+    except SessionBusy as exc:
+        if exc.state == "starting":
+            return None
+        return (409, {"ok": False, "state": exc.state, "held": exc.state != "stopping",
+                      "stopping": exc.state == "stopping", "error": str(exc)})
+    except (RuntimeError, OSError) as exc:
+        return (400, {"ok": False, "error": str(exc)[:300]})
+    return (200, {"ok": True, "id": sid})
 
 
 def running_here(state):
@@ -3358,7 +3464,8 @@ def running_sessions():
     # stopping (live_state). The restart gate counts the same way.
     with LIVE_LOCK:
         lives = list(LIVE.values())
-    return sum(1 for live in lives if live_state(live))
+        spawning = len(STARTING)
+    return spawning + sum(1 for live in lives if live_state(live))
 
 
 def settings_overrides(args):
@@ -3529,17 +3636,16 @@ function renderRestart() {
   say("sessions", "Running in this server: " + state.sessions + ". Restart needs zero.");
   el("restart").disabled = restarting || state.sessions !== 0;
 }
-// /session-info with no id reads only this server's LIVE table (no /proc
-// scan), so a 2 s poll is cheap. alive matches the restart gate's count.
+// /session-info with no id reads only this server's tables (no /proc scan),
+// so a 2 s poll is cheap. "running" is the restart gate's own count.
 function pollSessions() {
   if (restarting || document.hidden) return;
   var seq = ++pollSeq;
   fetch("/session-info", {cache: "no-store"}).then(function (resp) {
     return resp.ok ? resp.json() : null;
   }).then(function (data) {
-    var i, n = 0;
-    if (seq !== pollSeq || restarting || !data || !Array.isArray(data.sessions)) return;
-    for (i = 0; i < data.sessions.length; i++) if (data.sessions[i].alive) n++;
+    if (seq !== pollSeq || restarting || !data || typeof data.running !== "number") return;
+    var n = data.running;
     if (n !== state.sessions) {
       state.sessions = n;
       say("restart-msg", "");
@@ -5111,7 +5217,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(resume, str) or not SID_TOKEN_RE.match(resume):
                 self._html(chat_pick_page())
                 return
-            state = session_state(resume, with_turn=False)
+            state = settled_state(resume, with_turn=False)
             running = running_here(state)
             holder = None if running else state["holder"]
             saved = find_session(resume)
@@ -5246,7 +5352,7 @@ class Handler(BaseHTTPRequestHandler):
     def _settings_restart(self):
         # Only with zero grok sessions. RESTART stops new launches until exec.
         with LIVE_LOCK:
-            busy = sum(1 for live in LIVE.values() if live_state(live))
+            busy = len(STARTING) + sum(1 for live in LIVE.values() if live_state(live))
             if not busy:
                 RESTART.set()
         if busy:
@@ -5384,37 +5490,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         # One state answers it (session_state). Reply after LIVE_LOCK is
         # released: a slow client must not hold it.
-        state = session_state(sid, with_turn=False)
-        if running_here(state):
-            self._json(200, {"ok": True, "id": sid})
-            return
-        if state["state"] == "stopping":
-            self._json(409, {"ok": False, "stopping": True, "state": "stopping",
-                             "error": "session is still stopping; try again in a moment"})
-            return
-        if state["holder"]:
-            self._json(409, {"ok": False, "held": True, "state": state["state"],
-                             "error": "session is already running"})
-            return
-        row = find_session(sid)
-        if row is None:
-            self._json(404, {"ok": False, "error": "unknown session"})
-            return
-        cwd = row.get("cwd")
-        if not existing_dir(cwd):
-            self._json(400, {"ok": False, "error": "session cwd is not an existing absolute directory"})
-            return
-        try:
-            cmd = grok_argv(None, None, cwd, sid)
-            open_live(sid, cmd, cwd, 80, 24)
-        except SessionBusy as exc:
-            self._json(409, {"ok": False, "state": exc.state, "held": exc.state != "stopping",
-                             "stopping": exc.state == "stopping", "error": str(exc)})
-            return
-        except (RuntimeError, OSError) as exc:
-            self._json(400, {"ok": False, "error": str(exc)[:300]})
-            return
-        self._json(200, {"ok": True, "id": sid})
+        reply = None
+        while reply is None:
+            reply = resume_reply(sid)
+        self._json(*reply)
 
     def _take(self):
         # The button posts this. It does not run on connect. Quit only a
@@ -5442,7 +5521,7 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(urlparse(self.path).query, keep_blank_values=False)
         want = one_query(qs, "id")
         if not want:
-            self._json(200, {"sessions": list_live()})
+            self._json(200, live_info())
             return
         if not SID_TOKEN_RE.match(want):
             self._json(400, {"error": "unknown session"})
@@ -5479,7 +5558,7 @@ class Handler(BaseHTTPRequestHandler):
         if not SID_TOKEN_RE.match(sid):
             self._json(400, {"ok": False, "error": "unknown session"})
             return
-        state = session_state(sid, with_turn=False)
+        state = settled_state(sid, with_turn=False)
         holder = state["holder"]
         here = running_here(state)
         if not holder:
@@ -5628,7 +5707,7 @@ class Handler(BaseHTTPRequestHandler):
         live = None
         client = None
         try:
-            state = session_state(sid, with_turn=False)
+            state = settled_state(sid, with_turn=False)
             holder = state["holder"]
             if running_here(state):
                 with LIVE_LOCK:

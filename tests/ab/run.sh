@@ -78,6 +78,14 @@ run_side A "$AB_A_DIR" "$AB_PORT_A"
 run_side B "$AB_B_DIR" "$AB_PORT_B"
 rc=0
 python3 -B "$HERE/ab.py" summary "$AB_OUT/A" "$AB_OUT/B" >"$AB_OUT/summary.txt" || rc=$?
+# Issue #45: one session's hung start, on each side's port again (its server has stopped).
+for side in A B; do
+  dir=AB_${side}_DIR port=AB_PORT_${side}
+  rm -rf "$AB_OUT/slow-$side"; mkdir -p "$AB_OUT/slow-$side"
+  log "$side: slow start check on ${!port}"
+  python3 -B "$HERE/slow_start.py" run "${!dir}" "${!port}" "$AB_OUT/slow-$side" >"$AB_OUT/slow-$side.json" 2>"$AB_OUT/slow-$side.err"
+done
+python3 -B "$HERE/slow_start.py" summary "$AB_OUT/slow-A.json" "$AB_OUT/slow-B.json" >>"$AB_OUT/summary.txt" || rc=1
 cat "$AB_OUT/summary.txt"
 [ -s "$AB_OUT/summary.txt" ] || exit 1
 exit "$rc"
