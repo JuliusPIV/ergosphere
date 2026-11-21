@@ -766,6 +766,9 @@ install_files() {
   while IFS= read -r -d '' rel; do
     rel=${rel#./}
     if [[ "$rel" == cwd-defaults.json || "$rel" == ergosphere.json || "$rel" == ergosphere.log ]]; then continue; fi
+    # Developer files in the release archive; the server never reads them (#97).
+    # Not export-ignore: ghflow's reviewers read a git archive of the repo.
+    case "$rel" in tests/*|docs/*|.git*|.ghflow*|install.sh) continue ;; esac
     if [[ "$(sha_of "$SRC/$rel")" != "$(sha_of "$DEST/$rel")" ]]; then
       { mkdir -p -- "$DEST/$(dirname -- "$rel")" &&
         cp -p -- "$SRC/$rel" "$DEST/$rel.part" &&
