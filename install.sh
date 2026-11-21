@@ -771,19 +771,31 @@ free_kib() {
   df -Pk -- "$1" 2>/dev/null | awk 'NR == 2 { print $4 }'
 }
 
+# Prints the KiB a copy of file $1 takes: 4 KiB blocks, rounded up.
+blocks_kib() {
+  echo $((4 * (($(stat -c %s -- "$1") + 4095) / 4096)))
+}
+
 # check_writes CFG_RESULT CANDIDATE. Every folder install_files and
 # write_config will write in must be writable now (-w/-x, no probe writes),
 # and each filesystem must hold what is copied there, so a read-only folder or
 # a full disk stops at the gate instead of after half the files are replaced.
 # CFG_RESULT is cfg_py's answer for the candidate config: wrote or kept.
 check_writes() {
-  local rel dir up kib=0 free cfg_dir dirs=() bad=()
+  local rel dir up new old net=0 need=0 free cfg_dir dirs=() bad=()
   while IFS= read -r -d '' rel; do
     rel=${rel#./}
     if [[ "$rel" == cwd-defaults.json || "$rel" == ergosphere.json || "$rel" == ergosphere.log ]]; then continue; fi
     [[ "$(sha_of "$SRC/$rel")" != "$(sha_of "$DEST/$rel")" ]] || continue
-    # Rounded up to 4 KiB blocks: a copy takes whole blocks.
-    kib=$((kib + 4 * (($(stat -c %s -- "$SRC/$rel") + 4095) / 4096)))
+    # install_files copies each file beside the old one, then moves it over,
+    # which frees the old one. So the peak is the top of the running total in
+    # the same order: earlier files' net growth plus this copy. The sum of all
+    # new sizes would refuse an upgrade that replaces the files one at a time.
+    new=$(blocks_kib "$SRC/$rel")
+    old=0
+    if [[ -e "$DEST/$rel" ]]; then old=$(blocks_kib "$DEST/$rel"); fi
+    if (( net + new > need )); then need=$((net + new)); fi
+    net=$((net + new - old))
     dir="$DEST/$rel"
     dirs+=("${dir%/*}")
   done < <(cd "$SRC" && find . -type f -print0 | sort -z)
@@ -801,22 +813,22 @@ check_writes() {
   else
     row ok write "the install and config folders are writable"
   fi
-  if (( kib > 0 )); then
+  if (( need > 0 )); then
     existing_up "$DEST"; up=$UP
     free=$(free_kib "$up")
     if [[ ! "$free" =~ ^[0-9]+$ ]]; then
       row invalid space "could not read the free space of $up"
-    elif (( free < kib )); then
-      row invalid space "$up has $free KiB free, the release needs $kib KiB"
+    elif (( free < need )); then
+      row invalid space "$up has $free KiB free, the release needs $need KiB"
     fi
   fi
   if [[ "$1" == wrote ]]; then
-    kib=$((4 * (($(stat -c %s -- "$2") + 4095) / 4096)))
+    need=$(blocks_kib "$2")
     free=$(free_kib "$cfg_dir")
     if [[ ! "$free" =~ ^[0-9]+$ ]]; then
       row invalid space "could not read the free space of $cfg_dir"
-    elif (( free < kib )); then
-      row invalid space "$cfg_dir has $free KiB free, the config needs $kib KiB"
+    elif (( free < need )); then
+      row invalid space "$cfg_dir has $free KiB free, the config needs $need KiB"
     fi
   fi
 }

@@ -142,6 +142,37 @@ else
   printf '%s\n' "$out" | tail -n 8
 fi
 
+# An upgrade where every file changed in place (same size, new bytes). Each copy
+# is moved over its old file, which frees that file's space, so the disk needs
+# room for the largest file, not for the sum. df reports exactly the largest
+# file: the gate must let it through, since the sequential replace fits.
+h="$work/seqfit"
+mkdir -p "$h/app" "$h/state" "$work/dfpeak"
+while IFS= read -r f; do
+  mkdir -p "$h/app/$(dirname -- "$f")"
+  cp -p "$d/$f" "$h/app/$f"
+  printf 'X' | dd of="$h/app/$f" bs=1 seek=0 conv=notrunc status=none
+done < <(cd "$d" && find . -type f | sed 's|^\./||')
+blocks() { echo $((4 * (($(stat -c %s -- "$1") + 4095) / 4096))); }
+total=0 max=0
+while IFS= read -r f; do
+  b=$(blocks "$d/$f"); total=$((total + b)); (( b > max )) && max=$b
+done < <(cd "$d" && find . -type f | sed 's|^\./||')
+if (( total <= max )); then bad "sequential fit: fixture needs no more than its largest file"; fi
+printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/seq 100 99 %d 99%% /"\n' "$max" >"$work/dfpeak/df"
+chmod +x "$work/dfpeak/df"
+out=$(inst "$h" "$h/state/ergosphere.json" "$work/dfpeak" --check); rc=$?
+if [[ "$rc" -eq 0 && "$out" == *"ready: checks passed"* ]]; then
+  ok "upgrade in place with room for the largest file (sum $total KiB, free $max KiB): --check passes"
+else
+  bad "upgrade in place: rc $rc, want --check to pass with $max KiB free (sum $total KiB)"
+  printf '%s\n' "$out" | tail -n 8
+fi
+# One block less than the largest file: the sequential replace cannot fit.
+printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/seq 100 99 %d 99%% /"\n' "$((max - 4))" >"$work/dfpeak/df"
+out=$(inst "$h" "$h/state/ergosphere.json" "$work/dfpeak" --check); rc=$?
+expect_blocked "upgrade in place, one block short" "has $((max - 4)) KiB free, the release needs $max KiB" "$rc" "$out"
+
 # A writable config folder whose name ends in a newline (no folder of the name
 # without it) passes: the nearest-parent walk keeps the name intact.
 h="$work/nlcfg"
