@@ -6,6 +6,7 @@
                                                  exit 1 when a check passes on A and fails on B,
                                                  or B misses an HTTP check in ORDER,
                                                  or B's browser checks break or miss a check in ORDER
+                                                 (a check reported as null or without "ok" is missing)
 Stdlib only.
 """
 import json
@@ -91,6 +92,11 @@ def load(path):
         return {}
 
 
+def reported(checks, name):
+    """A check counts as reported only as an object with an "ok" field (#234)."""
+    return isinstance(checks.get(name), dict) and "ok" in checks[name]
+
+
 def side(dirname):
     server = load(dirname + "/http.json")
     browser = load(dirname + "/browser.json")
@@ -118,7 +124,7 @@ def summary(adir, bdir):
     if not bbrowser.get("browser") and not bbrowser.get("unavailable"):
         broken.append("browser checks broke on B: %s" % str(bbrowser.get("error") or "no result")[:300])
     if bbrowser.get("browser"):
-        missing = [n for n in ORDER if n not in HTTP_CHECKS and n not in (bbrowser.get("checks") or {})]
+        missing = [n for n in ORDER if n not in HTTP_CHECKS and not reported(bbrowser.get("checks") or {}, n)]
         if missing:
             broken.append("B did not report browser check(s): %s" % ", ".join(missing))
     width = 36
@@ -128,8 +134,8 @@ def summary(adir, bdir):
     for name in ORDER:
         if name not in a and name not in b:
             continue
-        ca = a.get(name) or {"ok": False, "value": "not run"}
-        cb = b.get(name) or {"ok": False, "value": "not run"}
+        ca = a[name] if reported(a, name) else {"ok": False, "value": "not run"}
+        cb = b[name] if reported(b, name) else {"ok": False, "value": "not run"}
         cell = lambda c: ("%s %s" % ("PASS" if c["ok"] else "FAIL", c["value"]))[:width]
         same = ca == cb
         if not same:
@@ -148,7 +154,8 @@ def summary(adir, bdir):
         lines.append("BROWSER FAILURE: %s" % why)
     # The HTTP checks always run, and both sides run B's ab.py: a check dropped
     # from http_checks() vanishes from both columns, so require each name (#179).
-    http_missing = [n for n in HTTP_CHECKS if n not in (load(bdir + "/http.json").get("checks") or {})]
+    # Read B's merged checks: vendor_listed comes from vendor.json, not http.json.
+    http_missing = [n for n in HTTP_CHECKS if not reported(b, n)]
     if http_missing:
         lines.append("HTTP FAILURE: B did not report HTTP check(s): %s" % ", ".join(http_missing))
     print("\n".join(lines))

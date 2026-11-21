@@ -22,6 +22,9 @@ def write_side(root, label, names):
     checks = {n: {"ok": True, "value": "ok"} for n in names}
     with open(os.path.join(d, "http.json"), "w", encoding="utf-8") as fh:
         json.dump({"checks": checks, "info": {"code_sha256": "x"}}, fh)
+    # run.sh writes vendor_listed (also in HTTP_CHECKS) to its own file.
+    with open(os.path.join(d, "vendor.json"), "w", encoding="utf-8") as fh:
+        json.dump({"checks": {"vendor_listed": {"ok": True, "value": "ok"}}}, fh)
     # No browser on the host: only a warning, so the HTTP rule decides the exit.
     with open(os.path.join(d, "browser.json"), "w", encoding="utf-8") as fh:
         json.dump({"unavailable": "test"}, fh)
