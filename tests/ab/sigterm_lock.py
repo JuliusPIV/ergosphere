@@ -33,7 +33,7 @@ def summary(apath, bpath):
     order = load_test().CASES
     load = lambda p: (json.load(open(p)).get("checks") or {}) if os.path.exists(p) and os.path.getsize(p) else {}
     a, b = load(apath), load(bpath)
-    width = 40
+    width = 46
     lines = ["", "Issue #132: SIGTERM/SIGINT landing at one exact point; the server must exit 0",
              "%-10s %-*s %-*s %s" % ("check", width, "A", width, "B", "same")]
     regress = []

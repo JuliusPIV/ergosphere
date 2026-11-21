@@ -192,7 +192,7 @@ def stuck_where(pid):
             wchan = handle.read().strip() or "?"
     except OSError:
         return "gone"
-    return "%d thread(s), main waiting in %s" % (threads, wchan)
+    return "%d thread(s), main in %s" % (threads, wchan)
 
 
 def setup(work, sid):
@@ -270,7 +270,7 @@ def run_case(code, port, case):
         try:
             rc = server.wait(EXIT_WAIT)
         except subprocess.TimeoutExpired:
-            return False, "still running %.0fs after the signal: %s" % (EXIT_WAIT, stuck_where(server.pid))
+            return False, "hung %.0fs: %s" % (EXIT_WAIT, stuck_where(server.pid))
         if rc != 0:
             return False, "exit code %s: %s" % (rc, open(log_path).read()[-300:])
         left = len(grok_pids(sid))
