@@ -104,6 +104,8 @@ python3 -B "$HERE/slow_start.py" summary "$AB_OUT/slow-A.json" "$AB_OUT/slow-B.j
 bash "$HERE/install_files.sh" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #150: install --bind 0.0.0.0 while the port is held on 127.0.0.2.
 bash "$HERE/install_bind_any.sh" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #142: a bind-only rerun onto an address another program holds.
+bash "$HERE/install_bind_move.sh" >>"$AB_OUT/summary.txt" || rc=1
 cat "$AB_OUT/summary.txt"
 [ -s "$AB_OUT/summary.txt" ] || exit 1
 exit "$rc"
