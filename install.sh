@@ -787,7 +787,7 @@ install_files() {
 }
 
 # "sha256 path" of every developer file in the releases whose installer
-# copied them into DEST (v0.1.0 to v0.3.2, before #97). Fixed: later
+# copied them into DEST (all 15 releases before #97). Fixed: later
 # installers copy none. Built from each tag's git archive.
 OLD_DEV_FILES='
 ac0752c3bd9baa66515814b556c37ba752883519d6774192ca33b0c7071d42b0 docs/images/chat.png
