@@ -297,8 +297,11 @@ def check_pid_reused_same_argv(erg):
                                   if grok_argv(p) and sid.encode() in cmdline(p)) or child)
     if not child:
         return "same argv: grok under the wrapper never started"
+    # Frozen /proc: no grok elsewhere on this machine forces a rescan meanwhile.
+    thaw = frozen_proc(erg)
     got = info(erg, sid)
     if not got["here"] or got["holder"]:
+        thaw()
         erg.kill_proc(live.proc)
         return "same argv setup: here=%s holder=%s" % (got["here"], got["holder"])
     undo = reuse_pid(erg, child[0], 1)
@@ -306,6 +309,7 @@ def check_pid_reused_same_argv(erg):
         got = info(erg, sid)
     finally:
         undo()
+        thaw()
         erg.kill_proc(live.proc)
         with erg.LIVE_LOCK:
             erg.LIVE.pop(sid, None)
@@ -323,8 +327,10 @@ def check_new_start_time_rescans(erg):
     sid = new_sid(14)
     proc = popen([GROK, "-c", FAKE, "-r", sid])
     wait_for(lambda: grok_argv(proc.pid))
+    thaw = frozen_proc(erg)
     failure = expect(erg, sid, "held-by-cli")
     if failure:
+        thaw()
         return "start time setup: " + failure
     undo = reuse_pid(erg, proc.pid, os.getpid())
     count = Count(erg)
@@ -333,6 +339,7 @@ def check_new_start_time_rescans(erg):
     finally:
         count.done()
         undo()
+        thaw()
         proc.kill()
         proc.wait()
     return None if count.n == 1 else "start time: %d full /proc passes after a new start time (want 1)" % count.n
