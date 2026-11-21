@@ -105,14 +105,21 @@ def run_browser():
     # A fresh id: the server looks for a session's holder machine-wide.
     sid = str(uuid.uuid4())
     sdir = os.path.join(home, ".grok", "sessions", "t", sid)
-    for d in (sdir, work):
+    bindir = os.path.join(tmp, "bin")
+    for d in (sdir, work, bindir):
         os.makedirs(d)
+    # The server will not start without a grok on PATH; this one never runs here.
+    grok = os.path.join(bindir, "grok")
+    Path(grok).write_text('#!/bin/bash\nexec -a grok %s -B %s "$@"\n' % (
+        sys.executable, ROOT / "tests" / "ab" / "fakegrok.py"))
+    os.chmod(grok, 0o755)
     Path(sdir, "summary.json").write_text(json.dumps({"info": {"id": sid, "cwd": work},
         "generated_title": "held exit fit test", "updated_at": "2026-01-01T00:00:00Z"}))
     port = free_port()
     cfg = os.path.join(tmp, "ergosphere.json")
     Path(cfg).write_text(json.dumps({"bind": "127.0.0.1", "port": port}))
-    env = dict(os.environ, HOME=home, ERGOSPHERE_CONFIG=cfg)
+    env = dict(os.environ, HOME=home, ERGOSPHERE_CONFIG=cfg,
+               PATH=bindir + os.pathsep + os.environ.get("PATH", ""))
     env.pop("ERGOSPHERE_TOKEN", None)
     env.pop("ERGOSPHERE_PORT", None)
     # The other grok: not started by this server, the id on its command line.
