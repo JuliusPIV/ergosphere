@@ -57,8 +57,57 @@ async function until(p, pred) {
 }
 const seen = s => `saw "${s.text.slice(0, 30)}" page ${s.termRows}x${s.termCols} sent ${s.sent}`;
 
+// Records each window.open (#34): its URL and features, and whether the page
+// had user activation then.  The real open still runs.
+function recordOpens() {
+  window.abOpens = [];
+  const open = window.open;
+  window.open = function (u, target, features) {
+    const ua = navigator.userActivation;
+    window.abOpens.push({u: String(u), target, features: String(features || ''), active: !!(ua && ua.isActive)});
+    return open.apply(this, arguments);
+  };
+}
+
+// A click on grok's link (the stand-in's row 1, column 1) opens it in a new
+// tab, noopener, inside the click.  Then the page's own rules for an open
+// frame: with no click a link in the bar, and javascript:/file: never.
+async function linkCheck(p) {
+  const g = await screen(p);
+  const before = await status(p);
+  await p.mouse.click(g.x + 2, g.y + 2);
+  const {s, met} = await until(p, x => x.ok && /^(linkRc\d+|noDisplay)$/.test(x.last));
+  if (!met) return check(false, `click not handled: ${seen(s)} (was ${before.last})`);
+  // The helper's open frame is queued before the server answers the helper,
+  // so it is on the socket before the redraw that shows linkRc0.
+  const end = Date.now() + WAIT;
+  let opens = await p.evaluate(() => window.abOpens);
+  while (!opens.length && s.last === 'linkRc0' && Date.now() < end) {
+    await wait(50);
+    opens = await p.evaluate(() => window.abOpens);
+  }
+  const o = opens[0];
+  const tab = !!o && o.u === 'https://example.com/ab-link' && o.target === '_blank' &&
+    /noopener/.test(o.features) && o.active;
+  if (!tab) return check(false, `${s.last}: ${o ? `open ${o.u.slice(0, 30)} ${o.features}` : 'no tab opened'}`);
+  const bar = await p.evaluate(() => {
+    if (typeof openLink !== 'function') return 'no openLink';
+    window.abOpens = [];
+    openLink('javascript:alert(1)');
+    openLink('file:///etc/passwd');
+    if (window.abOpens.length || !document.getElementById('link').hidden) return 'bad link accepted';
+    openLink('https://example.com/later');
+    const a = document.querySelector('#link a');
+    if (window.abOpens.length) return 'opened with no click';
+    if (!a || a.href !== 'https://example.com/later' || a.target !== '_blank' || a.rel !== 'noopener noreferrer') return 'no bar link';
+    return 'ok';
+  });
+  return check(bar === 'ok', `${s.last} tab noopener; ${bar === 'ok' ? 'bar link, bad refused' : bar}`);
+}
+
 async function openPage(ctx) {
   await ctx.addInitScript(countWheelReports);
+  await ctx.addInitScript(recordOpens);
   const p = await ctx.newPage();
   p.setDefaultTimeout(WAIT);
   await p.goto(url);
@@ -214,6 +263,7 @@ async function run() {
     ({s, met} = await until(p, x => fitted(x) && (x.rows !== r0 || x.cols !== c0)));
     checks.resize = check(met, met ? `${r0}x${c0}->${s.termRows}x${s.termCols} grok ${s.rows}x${s.cols}`
                                    : `${r0}x${c0}-> ${seen(s)}`);
+    checks.link_open = await linkCheck(p);
     await ctx.close();
 
     ctx = await b.newContext({viewport: {width: 412, height: 839}, hasTouch: true, isMobile: true, deviceScaleFactor: 2});

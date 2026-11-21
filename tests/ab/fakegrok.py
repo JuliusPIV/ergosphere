@@ -4,13 +4,16 @@
 # scroll bar that takes SGR wheel, press and drag, and keeps a status line
 # on the last row: "off=<offset>/<max> size=<rows>x<cols> n=<wheel reports
 # handled> last=<event> $".  The "$" ends it: the page can see a frame half
-# drawn, and a reading without it is not one.
+# drawn, and a reading without it is not one.  A click on row 1, column 1
+# opens a link as grok does (#34): last=linkRc<$BROWSER's exit code> or
+# last=noDisplay.
 import fcntl
 import os
 import re
 import select
 import signal
 import struct
+import subprocess
 import sys
 import termios
 import tty
@@ -66,6 +69,22 @@ os.set_blocking(wake_r, False)
 os.set_blocking(wake_w, False)
 signal.set_wakeup_fd(wake_w)
 signal.signal(signal.SIGWINCH, lambda *a: None)
+LINK = "https://example.com/ab-link"
+
+
+def open_link():
+    # What grok does on a click on a link (#34): run $BROWSER with the URL,
+    # or with no BROWSER and no display show "Can't open links without a display".
+    browser = os.environ.get("BROWSER", "").split()
+    if not browser:
+        return "noDisplay"
+    args = [a.replace("%s", LINK) for a in browser]
+    if LINK not in args:
+        args.append(LINK)
+    rc = subprocess.call(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return "linkRc%d" % rc
+
+
 cols, view, maxoff = draw()
 SGR = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
 while True:
@@ -111,6 +130,8 @@ while True:
         elif fin == b"m":
             drag = False
             last = "release"
+            if x == 1 and y == 1:
+                last = open_link()
     rest = SGR.sub(b"", d)
     off -= rest.count(b"\x1b[5~") * view + rest.count(b"\x1b[A") + rest.count(b"\x1bOA")
     off += rest.count(b"\x1b[6~") * view + rest.count(b"\x1b[B") + rest.count(b"\x1bOB")
