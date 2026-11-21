@@ -4,6 +4,8 @@
   python3 -B ab.py summary <A-dir> <B-dir>    -> summary text on stdout;
                                                  exit 1 when a check passes on A and fails on B,
                                                  or B's browser checks break or miss a check in ORDER
+  python3 -B ab.py pidreuse <A.txt> <B.txt>   -> pid reuse rows (tests/pid_reuse_test.py output);
+                                                 exit 1 unless B ran and passed every check
 Stdlib only.
 """
 import json
@@ -136,7 +138,34 @@ def summary(adir, bdir):
     return 1 if regress or broken else 0
 
 
+def pid_reuse_rows(path):
+    """{check name: passed} from tests/pid_reuse_test.py output ("ok: name" / "FAIL: name -- why")."""
+    rows = {}
+    for line in open(path, errors="replace"):
+        mark, _, rest = line.rstrip("\n").partition(": ")
+        if mark in ("ok", "FAIL") and not rest[:1].isdigit():  # not the "FAIL: 3 of 13" total
+            rows[rest.split(" -- ")[0]] = mark == "ok"
+    return rows
+
+
+def pidreuse(apath, bpath):
+    a, b = pid_reuse_rows(apath), pid_reuse_rows(bpath)
+    cell = lambda ok: "-" if ok is None else ("PASS" if ok else "FAIL")
+    lines = ["", "Issues #148, #191: quitting a holder grok whose pid is reused (stand-ins, private pid namespace)",
+             "%-84s %-4s %s" % ("check", "A", "B")]
+    lines += ["%-84s %-4s %s" % (name, cell(a.get(name)), cell(ok)) for name, ok in b.items()]
+    failed = [name for name, ok in b.items() if not ok]
+    if not b:
+        lines.append("PID REUSE CHECKS DID NOT RUN on B: %s" % open(bpath, errors="replace").read().strip()[-200:])
+    elif failed:
+        lines.append("FAIL on B: %s" % ", ".join(failed))
+    print("\n".join(lines))
+    return 1 if failed or not b else 0
+
+
 def main(argv):
+    if len(argv) == 4 and argv[1] == "pidreuse":
+        return pidreuse(argv[2], argv[3])
     if len(argv) == 4 and argv[1] == "http":
         print(json.dumps(http_checks(argv[2], argv[3])))
         return 0
