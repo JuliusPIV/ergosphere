@@ -393,6 +393,9 @@ for pid in sorted((p for p in os.listdir("/proc") if p.isdigit()), key=int):
 # sessions kept it running. Sets PROBE=moved and PROBE_AT when one answers.
 probe_own() {
   local info b p pid
+  # other with no holder pid means a program answered on the configured address
+  # and it is not Ergosphere: it is not ours to move, so the check must block (#150).
+  if [[ "$PROBE" == other && -z "$PROBE_PID" ]]; then return 0; fi
   info=$(find_own)
   [[ -n "$info" ]] || return 0
   read -r b p pid <<<"$info"

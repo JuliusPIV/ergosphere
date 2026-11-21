@@ -7,14 +7,15 @@
 # (its own socket must not count as another program).
 #
 # Run: ERGOSPHERE_TEST_PORT=<spare port> bash tests/install_bind_any_test.sh
-# Uses that port and the next two. No network: the package is served from
+# Uses that port and the next three. No network: the package is served from
 # 127.0.0.1 and grok is a stub that only answers --version. Every server it
 # starts is stopped at the end.
 set -u
 repo=$(cd "$(dirname "$0")/.." && pwd)
-port=${ERGOSPHERE_TEST_PORT:-$(python3 -I "$repo/tests/free_port.py" 3)} || exit 1
+port=${ERGOSPHERE_TEST_PORT:-$(python3 -I "$repo/tests/free_port.py" 4)} || exit 1
 own=$((port + 1))
 moved_own=$((port + 2))
+held_own=$((port + 3))
 work=$(mktemp -d "${TMPDIR:-/tmp}/ergosphere-bind-any-test.XXXXXX")
 pids=()
 fail=0
@@ -136,6 +137,49 @@ if [[ "$rc" -eq 0 && -n "$old" && -n "$moved" && "$moved" != "$old" && "$(health
 else
   bad "saved-bind move to 0.0.0.0:$moved_own: exit $rc, old pid '${old:-none}', pid '${moved:-none}'"
   printf '%s\n' "$out" | tail -n 15
+fi
+
+# 4. Saved config says 127.0.0.1:$held_own, this install's server runs on
+# 127.0.0.2:$held_own, and another program answers on 127.0.0.1:$held_own.
+# Bind 0.0.0.0 must stop at check with the config untouched (review r2-1).
+out=$(run_install "$work/u/held" --bind 127.0.0.2 --port "$held_own")
+old=$(field pid "$out")
+if [[ -n "$old" ]]; then pids+=("$old"); fi
+python3 -I -c '
+import json, sys
+p = sys.argv[1] + "/ergosphere.json"
+d = json.load(open(p))
+d["bind"] = "127.0.0.1"
+json.dump(d, open(p, "w"))' "$work/u/held" </dev/null
+before=$(cat "$work/u/held/ergosphere.json")
+python3 -I -c '
+import http.server, sys
+class Quiet(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self): self.send_error(404)
+s = http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), Quiet)
+open(sys.argv[2], "w").write("up")
+s.serve_forever()' "$held_own" "$work/held-other.up" </dev/null >/dev/null 2>&1 &
+pids+=($!)
+for _ in $(seq 50); do [[ -s "$work/held-other.up" ]] && break; sleep 0.1; done
+[[ -s "$work/held-other.up" ]] || { bad "could not start the other program on 127.0.0.1:$held_own"; exit 1; }
+rc=0
+out=$(run_install "$work/u/held" --bind 0.0.0.0 --port "$held_own") || rc=$?
+if [[ "$rc" -ne 0 ]] && grep -q '^failed at check' <<<"$out"; then
+  ok "saved 127.0.0.1, own server on 127.0.0.2, other on 127.0.0.1: failed at check (exit $rc)"
+else
+  bad "saved 127.0.0.1 case: exit $rc, want failed at check"
+  printf '%s\n' "$out" | tail -n 15
+fi
+if [[ "$(cat "$work/u/held/ergosphere.json")" == "$before" ]]; then
+  ok "config left as it was (bind still 127.0.0.1)"
+else
+  bad "config changed: $(cat "$work/u/held/ergosphere.json")"
+fi
+if [[ -n "$old" ]] && kill -0 "$old" 2>/dev/null; then
+  ok "own server pid $old on 127.0.0.2:$held_own was not stopped"
+else
+  bad "own server pid ${old:-none} is gone"
 fi
 
 exit "$fail"
