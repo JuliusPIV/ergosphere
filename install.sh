@@ -782,7 +782,10 @@ blocks_kib() {
 # a full disk stops at the gate instead of after half the files are replaced.
 # CFG_RESULT is cfg_py's answer for the candidate config: wrote or kept.
 check_writes() {
-  local rel dir up new old net=0 need=0 free cfg_dir dirs=() bad=()
+  local rel dir up dev new old k free cfg_dir cfg_need dirs=() bad=()
+  # Per filesystem (st_dev): running net growth, peak need, and a path to ask df.
+  # A symlinked folder such as vendor/ can sit on another disk than DEST.
+  local -A net=() need=() fs_path=()
   while IFS= read -r -d '' rel; do
     rel=${rel#./}
     if [[ "$rel" == cwd-defaults.json || "$rel" == ergosphere.json || "$rel" == ergosphere.log ]]; then continue; fi
@@ -791,12 +794,15 @@ check_writes() {
     # which frees the old one. So the peak is the top of the running total in
     # the same order: earlier files' net growth plus this copy. The sum of all
     # new sizes would refuse an upgrade that replaces the files one at a time.
+    dir="$DEST/$rel"
+    existing_up "${dir%/*}"; up=$UP
+    dev=$(stat -c %d -- "$up")
     new=$(blocks_kib "$SRC/$rel")
     old=0
     if [[ -e "$DEST/$rel" ]]; then old=$(blocks_kib "$DEST/$rel"); fi
-    if (( net + new > need )); then need=$((net + new)); fi
-    net=$((net + new - old))
-    dir="$DEST/$rel"
+    fs_path[$dev]=${fs_path[$dev]:-$up}
+    if (( ${net[$dev]:-0} + new > ${need[$dev]:-0} )); then need[$dev]=$(( ${net[$dev]:-0} + new )); fi
+    net[$dev]=$(( ${net[$dev]:-0} + new - old ))
     dirs+=("${dir%/*}")
   done < <(cd "$SRC" && find . -type f -print0 | sort -z)
   for dir in ${dirs[@]+"${dirs[@]}"}; do
@@ -813,22 +819,22 @@ check_writes() {
   else
     row ok write "the install and config folders are writable"
   fi
-  if (( need > 0 )); then
-    existing_up "$DEST"; up=$UP
-    free=$(free_kib "$up")
+  for k in "${!need[@]}"; do
+    if (( need[$k] <= 0 )); then continue; fi
+    free=$(free_kib "${fs_path[$k]}")
     if [[ ! "$free" =~ ^[0-9]+$ ]]; then
-      row invalid space "could not read the free space of $up"
-    elif (( free < need )); then
-      row invalid space "$up has $free KiB free, the release needs $need KiB"
+      row invalid space "could not read the free space of ${fs_path[$k]}"
+    elif (( free < need[$k] )); then
+      row invalid space "${fs_path[$k]} has $free KiB free, the release needs ${need[$k]} KiB"
     fi
-  fi
+  done
   if [[ "$1" == wrote ]]; then
-    need=$(blocks_kib "$2")
+    cfg_need=$(blocks_kib "$2")
     free=$(free_kib "$cfg_dir")
     if [[ ! "$free" =~ ^[0-9]+$ ]]; then
       row invalid space "could not read the free space of $cfg_dir"
-    elif (( free < need )); then
-      row invalid space "$cfg_dir has $free KiB free, the config needs $need KiB"
+    elif (( free < cfg_need )); then
+      row invalid space "$cfg_dir has $free KiB free, the config needs $cfg_need KiB"
     fi
   fi
 }

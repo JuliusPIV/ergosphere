@@ -173,6 +173,28 @@ printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted 
 out=$(inst "$h" "$h/state/ergosphere.json" "$work/dfpeak" --check); rc=$?
 expect_blocked "upgrade in place, one block short" "has $((max - 4)) KiB free, the release needs $max KiB" "$rc" "$out"
 
+# An upgrade where vendor/ is a symlink to a roomy second filesystem and only
+# vendor/xterm.js changed. The copy lands on that filesystem, so the gate must
+# charge it there, not to the install dir's filesystem (4 KiB free here).
+h="$work/symvendor"
+mkdir -p "$h/app" "$h/state" "$work/vendorfs/vendor" "$work/dfsym"
+cp -p "$d/ergosphere.py" "$d/LICENSE" "$h/app/"
+cp -rp "$d/vendor/." "$work/vendorfs/vendor/"
+ln -s "$work/vendorfs/vendor" "$h/app/vendor"
+echo "/* older release */" >>"$work/vendorfs/vendor/xterm.js"
+# Stub df reports the filesystem of the path it is given (symlinks resolved, as
+# real df does): the vendor filesystem has room, every other path has 4 KiB.
+# shellcheck disable=SC2016  # the stub's $p is expanded by the stub, not here
+printf '#!/bin/sh\nfor p; do :; done\nr=$(realpath -- "$p")\ncase "$r" in\n  %s/*) a=1000000 ;;\n  *) a=4 ;;\nesac\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/sym 1000000 1 $a 1%% /"\n' "$work/vendorfs" >"$work/dfsym/df"
+chmod +x "$work/dfsym/df"
+out=$(inst "$h" "$h/state/ergosphere.json" "$work/dfsym" --check); rc=$?
+if [[ "$rc" -eq 0 && "$out" == *"ready: checks passed"* ]]; then
+  ok "vendor/ on a roomy filesystem behind a symlink: --check passes"
+else
+  bad "vendor/ behind a symlink: rc $rc, want --check to charge the copy to the vendor filesystem"
+  printf '%s\n' "$out" | tail -n 8
+fi
+
 # A writable config folder whose name ends in a newline (no folder of the name
 # without it) passes: the nearest-parent walk keeps the name intact.
 h="$work/nlcfg"
