@@ -1631,6 +1631,8 @@ class Live:
         self.clients = []
         self.lock = threading.Lock()
         self.write_lock = threading.Lock()
+        # master is the fd, or -1 once closed; only _close_master changes it.
+        self.fd_lock = threading.Lock()
         self.reader = None
         self.watcher = None
         self.closed = False
@@ -1818,7 +1820,8 @@ class Live:
         try:
             # poll, not select: select() raises ValueError for an fd >= 1024.
             poller = select.poll()
-            poller.register(self.master, select.POLLIN)
+            if self.master >= 0:
+                poller.register(self.master, select.POLLIN)
             while not STOP.is_set() and not self.closed:
                 ready = poller.poll(400)
                 if not ready:
@@ -1856,10 +1859,7 @@ class Live:
                 with LIVE_LOCK:
                     if LIVE.get(self.sid) is self:
                         LIVE.pop(self.sid, None)
-                try:
-                    os.close(self.master)
-                except OSError:
-                    pass
+                self._close_master()
                 print("term end sid=%s poll=%s" % (self.sid, self.proc.poll()), flush=True)
 
     def _send_loop(self, client):
@@ -1982,8 +1982,18 @@ class Live:
         if self.proc.poll() is None:
             # grok outlived SIGKILL + 3 s: the entry stays until it is gone.
             threading.Thread(target=self._release_on_exit, daemon=True).start()
+        self._close_master()
+
+    def _close_master(self):
+        # shutdown and the reader's exit both get here. A second os.close
+        # would close whatever file reused the number since (#218); the -1
+        # also keeps a later read off that file.
+        with self.fd_lock:
+            fd, self.master = self.master, -1
+        if fd < 0:
+            return
         try:
-            os.close(self.master)
+            os.close(fd)
         except OSError:
             pass
 
