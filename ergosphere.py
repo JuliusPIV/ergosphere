@@ -5351,10 +5351,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def _settings_restart(self):
         # Only with zero grok sessions. RESTART stops new launches until exec.
+        # One owner: the request that sets RESTART is the only one that may
+        # clear it, or a second request that fails cancels a restart already
+        # shutting down (PR #172 r2-1).
         with LIVE_LOCK:
+            pending = RESTART.is_set()
             busy = len(STARTING) + sum(1 for live in LIVE.values() if live_state(live))
-            if not busy:
+            if not busy and not pending:
                 RESTART.set()
+        if pending:
+            self._json(409, {"ok": False, "error": "a restart is already under way"})
+            return
         if busy:
             self._json(409, {
                 "ok": False,
