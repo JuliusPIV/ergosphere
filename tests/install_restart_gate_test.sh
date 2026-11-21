@@ -170,7 +170,7 @@ if [[ "$rc" -eq 0 && "$(pid_now)" == "$pid1" ]] && kill -0 "$gpid" 2>/dev/null &
     [[ "$out" == *"not restarted (1 grok session open)"* ]]; then
   ok "launch: pid $pid1 kept, its grok $gpid still runs"
 else
-  bad "launch: rc $rc, server now '$(pid_now)' (was $pid1), grok $gpid $(kill -0 "$gpid" 2>/dev/null && echo alive || echo gone)"
+  bad "launch: grok $(kill -0 "$gpid" 2>/dev/null && echo alive || echo killed), server pid $pid1 -> $(pid_now), rc $rc"
   printf '%s\n' "$out" | tail -n 15
 fi
 
@@ -189,7 +189,7 @@ track "$pid2"
 if hooked end && [[ "$rc" -eq 0 && -n "$pid2" && "$pid2" != "$pid_before" && "$(pid_now)" == "$pid2" ]]; then
   ok "end: pid $pid_before -> $pid2 after its last session ended"
 else
-  bad "end: rc $rc, pid '$pid2' (was $pid_before)"
+  bad "end: server not restarted (pid $pid_before -> ${pid2:-none}), hook $(hooked end && echo ran || echo 'never ran'), rc $rc"
   printf '%s\n' "$out" | tail -n 15
 fi
 
