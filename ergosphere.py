@@ -23,6 +23,7 @@ import os
 import pty
 import queue
 import re
+import secrets
 import select
 import shutil
 import signal
@@ -97,6 +98,12 @@ CLIENT_QUEUE_CAP = 2 * SCREEN_CAP
 # grok coalesces SIGWINCH. Two resizes closer than this read as one, and the
 # same final size does not repaint.
 REPAINT_PAUSE = 0.25
+# Where grok's BROWSER helper (--open-link) posts a clicked link (#34). Set by
+# serve() once listening. None: grok gets no BROWSER, as in tests.
+LINK_URL = None
+LINK_MAX = 2048
+# Closer opens than this from one session are dropped.
+LINK_PAUSE = 0.5
 # xterm.js 5.5.0 applies these DEC private modes and then sends the drag to
 # the PTY. grok treats that as its own copy. Drop set and reset so the
 # browser keeps the selection. 1004 and 2004 stay. A click that never
@@ -1571,6 +1578,20 @@ def spawn_grok(cmd, cwd, cols, rows):
         # inherited them could send READY=1 or WATCHDOG=1 in its place.
         for name in ("NOTIFY_SOCKET", "WATCHDOG_USEC", "WATCHDOG_PID"):
             env.pop(name, None)
+        # A link grok opens must reach the user's browser, not this machine's
+        # desktop or browser (#34). grok runs BROWSER with the URL; the helper
+        # posts it here with this grok's token, and the page opens it.
+        # A server started inside another grok inherits that grok's link
+        # variables; its own groks must never get them.
+        for name in ("DISPLAY", "WAYLAND_DISPLAY", "BROWSER",
+                     "ERGOSPHERE_LINK_URL", "ERGOSPHERE_LINK_TOKEN"):
+            env.pop(name, None)
+        token = secrets.token_urlsafe(32)
+        helper = link_browser()
+        if helper:
+            env["BROWSER"] = helper
+            env["ERGOSPHERE_LINK_URL"] = LINK_URL
+            env["ERGOSPHERE_LINK_TOKEN"] = token
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
         env["COLUMNS"] = str(cols)
@@ -1590,7 +1611,112 @@ def spawn_grok(cmd, cwd, cols, rows):
         os.close(master)
         raise
     os.close(slave)
+    # On the process object, so the token lives and dies with this Live's proc.
+    proc.link_token = token if helper else None
     return proc, master
+
+
+def link_browser():
+    # grok's webbrowser crate splits BROWSER on ":" and whitespace, no quoting.
+    if not LINK_URL:
+        return None
+    exe = sys.executable or ""
+    script = os.path.abspath(__file__)
+    if not exe or any(ch.isspace() or ch in ":%" for ch in exe + script):
+        return None
+    return "%s -B %s --open-link %%s" % (exe, script)
+
+
+def link_url_ok(url, bound_host=None):
+    if not isinstance(url, str) or not url or len(url) > LINK_MAX:
+        return False
+    # A browser reads "\" as "/" and decodes %xx in a host; Python does
+    # neither, so such a URL could name another host here than in the page.
+    if any(ord(ch) <= 32 or ord(ch) == 127 or ch == "\\" for ch in url):
+        return False
+    try:
+        parsed = urlparse(url)
+        parsed.port
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or "%" in parsed.netloc:
+        return False
+    if parsed.username is not None or parsed.password is not None:
+        return False
+    return not link_host_is_self(parsed.hostname, bound_host)
+
+
+def link_host_is_self(host, bound_host):
+    # This server, its loopback names and its bound address: a tab opened
+    # there is same-origin with the page and passes the Sec-Fetch-Site guard
+    # on the GETs that start grok (#34 review).
+    try:
+        # idna maps fullwidth digits and case the way a browser does.
+        name = host.encode("idna").decode("ascii").lower().rstrip(".")
+    except UnicodeError:
+        return True
+    if not name or name == "localhost" or name.endswith(".localhost"):
+        return True
+    if name in listener_names(bound_host):
+        return True
+    try:
+        addr = ipaddress.ip_address(name.strip("[]"))
+    except ValueError:
+        try:
+            # inet_aton reads the short forms a browser also takes (127.1, 0x7f.1, 2130706433).
+            addr = ipaddress.IPv4Address(socket.inet_aton(name))
+        except OSError:
+            return False
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        addr = mapped
+    return addr.is_loopback or addr.is_unspecified or str(addr) in listener_names(bound_host)
+
+
+def live_for_link(token):
+    if not isinstance(token, str) or not token:
+        return None
+    with LIVE_LOCK:
+        lives = list(LIVE.values())
+    given = token.encode("utf-8", "replace")
+    for live in lives:
+        mine = getattr(live.proc, "link_token", None)
+        if mine and hmac.compare_digest(given, mine.encode("ascii")) and live.alive():
+            return live
+    return None
+
+
+def link_endpoint(host, port, tls):
+    # A wildcard listener is reached on loopback; the Host check allows it.
+    if host in ("", "0.0.0.0"):
+        host = "127.0.0.1"
+    return "%s://%s:%d/open-link" % ("https" if tls else "http", host, port)
+
+
+def open_link_main(url):
+    # grok's BROWSER helper: hand the URL to the server and exit. No browser.
+    endpoint = os.environ.get("ERGOSPHERE_LINK_URL", "")
+    token = os.environ.get("ERGOSPHERE_LINK_TOKEN", "")
+    if not endpoint or not token:
+        print("ergosphere --open-link: no ERGOSPHERE_LINK_URL/TOKEN", file=sys.stderr)
+        return 1
+    body = json.dumps({"token": token, "url": url}).encode("utf-8")
+    parsed = urlparse(endpoint)
+    if parsed.scheme == "https":
+        # The server's own address from its env; its cert is often self-signed.
+        conn = http.client.HTTPSConnection(parsed.hostname, parsed.port, timeout=5,
+                                           context=ssl._create_unverified_context())
+    else:
+        conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=5)
+    try:
+        conn.request("POST", parsed.path, body, {"Content-Type": "application/json"})
+        status = conn.getresponse().status
+    except (OSError, http.client.HTTPException) as exc:
+        print("ergosphere --open-link: %s" % exc, file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+    return 0 if status == 200 else 1
 
 
 def resize_pty(master, proc, cols, rows):
@@ -1637,6 +1763,7 @@ class Live:
         self.ended_sent = False
         self.sub_state = {"rows": {}, "order": []}
         self.sub_lock = threading.Lock()
+        self.last_link = 0.0
 
     def alive(self):
         return self.proc is not None and self.proc.poll() is None and not self.closed
@@ -1751,6 +1878,20 @@ class Live:
             clients = list(self.clients)
         for client in clients:
             self._enqueue(client, frame, 1)
+
+    def open_link(self, url):
+        # Every attached page gets it and shows it as a link in its bar; only
+        # the user's click on that link opens a tab.
+        now = time.monotonic()
+        with self.lock:
+            if now - self.last_link < LINK_PAUSE:
+                return False
+            self.last_link = now
+            clients = list(self.clients)
+        frame = json.dumps({"type": "open", "url": url}).encode("utf-8")
+        for client in clients:
+            self._enqueue(client, frame, 1)
+        return True
 
     def _ended_frame(self):
         return json.dumps({"type": "ended"}).encode("utf-8")
@@ -3895,7 +4036,7 @@ body { position: fixed; left: 0; right: 0; top: var(--vv-top, 0px); }
 </style>
 </head>
 <body>
-<div id="bar"><a href="/">← Session List</a> | <button id="stop" type="button">Quit</button> | <span id="status">@@STATUS@@</span> | <span id="title"@@TITLE_ATTR@@>@@TITLE@@</span><span id="title-gap"@@GAP_ATTR@@> | </span><span id="sid">Session ID: @@SID_TEXT@@</span></div>
+<div id="bar"><a href="/">← Session List</a> | <button id="stop" type="button">Quit</button> | <span id="status">@@STATUS@@</span><span id="link" hidden></span> | <span id="title"@@TITLE_ATTR@@>@@TITLE@@</span><span id="title-gap"@@GAP_ATTR@@> | </span><span id="sid">Session ID: @@SID_TEXT@@</span></div>
 <div id="version">v@@VERSION@@</div>
 <div id="wrap"><div id="stage"><div id="resume-ask" hidden><div>Resume this session?</div><button type="button" id="resume-yes">Resume</button><button type="button" id="resume-no">Cancel</button></div><div id="busy"><div id="busy-text">@@NOTICE@@</div><a id="open-there" hidden>Open it there</a><button id="take" type="button"@@BUTTON_ATTR@@>@@BUTTON_LABEL@@</button> <a id="busy-back" href="/" hidden>Back</a></div><div id="term"></div></div></div>
 <script src="/vendor/xterm.js"></script>
@@ -4442,6 +4583,58 @@ document.addEventListener("mouseup", function (ev) {
   if (!bytes || ended || stopping || !sock || sock.readyState !== 1) return;
   sock.send(new TextEncoder().encode(bytes));
 }, true);
+// A link grok was asked to open (#34). Only http and https, never this
+// server. The page never opens a tab itself: any process under grok can ask
+// for a link, and no timing tells its request from the user's click. The
+// latest link goes in the bar; the user's own click on it opens it.
+// The link must not change under the user: while the pointer is on the bar
+// link or it has focus, a new one waits; for a moment after a change (a tap
+// has no hover) a click on it does nothing.
+var LINK_SWAP_MS = 1000;
+var linkBox = document.getElementById("link");
+var linkPending = null;
+var linkChangedAt = -Infinity;
+function linkHeld(next) {
+  return linkBox.matches(":hover") || linkBox.contains(next === undefined ? document.activeElement : next);
+}
+function openLink(u) {
+  var parsed;
+  try { parsed = new URL(u); } catch (err) { return; }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
+  if (parsed.hostname === location.hostname) return;
+  if (linkHeld()) {
+    linkPending = parsed.href;
+    return;
+  }
+  showLink(parsed.href);
+}
+function showLink(href) {
+  linkPending = null;
+  var a = document.createElement("a");
+  a.href = href;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  a.style.textDecoration = "underline";
+  // Host and tail both show, so two long links with one prefix look different.
+  a.textContent = href.length > 72 ? href.slice(0, 40) + "..." + href.slice(-30) : href;
+  a.title = "Open " + href + " in a new tab";
+  linkBox.textContent = " | Open link: ";
+  linkBox.appendChild(a);
+  linkBox.hidden = false;
+  linkChangedAt = performance.now();
+}
+linkBox.addEventListener("mouseleave", function () {
+  if (linkPending && !linkHeld()) showLink(linkPending);
+});
+linkBox.addEventListener("focusout", function (ev) {
+  // activeElement is not yet the new focus here; relatedTarget is.
+  if (linkPending && !linkHeld(ev.relatedTarget)) showLink(linkPending);
+});
+function linkTooNew(ev) {
+  if (performance.now() - linkChangedAt < LINK_SWAP_MS) ev.preventDefault();
+}
+linkBox.addEventListener("click", linkTooNew, true);
+linkBox.addEventListener("auxclick", linkTooNew, true);
 function setStatus(text, active) {
   var el = document.getElementById("status");
   el.textContent = text;
@@ -4662,6 +4855,10 @@ function connect() {
         var msg = JSON.parse(ev.data);
         if (msg && msg.type === "ended") {
           showEnded();
+          return;
+        }
+        if (msg && msg.type === "open") {
+          openLink(msg.url);
           return;
         }
         if (msg && msg.type === "session" && msg.id) {
@@ -5239,6 +5436,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/open-link":
+            self._open_link()
+            return
         if not self._guard(path in ("/take", "/launch", "/resume", "/settings")):
             return
         if path == "/settings":
@@ -5407,6 +5607,29 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(value, str):
             raise ValueError("invalid request")
         return value
+
+    def _open_link(self):
+        # From grok's BROWSER helper, not a page: its proof is this grok's
+        # link token, so the bearer token (never given to grok) is not asked.
+        if not self._host_allowed():
+            self._json(403, {"ok": False, "error": "forbidden"})
+            return
+        obj = self._json_object()
+        if obj is None:
+            self._json(400, {"ok": False, "error": "invalid request"})
+            return
+        live = live_for_link(obj.get("token"))
+        if live is None:
+            self._json(404, {"ok": False, "error": "no live session for this token"})
+            return
+        url = obj.get("url")
+        if not link_url_ok(url, self._bound_endpoint()[0]):
+            self._json(400, {"ok": False, "error": "only http and https links open"})
+            return
+        if not live.open_link(url):
+            self._json(429, {"ok": False, "error": "too many links"})
+            return
+        self._json(200, {"ok": True})
 
     def _json_object(self):
         raw_len = self.headers.get("Content-Length")
@@ -6212,6 +6435,8 @@ def serve(args, config):
     httpd.cwd_defaults = dict(config["agents"])
     # Keep the fingerprint of the loaded code, not a later on-disk version.
     httpd.code_sha256 = runtime_fingerprint()
+    global LINK_URL
+    LINK_URL = link_endpoint(httpd.server_address[0], httpd.server_address[1], tls)
     if not token and not bound_is_loopback(httpd.server_address[0]):
         print(
             "warning: %s:%s is not loopback and has no token; anyone who can reach "
@@ -6267,6 +6492,8 @@ def restart_self(old_bind, old_port):
 
 
 def main(argv):
+    if len(argv) == 2 and argv[0] == "--open-link":
+        return open_link_main(argv[1])
     args = parse_args(argv)
     # --check only reports. It does not write the migrated config.
     config = load_config(migrate=not args.check)

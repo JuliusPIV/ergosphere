@@ -4,15 +4,24 @@
 # scroll bar that takes SGR wheel, press and drag, and keeps a status line
 # on the last row: "off=<offset>/<max> size=<rows>x<cols> n=<wheel reports
 # handled> last=<event> $".  The "$" ends it: the page can see a frame half
-# drawn, and a reading without it is not one.
+# drawn, and a reading without it is not one.  A click on row 1, column 1
+# opens a link as grok does (#34): last=linkRc<$BROWSER's exit code> or
+# last=noDisplay.  The key "k" alone asks for another link the same way, as
+# a process under grok could with no click: last=keyRc<code> or noDisplay.
+# The key "s" starts a background ask every 0.55 s for spam1..spam6 (last=spam).
+# Keys "1", "2", "3" ask for three long links that share a prefix
+# (last=oneRc<code>, twoRc<code>, threeRc<code>).
 import fcntl
 import os
 import re
 import select
 import signal
 import struct
+import subprocess
 import sys
 import termios
+import threading
+import time
 import tty
 
 LINES = ["line %03d  %s" % (i, "lorem ipsum dolor sit amet " * 2) for i in range(400)]
@@ -66,6 +75,37 @@ os.set_blocking(wake_r, False)
 os.set_blocking(wake_w, False)
 signal.set_wakeup_fd(wake_w)
 signal.signal(signal.SIGWINCH, lambda *a: None)
+LINK = "https://ab.invalid/ab-link"
+# Asked for on the key "k", as a process under grok could do with no click.
+KEY_LINK = "https://ab.invalid/ab-key"
+# Keys 1-3: long links with one 79-character prefix (#220 swap check).
+SWAP_PREFIX = "https://ab.invalid/o/oauth2/v2/auth?response_type=code&scope=email&x=aaaaaaaaa"
+SWAP_KEYS = {
+    b"1": (SWAP_PREFIX + "&client_id=legit-app", "one"),
+    b"2": (SWAP_PREFIX + "&client_id=attacker-app", "two"),
+    b"3": (SWAP_PREFIX + "&client_id=third-app", "three"),
+}
+
+
+def open_link(link=LINK, label="link"):
+    # What grok does on a click on a link (#34): run $BROWSER with the URL,
+    # or with no BROWSER and no display show "Can't open links without a display".
+    browser = os.environ.get("BROWSER", "").split()
+    if not browser:
+        return "noDisplay"
+    args = [a.replace("%s", link) for a in browser]
+    if link not in args:
+        args.append(link)
+    rc = subprocess.call(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return "%sRc%d" % (label, rc)
+
+
+def spam():
+    for i in range(1, 7):
+        open_link("https://ab.invalid/spam%d" % i, "spam")
+        time.sleep(0.55)
+
+
 cols, view, maxoff = draw()
 SGR = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
 while True:
@@ -111,7 +151,18 @@ while True:
         elif fin == b"m":
             drag = False
             last = "release"
+            if x == 1 and y == 1:
+                last = open_link()
     rest = SGR.sub(b"", d)
-    off -= rest.count(b"\x1b[5~") * view + rest.count(b"\x1b[A") + rest.count(b"\x1bOA")
+    if rest == b"k":
+        last = open_link(KEY_LINK, "key")
+    if rest in SWAP_KEYS:
+        url, label = SWAP_KEYS[rest]
+        last = open_link(url, label)
+    if rest == b"s":
+        # Never draws: only the main loop writes to the terminal.
+        threading.Thread(target=spam, daemon=True).start()
+        last = "spam"
+    off -=rest.count(b"\x1b[5~") * view + rest.count(b"\x1b[A") + rest.count(b"\x1bOA")
     off += rest.count(b"\x1b[6~") * view + rest.count(b"\x1b[B") + rest.count(b"\x1bOB")
     cols, view, maxoff = draw()

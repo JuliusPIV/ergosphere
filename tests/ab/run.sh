@@ -48,8 +48,10 @@ run_side() { # label code-dir port
   printf '#!/bin/bash\nexec -a grok python3 -B "%s/fakegrok.py" "$@"\n' "$HERE" >"$w/bin/grok"
   chmod +x "$w/bin/grok"
   log "$label: start $code/ergosphere.py on 127.0.0.1:$port"
-  (cd "$w" && HOME="$w/home" ERGOSPHERE_CONFIG="$w/config.json" PATH="$w/bin:$PATH" \
-     exec python3 -B "$code/ergosphere.py" --bind 127.0.0.1 --port "$port") >"$w/server.log" 2>&1 &
+  # No BROWSER or display from this shell: a click on a link then behaves as
+  # under a system unit (#34).
+  (cd "$w" && exec env -u BROWSER -u DISPLAY -u WAYLAND_DISPLAY HOME="$w/home" ERGOSPHERE_CONFIG="$w/config.json" PATH="$w/bin:$PATH" \
+     python3 -B "$code/ergosphere.py" --bind 127.0.0.1 --port "$port") >"$w/server.log" 2>&1 &
   pid=$!
   # Wait for the ready line, not a time: a loaded machine can take long to start.
   for _ in $(seq 600); do

@@ -57,8 +57,187 @@ async function until(p, pred) {
 }
 const seen = s => `saw "${s.text.slice(0, 30)}" page ${s.termRows}x${s.termCols} sent ${s.sent}`;
 
+// Records each window.open (#34).  The page must never call it: only the
+// user's click on the bar link opens a tab.  The real open still runs.
+function recordOpens() {
+  window.abOpens = [];
+  const open = window.open;
+  window.open = function (u) {
+    window.abOpens.push(String(u));
+    return open.apply(this, arguments);
+  };
+}
+
+// The page's bar link and the window.open calls it made, and how many pages
+// the browser has (a tab opened by any means adds one).
+async function barState(ctx, p) {
+  const r = await p.evaluate(() => {
+    const a = document.querySelector('#link a');
+    return {href: a ? a.href : '', target: a ? a.target : '', rel: a ? a.rel : '',
+      links: document.querySelectorAll('#link a').length, opens: window.abOpens.slice()};
+  });
+  return {...r, pages: ctx.pages().length};
+}
+
+async function untilBar(ctx, p, pred) {
+  const end = Date.now() + WAIT;
+  let r = await barState(ctx, p);
+  while (!pred(r) && Date.now() < end) { await wait(50); r = await barState(ctx, p); }
+  return r;
+}
+
+// A click on grok's link (the stand-in's row 1, column 1) puts that link in
+// the bar and opens no tab.  The page refuses javascript:, file: and its own
+// origin.  A click on the bar link opens exactly that URL, with no opener.
+// The server takes one link per 0.5 s per session (LINK_PAUSE): the next
+// check asks for its link only once that has passed since the last one.
+let lastLinkAt = 0;
+const pastPause = () => wait(Math.max(0, lastLinkAt + 700 - Date.now()));
+// After the bar link click the focus is on that link: keys go to grok again
+// only once the terminal has it.
+const focusTerm = p => p.evaluate(() => term.focus());
+// The page ignores a click on a bar link for 1 s after it changed (#220).
+const settled = p => p.waitForFunction(
+  () => typeof linkChangedAt === 'undefined' || performance.now() - linkChangedAt > 1100, null, {timeout: WAIT});
+// A tab opened within ms, or null.
+const tabWithin = (ctx, ms) => ctx.waitForEvent('page', {timeout: ms}).then(t => t, () => null);
+
+async function linkCheck(ctx, p) {
+  const g = await screen(p);
+  const pages = ctx.pages().length;
+  await p.mouse.click(g.x + 2, g.y + 2);
+  const {s, met} = await until(p, x => x.ok && /^(linkRc\d+|noDisplay)$/.test(x.last));
+  if (!met) return check(false, `click not handled: ${seen(s)}`);
+  lastLinkAt = Date.now();
+  // The helper's open frame is queued before the server answers the helper,
+  // so it is on the socket before the redraw that shows linkRc0.
+  let r = await barState(ctx, p);
+  if (r.opens.length || r.pages !== pages) return check(false, `${s.last}: page opened a tab itself (${r.opens[0] || 'new page'})`);
+  if (r.href !== 'https://ab.invalid/ab-link' || r.target !== '_blank' || r.rel !== 'noopener noreferrer') {
+    return check(false, `${s.last}: bar link ${r.href.slice(0, 30) || 'none'} target=${r.target} rel=${r.rel}`);
+  }
+  await p.evaluate(() => {
+    openLink('javascript:alert(1)'); openLink('file:///etc/passwd'); openLink(location.origin + '/models');
+  });
+  r = await barState(ctx, p);
+  if (r.href !== 'https://ab.invalid/ab-link' || r.links !== 1 || r.opens.length) {
+    return check(false, `bad link taken: bar ${r.href.slice(0, 30)} links=${r.links}`);
+  }
+  // The new tab gets a stand-in page: the A/B sandbox has no network.
+  await ctx.route('https://ab.invalid/**', route => route.fulfill({contentType: 'text/html', body: '<p>ab</p>'}));
+  // A user reads the link first: past the page's guard on a just-changed link.
+  await settled(p);
+  const [tab] = await Promise.all([ctx.waitForEvent('page', {timeout: WAIT}), p.click('#link a')]);
+  await tab.waitForLoadState('domcontentloaded');
+  const opener = await tab.evaluate(() => window.opener === null ? 'null' : 'set');
+  const got = tab.url();
+  await tab.close();
+  // Off the bar link: while it is hovered a new link waits.
+  await p.mouse.move(g.x + g.w / 2, g.y + g.h / 2);
+  return check(got === 'https://ab.invalid/ab-link' && opener === 'null',
+    `${s.last} bar link; js/file/self refused; click opened ${got.slice(8, 30)} opener ${opener}`);
+}
+
+// Any process under grok can ask for a link.  The stand-in asks for one when
+// it reads "k", as a model's shell tool could right after the user typed: a
+// bar link, no tab.
+async function keyCheck(ctx, p) {
+  const pages = ctx.pages().length;
+  await pastPause();
+  await focusTerm(p);
+  await p.evaluate(() => { window.abOpens = []; });
+  await p.keyboard.press('k');
+  const {s, met} = await until(p, x => x.ok && /^(keyRc\d+|noDisplay)$/.test(x.last));
+  if (!met) return check(false, `key not handled: ${seen(s)}`);
+  lastLinkAt = Date.now();
+  const r = await barState(ctx, p);
+  const ok = s.last === 'keyRc0' && !r.opens.length && r.pages === pages && r.href === 'https://ab.invalid/ab-key';
+  return check(ok, `${s.last}: ${r.opens.length || r.pages !== pages ? 'tab opened' : 'no tab'}, bar ${r.href.slice(8, 30) || 'none'}`);
+}
+
+// #220 recheck: a process under grok asks for a link every 0.55 s (the
+// stand-in on "s": spam1..spam6) and the user clicks blank terminal space in
+// the middle of it.  No tab may open; the bar shows the latest link.
+async function spamCheck(ctx, p) {
+  const pages = ctx.pages().length;
+  await pastPause();
+  await focusTerm(p);
+  await p.evaluate(() => { window.abOpens = []; });
+  await p.keyboard.press('s');
+  // The first spam link, in the bar or (on a page that opens tabs) in a tab.
+  let r = await untilBar(ctx, p, x => /\/spam\d$/.test(x.href) || x.opens.length > 0);
+  if (!/\/spam\d$/.test(r.href) && !r.opens.length) return check(false, `no spam link: bar ${r.href.slice(8, 30) || 'none'}`);
+  const g = await screen(p);
+  await p.mouse.click(g.x + g.w / 2, g.y + g.h / 2);
+  r = await untilBar(ctx, p, x => /\/spam6$/.test(x.href));
+  lastLinkAt = Date.now();
+  const ok = /\/spam6$/.test(r.href) && !r.opens.length && r.pages === pages && r.links === 1;
+  return check(ok, `${r.opens.length || r.pages !== pages ? `tab opened ${String(r.opens[0] || '').slice(8, 30)}` : 'no tab'}, bar ${r.href.slice(8, 30) || 'none'}`);
+}
+
+// Asks the stand-in for one of its long links (keys 1-3) and waits until
+// grok has handled it: the open frame came before that redraw.
+async function askSwap(p, key, label) {
+  await pastPause();
+  await p.keyboard.press(key);
+  const {s, met} = await until(p, x => x.ok && (x.last === label + 'Rc0' || x.last === 'noDisplay'));
+  lastLinkAt = Date.now();
+  return met && s.last === label + 'Rc0' ? null : `${key} not handled: ${seen(s)}`;
+}
+
+const SWAP_LEGIT = /client_id=legit-app$/, SWAP_EVIL = /client_id=attacker-app$/;
+
+// #220 final recheck: the user hovers the bar link, then another link with
+// the same long prefix arrives, then the user clicks where they hovered.  The
+// click must open the hovered link (or nothing), never the new one; the bar
+// shows host and tail of a long link; the new link appears once the pointer
+// leaves.
+async function swapCheck(ctx, p) {
+  await focusTerm(p);
+  let why = await askSwap(p, '1', 'one');
+  if (why) return check(false, why);
+  const text = await p.evaluate(() => (document.querySelector('#link a') || {}).textContent || '');
+  const tail = /legit-app$/.test(text);
+  await settled(p);
+  const box = await p.locator('#link a').boundingBox();
+  const x = box.x + box.width / 2, y = box.y + box.height / 2;
+  await p.mouse.move(x, y);
+  why = await askSwap(p, '2', 'two');
+  if (why) return check(false, why);
+  const tab = tabWithin(ctx, 3000);
+  await p.mouse.click(x, y);
+  const t = await tab;
+  const got = t ? t.url() : '';
+  if (t) await t.close();
+  if (SWAP_EVIL.test(got)) return check(false, `click after the swap opened the new link${tail ? '' : '; no tail shown'}`);
+  // Pointer off the bar and focus back in the terminal: the waiting link shows.
+  await p.mouse.move(x, y + 300);
+  await focusTerm(p);
+  const r = await untilBar(ctx, p, q => SWAP_EVIL.test(q.href));
+  const ok = tail && (!got || SWAP_LEGIT.test(got)) && SWAP_EVIL.test(r.href);
+  return check(ok, `${tail ? 'tail shown' : 'no tail'}; opened ${got ? 'the hovered link' : 'nothing'}; then ${SWAP_EVIL.test(r.href) ? 'new link' : 'bar unchanged'}`);
+}
+
+// A tap has no hover: a click on the bar link right after it changed opens
+// nothing.  The click time is read in the page to show it was inside 1 s.
+async function tapCheck(ctx, p) {
+  await focusTerm(p);
+  const why = await askSwap(p, '3', 'three');
+  if (why) return check(false, why);
+  const box = await p.locator('#link a').boundingBox();
+  const tab = tabWithin(ctx, 2000);
+  const ago = await p.evaluate(() => typeof linkChangedAt === 'undefined' ? -1 : Math.round(performance.now() - linkChangedAt));
+  await p.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  const t = await tab;
+  if (t) await t.close();
+  await p.mouse.move(box.x + box.width / 2, box.y + 300);
+  if (ago >= 1000) return check(false, `click came ${ago} ms after the change: not a test of the guard`);
+  return check(!t, `${t ? 'tab opened' : 'no tab'} for a click ${ago < 0 ? '?' : ago} ms after the change`);
+}
+
 async function openPage(ctx) {
   await ctx.addInitScript(countWheelReports);
+  await ctx.addInitScript(recordOpens);
   const p = await ctx.newPage();
   p.setDefaultTimeout(WAIT);
   await p.goto(url);
@@ -214,6 +393,11 @@ async function run() {
     ({s, met} = await until(p, x => fitted(x) && (x.rows !== r0 || x.cols !== c0)));
     checks.resize = check(met, met ? `${r0}x${c0}->${s.termRows}x${s.termCols} grok ${s.rows}x${s.cols}`
                                    : `${r0}x${c0}-> ${seen(s)}`);
+    checks.link_open = await linkCheck(ctx, p);
+    checks.link_key = await keyCheck(ctx, p);
+    checks.link_spam = await spamCheck(ctx, p);
+    checks.link_swap = await swapCheck(ctx, p);
+    checks.link_tap = await tapCheck(ctx, p);
     await ctx.close();
 
     ctx = await b.newContext({viewport: {width: 412, height: 839}, hasTouch: true, isMobile: true, deviceScaleFactor: 2});
