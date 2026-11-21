@@ -162,6 +162,51 @@ async function resumeBoxCheck(b) {
   }
 }
 
+// Lines between rows at a fractional device scale (#69): paint every cell
+// grey in the page's terminal, screenshot it in device pixels and count pixel
+// rows where most of the width is not that grey.  The value also gives the
+// fitted rows x cols, so A and B show the fit side by side.
+async function rowSeamCheck(b) {
+  const out = [];
+  let ok = true;
+  for (const [dsf, font] of [[2.625, 13], [3.5, 16], [3, 16]]) {
+    const ctx = await b.newContext({viewport: {width: 412, height: 839}, isMobile: true, hasTouch: true, deviceScaleFactor: dsf});
+    try {
+      await ctx.addInitScript(f => { try { localStorage.setItem('ergosphere.fontSize', String(f)); } catch (e) {} }, font);
+      const {p, s, met} = await openPage(ctx);
+      if (!met) return check(false, `${dsf}x: no grok view at page size: ${seen(s)}`);
+      await p.evaluate(() => new Promise(r => term.write('\x1b[48;2;64;64;64m\x1b[2J',
+        () => requestAnimationFrame(() => requestAnimationFrame(r)))));
+      const g = await screen(p);
+      const png = await p.screenshot({clip: {x: g.x, y: g.y, width: g.w, height: g.h}});
+      const n = await p.evaluate(async b64 => {
+        const img = new Image();
+        img.src = 'data:image/png;base64,' + b64;
+        await img.decode();
+        const c = document.createElement('canvas');
+        c.width = img.width; c.height = img.height;
+        const x = c.getContext('2d');
+        x.drawImage(img, 0, 0);
+        const d = x.getImageData(0, 0, c.width, c.height).data;
+        let seams = 0;
+        for (let y = 0; y < c.height; y++) {
+          let off = 0;
+          for (let i = y * c.width * 4, e = i + c.width * 4; i < e; i += 4) {
+            if (Math.abs(d[i] - 64) > 2 || Math.abs(d[i + 1] - 64) > 2 || Math.abs(d[i + 2] - 64) > 2) off++;
+          }
+          if (off > c.width / 2) seams++;
+        }
+        return seams;
+      }, png.toString('base64'));
+      if (n) ok = false;
+      out.push(`${dsf}:${s.termRows}x${s.termCols} ${n}`);
+    } finally {
+      await ctx.close();
+    }
+  }
+  return check(ok, out.join(' '));
+}
+
 async function run() {
   const exe = process.env.AB_CHROME || undefined;
   let b;
@@ -242,6 +287,7 @@ async function run() {
     await ctx.close();
     checks.keyboard_android = await keyboardCheck(b, 'Pixel 7', 320, false);
     checks.keyboard_ios = await keyboardCheck(b, 'iPhone 14', 300, true);
+    checks.row_seams = await rowSeamCheck(b);
     // Last: it quits and resumes the session the other checks share.
     checks.resume_box = await resumeBoxCheck(b);
     return {browser: b.version(), checks};
