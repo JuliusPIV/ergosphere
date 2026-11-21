@@ -4,11 +4,11 @@
 # install.sh without its #97 skip line, which is exactly what it was before
 # #97. The package is the checkout packed as a release archive.
 #   1. the old installer leaves tests/, docs/, .ghflow*, .git*, install.sh;
-#   2. the user adds files, also inside tests/, and links docs/ and install.sh
-#      to files outside the install dir;
+#   2. the user adds files, also inside tests/, edits tests/run_all.sh, and
+#      links docs/ and install.sh to files outside the install dir;
 #   3. the current installer removes the archive's developer files, names each
 #      one, and leaves the config, the log, the runtime, the server, the
-#      user's files, the links and their targets alone;
+#      user's files, the edited copy, the links and their targets alone;
 #   4. a second rerun changes nothing;
 #   5. with .git in the install dir (a checkout) nothing is removed.
 #
@@ -91,6 +91,7 @@ else bad "old installer did not copy the developer files; the test cannot run"; 
 # 2. The user's own files, and links that point out of the install dir.
 printf 'mine\n' >"$app/notes.txt"
 printf 'mine\n' >"$app/tests/my-notes.txt"
+printf '# my edit\n' >>"$app/tests/run_all.sh"
 printf 'outside\n' >"$work/outside/install.sh"
 rm -- "$app/install.sh" && ln -s "$work/outside/install.sh" "$app/install.sh"
 mv -- "$app/docs" "$work/outside/docs" && ln -s "$work/outside/docs" "$app/docs"
@@ -107,11 +108,11 @@ if ! grep -q '^Ergosphere is running' <<<"$out"; then
   bad "upgrade did not finish"; printf '%s\n' "$out" | tail -n 15; exit 1
 fi
 left=$(devfiles)
-want_left=$(printf '%s\n' tests/my-notes.txt | sort)
-if [[ "$left" == "$want_left" ]]; then ok "upgrade removed the developer files; the user's tests/my-notes.txt stays"
+want_left=$(printf '%s\n' tests/my-notes.txt tests/run_all.sh | sort)
+if [[ "$left" == "$want_left" ]]; then ok "upgrade removed the developer files; the user's tests/my-notes.txt and the edited tests/run_all.sh stay"
 else bad "developer files left after the upgrade: $(tr '\n' ' ' <<<"$left")"; fi
 named=$(sed -n 's/^install: removed old developer file //p' <<<"$out" | sort)
-want_named=$(grep -vE '^(docs/|install\.sh$)' <<<"$devlist")
+want_named=$(grep -vE '^(docs/|install\.sh$|tests/run_all\.sh$)' <<<"$devlist")
 if [[ "$named" == "$want_named" ]]; then ok "output names each of the $(wc -l <<<"$named") removed files"
 else bad "output names '$(head -c 300 <<<"$named")', want each removed file"; fi
 if [[ "$(field changed "$out")" == *"old developer files removed"* ]]; then ok "summary lists the removal"

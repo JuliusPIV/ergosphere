@@ -789,8 +789,9 @@ install_files() {
 # Installers before #97 copied the archive's developer files into DEST, and
 # install_files never removes anything (#199). Removes only those: archive
 # files install_files skips, as regular files in DEST reached through no
-# link, then the folders that leaves empty. A DEST holding .git is a
-# checkout, which no installer wrote: it is left alone.
+# link, with the same bytes as the archive (a user's own file or edited copy
+# at that path is kept), then the folders that leaves empty. A DEST holding
+# .git is a checkout, which no installer wrote: it is left alone.
 remove_dev_files() {
   local rel dir real n=0 dirs=()
   if [[ -e "$DEST/.git" || -L "$DEST/.git" ]]; then
@@ -803,6 +804,9 @@ remove_dev_files() {
     case "$rel" in tests/*|docs/*|.git*|.ghflow*|install.sh) ;; *) continue ;; esac
     dir=$(dirname -- "$rel")
     [[ -f "$DEST/$rel" && ! -L "$DEST/$rel" ]] || continue
+    # An installer copy is byte-identical to the archive. Anything else at that
+    # path (a user's own script, an edited file) is not ours to delete.
+    if [[ "$(sha_of "$SRC/$rel")" != "$(sha_of "$DEST/$rel")" ]]; then continue; fi
     # A linked folder on the way would point the rm outside DEST.
     if [[ "$dir" != . && "$(realpath -- "$DEST/$dir")" != "$real/$dir" ]]; then continue; fi
     rm -f -- "$DEST/$rel" || fail install "could not remove $DEST/$rel"
