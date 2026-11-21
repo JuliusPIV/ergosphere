@@ -1,4 +1,5 @@
-// Page checks in headless Chromium: node browser.js <port> <session-id>
+// Page checks in headless Chromium: node browser.js <port> <session-id> <starts-log>
+// <starts-log>: the stand-in's wrapper appends "<rows> <cols> <argv>" per start.
 // Prints {"browser": version, "checks": {...}} or {"error": why} on stdout.
 //
 // Every check waits for a state, never for a time: a reading counts only when
@@ -7,7 +8,9 @@
 // when the stand-in has handled every wheel report the page sent.  The
 // deadline only bounds a broken side, so it is long.
 const {chromium, devices} = require('playwright');
-const [port, sid] = process.argv.slice(2);
+const fs = require('fs');
+const path = require('path');
+const [port, sid, startsLog] = process.argv.slice(2);
 const url = `http://127.0.0.1:${port}/chat?resume=${sid}`;
 const WAIT = 30000;
 const wait = ms => new Promise(r => setTimeout(r, ms));
@@ -131,6 +134,50 @@ async function keyboardCheck(b, device, kb, pan) {
   }
 }
 
+// The PTY size grok was last started with for session id, from the
+// wrapper's log, as "<rows>x<cols>", or "-".
+function startSize(id) {
+  let text = '';
+  try { text = fs.readFileSync(startsLog, 'utf8'); } catch (e) { return '-'; }
+  const hits = text.split('\n').map(l => l.split(' ')).filter(f => f.length > 2 && f.slice(2).includes(id));
+  return hits.length ? `${hits[hits.length - 1][0]}x${hits[hits.length - 1][1]}` : '-';
+}
+// grok starts at the page terminal's size, not 80x24 (#58): Create on the list
+// page, then Quit and Resume on the shared session's page.  Each start's PTY
+// size, logged before grok draws, must be the page terminal's.
+async function startSizeCheck(b) {
+  const ctx = await b.newContext({viewport: {width: 1280, height: 800}});
+  try {
+    const p = await ctx.newPage();
+    p.setDefaultTimeout(WAIT);
+    await p.goto(`http://127.0.0.1:${port}/`);
+    await p.click('a[data-kind="new"]');
+    await p.fill('#na-cwd', path.dirname(startsLog));
+    await p.click('#na-create');
+    await p.waitForURL(/\/chat\?resume=/);
+    const id = new URL(p.url()).searchParams.get('resume');
+    let {s, met} = await until(p, x => x.ok);
+    if (!met) return check(false, `new: no grok view: ${seen(s)}`);
+    const made = startSize(id), page1 = `${s.termRows}x${s.termCols}`;
+    await p.goto(url);
+    ({s, met} = await until(p, fitted));
+    if (!met) return check(false, `no grok view at page size: ${seen(s)}`);
+    const bar = () => p.evaluate(() => document.getElementById('stop').textContent + ' ' +
+      document.getElementById('status').textContent);
+    await p.click('#stop');
+    const end = Date.now() + WAIT;
+    while (await bar() !== 'Resume Ended' && Date.now() < end) await wait(50);
+    if (await bar() !== 'Resume Ended') return check(false, `Quit did not end it: ${await bar()}`);
+    await p.click('#stop');
+    ({s, met} = await until(p, fitted));
+    if (!met) return check(false, `resume: no grok view at page size: ${seen(s)}`);
+    const back = startSize(sid), page2 = `${s.termRows}x${s.termCols}`;
+    return check(made === page1 && back === page2, `new ${made} page ${page1}; resume ${back} page ${page2}`);
+  } finally {
+    await ctx.close();
+  }
+}
+
 // Quit, open the "Resume this session?" box from the ended terminal, then
 // press the bar's Resume instead: the box must close once grok is live (#57).
 async function resumeBoxCheck(b) {
@@ -240,6 +287,7 @@ async function run() {
     checks.touch_scroll = check(met && s.off < tb.off,
       met ? `drag down 300px: moved ${s.off - tb.off}` : `not handled: ${seen(s)}`);
     await ctx.close();
+    checks.start_size = await startSizeCheck(b);
     checks.keyboard_android = await keyboardCheck(b, 'Pixel 7', 320, false);
     checks.keyboard_ios = await keyboardCheck(b, 'iPhone 14', 300, true);
     // Last: it quits and resumes the session the other checks share.

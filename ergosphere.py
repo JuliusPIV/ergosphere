@@ -1211,6 +1211,18 @@ def dim_arg(raw, default):
     return n
 
 
+def body_dims(obj):
+    # The page's fitted terminal size from a /launch or /resume body, so grok
+    # starts at it (#58).  Bounded as /term's query is; a missing or
+    # non-integer value keeps 80x24.
+    def one(key, default):
+        value = obj.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return default
+        return dim_arg(str(value), default)
+    return one("cols", 80), one("rows", 24)
+
+
 def new_launch(agent, approval, cwd, cwd_defaults, fallback_cwd):
     # A blank agent starts grok with no --agent flag. Any other name must be
     # one list_agents() returns. A blank agent and a blank cwd is refused
@@ -2206,7 +2218,7 @@ def settled_state(sid, with_turn=True):
             return state
 
 
-def resume_reply(sid):
+def resume_reply(sid, cols=80, rows=24):
     # /resume reply (code, body), or None when a start of sid began after this
     # request looked (open_live: SessionBusy "starting"): look again once done.
     state = settled_state(sid, with_turn=False)
@@ -2226,7 +2238,7 @@ def resume_reply(sid):
         return (400, {"ok": False, "error": "session cwd is not an existing absolute directory"})
     try:
         cmd = grok_argv(None, None, cwd, sid)
-        open_live(sid, cmd, cwd, 80, 24)
+        open_live(sid, cmd, cwd, cols, rows)
     except SessionBusy as exc:
         if exc.state == "starting":
             return None
@@ -2556,6 +2568,7 @@ def dashboard_page(sessions, agents, cwd_defaults):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ergosphere</title>
+<link rel="stylesheet" href="/vendor/xterm.css">
 <style>
 body { background: #000; color: #fff; font: 14px/1.45 ui-monospace, monospace; margin: 0; padding: 0.6rem 0.8rem 3rem; }
 a, a:visited, a:hover, a:active { color: #fff; }
@@ -2639,6 +2652,8 @@ footer { display: none; }
 </form>
 </div>
 <footer>↑/↓ select | Enter: open | Ctrl+Enter: new tab | Alt+N new agent</footer>
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
 <script>
 var cwdDefaults = @@CWD@@;
 var agentNames = @@AGENTS@@;
@@ -3010,6 +3025,37 @@ function setLaunch(state) {
   btn.disabled = state === "launching";
   btn.textContent = state === "launching" ? "Starting…" : "Create";
 }
+// grok starts at the size the chat page's terminal will fit to (#58): the
+// same xterm, font and size, in a hidden box where the chat page puts it (the
+// window less its 28px bar, 56px at 40rem wide or less), measured and
+// dropped.  Any failure sends no size, so grok starts at 80x24.
+function chatTermSize() {
+  if (typeof Terminal === "undefined" || typeof FitAddon === "undefined") return null;
+  var n = NaN;
+  try { n = parseInt(localStorage.getItem("ergosphere.fontSize"), 10); } catch (err) {}
+  var fontSize = isNaN(n) ? 14 : Math.max(8, Math.min(28, n));
+  var narrow = window.matchMedia && window.matchMedia("(max-width: 40rem)").matches;
+  var box = document.createElement("div");
+  box.style.cssText = "position: fixed; left: 0; top: 0; visibility: hidden; width: " +
+    window.innerWidth + "px; height: " + Math.max(0, window.innerHeight - (narrow ? 56 : 28)) + "px";
+  document.body.appendChild(box);
+  var t = null;
+  try {
+    t = new Terminal({fontFamily: "monospace", fontSize: fontSize, scrollback: 5000});
+    var f = new FitAddon.FitAddon();
+    t.loadAddon(f);
+    t.open(box);
+    // As the chat page's dropScrollBarGutter: its bar is hidden, so no width.
+    if (t._core && t._core.viewport) t._core.viewport.scrollBarWidth = 0;
+    var d = f.proposeDimensions();
+    return d && d.cols > 0 && d.rows > 0 ? {cols: d.cols, rows: d.rows} : null;
+  } catch (err) {
+    return null;
+  } finally {
+    try { if (t) t.dispose(); } catch (err) {}
+    box.remove();
+  }
+}
 function launchNew(blank) {
   if (launchState === "launching") {
     setModelError("Already starting a session.");
@@ -3031,6 +3077,11 @@ function launchNew(blank) {
   };
   if (modelPicked) payload.touched.push("model");
   if (effortPicked) payload.touched.push("effort");
+  var size = chatTermSize();
+  if (size) {
+    payload.cols = size.cols;
+    payload.rows = size.rows;
+  }
   setLaunch("launching");
   setModelError("");
   fetch("/launch", {
@@ -4552,11 +4603,14 @@ function resumeSession(tries) {
   }
   // Only this request starts a stopped session. /term attaches only.
   // held: another grok owns it; connect so /term shows that notice.
+  // grok starts at this terminal's fitted size, not 80x24 (#58).
+  ensureTerm();
+  try { fit.fit(); } catch (err) {}
   fetch("/resume", {
     method: "POST",
     cache: "no-store",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({id: sid})
+    body: JSON.stringify({id: sid, cols: term.cols, rows: term.rows})
   }).then(function (resp) {
     return resp.json().then(function (data) {
       return {ok: resp.ok, data: data};
@@ -5452,7 +5506,8 @@ class Handler(BaseHTTPRequestHandler):
             argv_model, argv_effort = launch_model_effort(model, effort, touched)
             sid = str(uuid.uuid4())
             cmd = grok_argv(agent, approval, cwd, None, sid, argv_model, argv_effort)
-            live, _reattach = open_live(sid, cmd, cwd, 80, 24)
+            cols, rows = body_dims(obj)
+            live, _reattach = open_live(sid, cmd, cwd, cols, rows)
         except (ValueError, RuntimeError, OSError) as exc:
             self._json(400, {"ok": False, "error": str(exc)[:300]})
             return
@@ -5490,9 +5545,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         # One state answers it (session_state). Reply after LIVE_LOCK is
         # released: a slow client must not hold it.
+        cols, rows = body_dims(obj)
         reply = None
         while reply is None:
-            reply = resume_reply(sid)
+            reply = resume_reply(sid, cols, rows)
         self._json(*reply)
 
     def _take(self):

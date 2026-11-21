@@ -44,8 +44,11 @@ run_side() { # label code-dir port
   printf '{"info":{"id":"%s","cwd":"%s"},"generated_title":"AB seeded session","updated_at":"2026-01-01T00:00:00Z"}\n' \
     "$SID" "$w/work" >"$w/home/.grok/sessions/ab/$SID/summary.json"
   printf '{"bind":"127.0.0.1","port":%s}\n' "$port" >"$w/config.json"
-  # argv[0] must be "grok": Ergosphere checks /proc/<pid>/cmdline.
-  printf '#!/bin/bash\nexec -a grok python3 -B "%s/fakegrok.py" "$@"\n' "$HERE" >"$w/bin/grok"
+  # argv[0] must be "grok": Ergosphere checks /proc/<pid>/cmdline.  Each start
+  # logs its PTY size (stdin is the PTY) and argv first, for start_size (#58).
+  # shellcheck disable=SC2016 # expanded by the wrapper, not here
+  printf '#!/bin/bash\necho "$(stty size) $*" >>"%s/starts.log"\nexec -a grok python3 -B "%s/fakegrok.py" "$@"\n' \
+    "$w" "$HERE" >"$w/bin/grok"
   chmod +x "$w/bin/grok"
   log "$label: start $code/ergosphere.py on 127.0.0.1:$port"
   (cd "$w" && HOME="$w/home" ERGOSPHERE_CONFIG="$w/config.json" PATH="$w/bin:$PATH" \
@@ -61,7 +64,7 @@ run_side() { # label code-dir port
   python3 -B "$HERE/ab.py" http "$port" "$SID" >"$w/http.json" 2>"$w/http.err"
   if [ -z "$browser_off" ]; then
     brc=0
-    NODE_PATH="$pw_path" timeout 300 node "$HERE/browser.js" "$port" "$SID" >"$w/browser.json" 2>"$w/browser.err" || brc=$?
+    NODE_PATH="$pw_path" timeout 300 node "$HERE/browser.js" "$port" "$SID" "$w/starts.log" >"$w/browser.json" 2>"$w/browser.err" || brc=$?
     [ -s "$w/browser.json" ] || printf '{"error":"browser.js exited %s with no result"}\n' "$brc" >"$w/browser.json"
   else
     printf '{"unavailable":"%s"}\n' "$browser_off" >"$w/browser.json"
