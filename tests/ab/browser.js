@@ -70,9 +70,28 @@ function recordOpens() {
 }
 
 // A click on grok's link (the stand-in's row 1, column 1) opens it in a new
-// tab, noopener, inside the click.  Then the page's own rules for an open
-// frame: with no click a link in the bar, and javascript:/file: never.
-async function linkCheck(p) {
+// tab, noopener, inside the click.  A second tab on the session, with no
+// click of its own, shows it as a link in the bar, and javascript:/file:
+// links never open or replace it.
+async function linkCheck(ctx, p) {
+  // A second tab on the same session, never clicked in.  Playwright's own
+  // evaluate runs as a user gesture, which would give that tab activation, so
+  // it is read only through CDP Runtime.evaluate (userGesture off).
+  const p2 = await ctx.newPage();
+  p2.setDefaultTimeout(WAIT);
+  await p2.goto(url);
+  const cdp = await ctx.newCDPSession(p2);
+  const look = async expr => (await cdp.send('Runtime.evaluate', {expression: expr, returnByValue: true})).result.value;
+  const end = Date.now() + WAIT;
+  const poll = async expr => {
+    let v = await look(expr);
+    while (!v && Date.now() < end) { await wait(50); v = await look(expr); }
+    return v;
+  };
+  if (!await poll(`document.getElementById('status').textContent === 'Running'`)) {
+    return check(false, `second tab not running: ${await look(`document.getElementById('status').textContent`)}`);
+  }
+  await p.bringToFront();
   const g = await screen(p);
   const before = await status(p);
   await p.mouse.click(g.x + 2, g.y + 2);
@@ -80,7 +99,6 @@ async function linkCheck(p) {
   if (!met) return check(false, `click not handled: ${seen(s)} (was ${before.last})`);
   // The helper's open frame is queued before the server answers the helper,
   // so it is on the socket before the redraw that shows linkRc0.
-  const end = Date.now() + WAIT;
   let opens = await p.evaluate(() => window.abOpens);
   while (!opens.length && s.last === 'linkRc0' && Date.now() < end) {
     await wait(50);
@@ -90,19 +108,17 @@ async function linkCheck(p) {
   const tab = !!o && o.u === 'https://example.com/ab-link' && o.target === '_blank' &&
     /noopener/.test(o.features) && o.active;
   if (!tab) return check(false, `${s.last}: ${o ? `open ${o.u.slice(0, 30)} ${o.features}` : 'no tab opened'}`);
-  const bar = await p.evaluate(() => {
-    if (typeof openLink !== 'function') return 'no openLink';
-    window.abOpens = [];
-    openLink('javascript:alert(1)');
-    openLink('file:///etc/passwd');
-    if (window.abOpens.length || !document.getElementById('link').hidden) return 'bad link accepted';
-    openLink('https://example.com/later');
-    const a = document.querySelector('#link a');
-    if (window.abOpens.length) return 'opened with no click';
-    if (!a || a.href !== 'https://example.com/later' || a.target !== '_blank' || a.rel !== 'noopener noreferrer') return 'no bar link';
-    return 'ok';
-  });
-  return check(bar === 'ok', `${s.last} tab noopener; ${bar === 'ok' ? 'bar link, bad refused' : bar}`);
+  // The second tab got the same frame with no click of its own: a bar link.
+  const a = await poll(`(() => { const a = document.querySelector('#link a');
+    return (a || window.abOpens.length) ? {href: a ? a.href : '', target: a ? a.target : '',
+      rel: a ? a.rel : '', opens: window.abOpens.length} : null; })()`);
+  if (!a || a.href !== 'https://example.com/ab-link' || a.target !== '_blank' ||
+      a.rel !== 'noopener noreferrer' || a.opens) {
+    return check(false, `tab ok; other tab: ${a ? `${a.href.slice(0, 25) || 'no bar link'} opens=${a.opens}` : 'nothing'}`);
+  }
+  const bad = await look(`openLink('javascript:alert(1)'); openLink('file:///etc/passwd');
+    window.abOpens.length > 0 || document.querySelector('#link a').href !== 'https://example.com/ab-link'`);
+  return check(!bad, `${s.last} tab noopener; other tab bar link; ${bad ? 'bad link taken' : 'js/file refused'}`);
 }
 
 async function openPage(ctx) {
@@ -263,7 +279,7 @@ async function run() {
     ({s, met} = await until(p, x => fitted(x) && (x.rows !== r0 || x.cols !== c0)));
     checks.resize = check(met, met ? `${r0}x${c0}->${s.termRows}x${s.termCols} grok ${s.rows}x${s.cols}`
                                    : `${r0}x${c0}-> ${seen(s)}`);
-    checks.link_open = await linkCheck(p);
+    checks.link_open = await linkCheck(ctx, p);
     await ctx.close();
 
     ctx = await b.newContext({viewport: {width: 412, height: 839}, hasTouch: true, isMobile: true, deviceScaleFactor: 2});

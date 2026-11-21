@@ -9,7 +9,9 @@ whether it got the server's DISPLAY.  Checks:
   browser: grok's env has a BROWSER;
   open: the attached page gets {"type": "open", "url": <the https link>};
   refused: javascript:, file: and user:pass@ links never reach the page;
-  token: /open-link with a wrong token is refused (404).
+  token: /open-link with a wrong token is refused (404);
+  rate/scheme/ended: with the grok's own token, a second open inside the
+    pause is 429, a javascript: link 400, and after the grok is gone 404.
 
 Run: python3 -B tests/open_link_test.py
 Stdlib only, no network, no real grok.
@@ -150,6 +152,14 @@ def main():
                 failures.append("no DONE from the fake grok within %ds (%s)" % (WAIT, exc))
             sock.close()
             wrong = post(port, {"token": "not-the-token", "url": GOOD})
+            token = getattr(erg.LIVE[sid].proc, "link_token", None) if sid in erg.LIVE else None
+            # A pause no machine can outrun: the helper's open was the last.
+            erg.LINK_PAUSE = 3600
+            again = post(port, {"token": token, "url": GOOD})
+            script = post(port, {"token": token, "url": "javascript:alert(1)"})
+            erg.kill_all()
+            # grok gone (quit, exited, server restarting): its token opens nothing.
+            ended = post(port, {"token": token, "url": GOOD})
         finally:
             erg.kill_all()
             server.shutdown()
@@ -164,6 +174,10 @@ def main():
         failures.append("open/refused: page got open frames %r, want only %r" % (opens, [GOOD]))
     if wrong != 404:
         failures.append("token: a wrong token got %r, want 404" % wrong)
+    if not token:
+        failures.append("token: the live grok has no link token")
+    elif (again, script, ended) != (429, 400, 404):
+        failures.append("rate/scheme/ended: got %r, want (429, 400, 404)" % ((again, script, ended),))
     for failure in failures:
         print("FAIL: " + failure)
     if failures:
