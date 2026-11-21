@@ -8,6 +8,7 @@
 # opens a link as grok does (#34): last=linkRc<$BROWSER's exit code> or
 # last=noDisplay.  The key "k" alone asks for another link the same way, as
 # a process under grok could with no click: last=keyRc<code> or noDisplay.
+# The key "s" starts a background ask every 0.55 s for spam1..spam6 (last=spam).
 import fcntl
 import os
 import re
@@ -17,6 +18,8 @@ import struct
 import subprocess
 import sys
 import termios
+import threading
+import time
 import tty
 
 LINES = ["line %03d  %s" % (i, "lorem ipsum dolor sit amet " * 2) for i in range(400)]
@@ -88,6 +91,12 @@ def open_link(link=LINK, label="link"):
     return "%sRc%d" % (label, rc)
 
 
+def spam():
+    for i in range(1, 7):
+        open_link("https://example.com/spam%d" % i, "spam")
+        time.sleep(0.55)
+
+
 cols, view, maxoff = draw()
 SGR = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
 while True:
@@ -138,6 +147,10 @@ while True:
     rest = SGR.sub(b"", d)
     if rest == b"k":
         last = open_link(KEY_LINK, "key")
+    if rest == b"s":
+        # Never draws: only the main loop writes to the terminal.
+        threading.Thread(target=spam, daemon=True).start()
+        last = "spam"
     off -=rest.count(b"\x1b[5~") * view + rest.count(b"\x1b[A") + rest.count(b"\x1bOA")
     off += rest.count(b"\x1b[6~") * view + rest.count(b"\x1b[B") + rest.count(b"\x1bOB")
     cols, view, maxoff = draw()

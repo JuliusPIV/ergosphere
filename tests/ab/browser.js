@@ -57,90 +57,112 @@ async function until(p, pred) {
 }
 const seen = s => `saw "${s.text.slice(0, 30)}" page ${s.termRows}x${s.termCols} sent ${s.sent}`;
 
-// Records each window.open (#34): its URL and features, and whether the page
-// had user activation then.  The real open still runs.
+// Records each window.open (#34).  The page must never call it: only the
+// user's click on the bar link opens a tab.  The real open still runs.
 function recordOpens() {
   window.abOpens = [];
-  window.abLastPointer = -Infinity;
-  addEventListener('pointerdown', () => { window.abLastPointer = performance.now(); }, true);
   const open = window.open;
-  window.open = function (u, target, features) {
-    const ua = navigator.userActivation;
-    window.abOpens.push({u: String(u), target, features: String(features || ''), active: !!(ua && ua.isActive)});
+  window.open = function (u) {
+    window.abOpens.push(String(u));
     return open.apply(this, arguments);
   };
 }
 
-// A click on grok's link (the stand-in's row 1, column 1) opens it in a new
-// tab, noopener, inside the click.  A second tab on the session, with no
-// click of its own, shows it as a link in the bar, and javascript:/file:
-// links never open or replace it.
-async function linkCheck(ctx, p) {
-  // A second tab on the same session, never clicked in.  Playwright's own
-  // evaluate runs as a user gesture, which would give that tab activation, so
-  // it is read only through CDP Runtime.evaluate (userGesture off).
-  const p2 = await ctx.newPage();
-  p2.setDefaultTimeout(WAIT);
-  await p2.goto(url);
-  const cdp = await ctx.newCDPSession(p2);
-  const look = async expr => (await cdp.send('Runtime.evaluate', {expression: expr, returnByValue: true})).result.value;
-  const end = Date.now() + WAIT;
-  const poll = async expr => {
-    let v = await look(expr);
-    while (!v && Date.now() < end) { await wait(50); v = await look(expr); }
-    return v;
-  };
-  if (!await poll(`document.getElementById('status').textContent === 'Running'`)) {
-    return check(false, `second tab not running: ${await look(`document.getElementById('status').textContent`)}`);
-  }
-  await p.bringToFront();
-  const g = await screen(p);
-  const before = await status(p);
-  await p.mouse.click(g.x + 2, g.y + 2);
-  const {s, met} = await until(p, x => x.ok && /^(linkRc\d+|noDisplay)$/.test(x.last));
-  if (!met) return check(false, `click not handled: ${seen(s)} (was ${before.last})`);
-  // The helper's open frame is queued before the server answers the helper,
-  // so it is on the socket before the redraw that shows linkRc0.
-  let opens = await p.evaluate(() => window.abOpens);
-  while (!opens.length && s.last === 'linkRc0' && Date.now() < end) {
-    await wait(50);
-    opens = await p.evaluate(() => window.abOpens);
-  }
-  const o = opens[0];
-  const tab = !!o && o.u === 'https://example.com/ab-link' && o.target === '_blank' &&
-    /noopener/.test(o.features) && o.active;
-  if (!tab) return check(false, `${s.last}: ${o ? `open ${o.u.slice(0, 30)} ${o.features}` : 'no tab opened'}`);
-  // The second tab got the same frame with no click of its own: a bar link.
-  const a = await poll(`(() => { const a = document.querySelector('#link a');
-    return (a || window.abOpens.length) ? {href: a ? a.href : '', target: a ? a.target : '',
-      rel: a ? a.rel : '', opens: window.abOpens.length} : null; })()`);
-  if (!a || a.href !== 'https://example.com/ab-link' || a.target !== '_blank' ||
-      a.rel !== 'noopener noreferrer' || a.opens) {
-    return check(false, `tab ok; other tab: ${a ? `${a.href.slice(0, 25) || 'no bar link'} opens=${a.opens}` : 'nothing'}`);
-  }
-  const bad = await look(`openLink('javascript:alert(1)'); openLink('file:///etc/passwd');
-    openLink(location.origin + '/models');
-    window.abOpens.length > 0 || document.querySelector('#link a').href !== 'https://example.com/ab-link'`);
-  return check(!bad, `${s.last} tab noopener; other tab bar link; ${bad ? 'bad link taken' : 'js/file/self refused'}`);
+// The page's bar link and the window.open calls it made, and how many pages
+// the browser has (a tab opened by any means adds one).
+async function barState(ctx, p) {
+  const r = await p.evaluate(() => {
+    const a = document.querySelector('#link a');
+    return {href: a ? a.href : '', target: a ? a.target : '', rel: a ? a.rel : '',
+      links: document.querySelectorAll('#link a').length, opens: window.abOpens.slice()};
+  });
+  return {...r, pages: ctx.pages().length};
 }
 
-// A key press is user activation too, for seconds, and any process under
-// grok can ask for a link (#220 review).  The stand-in asks for one when it
-// reads "k", as a model's shell tool could right after the user typed: the
-// page must show it in the bar and open no tab.
-async function keyCheck(p) {
-  await p.bringToFront();
-  // The last mouse press in the terminal is more than a second old.
-  await p.waitForFunction(() => performance.now() - window.abLastPointer > 1500, null, {timeout: WAIT});
+async function untilBar(ctx, p, pred) {
+  const end = Date.now() + WAIT;
+  let r = await barState(ctx, p);
+  while (!pred(r) && Date.now() < end) { await wait(50); r = await barState(ctx, p); }
+  return r;
+}
+
+// A click on grok's link (the stand-in's row 1, column 1) puts that link in
+// the bar and opens no tab.  The page refuses javascript:, file: and its own
+// origin.  A click on the bar link opens exactly that URL, with no opener.
+// The server takes one link per 0.5 s per session (LINK_PAUSE): the next
+// check asks for its link only once that has passed since the last one.
+let lastLinkAt = 0;
+const pastPause = () => wait(Math.max(0, lastLinkAt + 700 - Date.now()));
+// After the bar link click the focus is on that link: keys go to grok again
+// only once the terminal has it.
+const focusTerm = p => p.evaluate(() => term.focus());
+
+async function linkCheck(ctx, p) {
+  const g = await screen(p);
+  const pages = ctx.pages().length;
+  await p.mouse.click(g.x + 2, g.y + 2);
+  const {s, met} = await until(p, x => x.ok && /^(linkRc\d+|noDisplay)$/.test(x.last));
+  if (!met) return check(false, `click not handled: ${seen(s)}`);
+  lastLinkAt = Date.now();
+  // The helper's open frame is queued before the server answers the helper,
+  // so it is on the socket before the redraw that shows linkRc0.
+  let r = await barState(ctx, p);
+  if (r.opens.length || r.pages !== pages) return check(false, `${s.last}: page opened a tab itself (${r.opens[0] || 'new page'})`);
+  if (r.href !== 'https://example.com/ab-link' || r.target !== '_blank' || r.rel !== 'noopener noreferrer') {
+    return check(false, `${s.last}: bar link ${r.href.slice(0, 30) || 'none'} target=${r.target} rel=${r.rel}`);
+  }
+  await p.evaluate(() => {
+    openLink('javascript:alert(1)'); openLink('file:///etc/passwd'); openLink(location.origin + '/models');
+  });
+  r = await barState(ctx, p);
+  if (r.href !== 'https://example.com/ab-link' || r.links !== 1 || r.opens.length) {
+    return check(false, `bad link taken: bar ${r.href.slice(0, 30)} links=${r.links}`);
+  }
+  // The new tab gets a stand-in page: the A/B sandbox has no network.
+  await ctx.route('https://example.com/**', route => route.fulfill({contentType: 'text/html', body: '<p>ab</p>'}));
+  const [tab] = await Promise.all([ctx.waitForEvent('page', {timeout: WAIT}), p.click('#link a')]);
+  await tab.waitForLoadState('domcontentloaded');
+  const opener = await tab.evaluate(() => window.opener === null ? 'null' : 'set');
+  const got = tab.url();
+  await tab.close();
+  return check(got === 'https://example.com/ab-link' && opener === 'null',
+    `${s.last} bar link; js/file/self refused; click opened ${got.slice(8, 30)} opener ${opener}`);
+}
+
+// Any process under grok can ask for a link.  The stand-in asks for one when
+// it reads "k", as a model's shell tool could right after the user typed: a
+// bar link, no tab.
+async function keyCheck(ctx, p) {
+  const pages = ctx.pages().length;
+  await pastPause();
+  await focusTerm(p);
   await p.evaluate(() => { window.abOpens = []; });
   await p.keyboard.press('k');
   const {s, met} = await until(p, x => x.ok && /^(keyRc\d+|noDisplay)$/.test(x.last));
   if (!met) return check(false, `key not handled: ${seen(s)}`);
-  // As for the click: the open frame came before the redraw showing keyRc0.
-  const r = await p.evaluate(() => ({opens: window.abOpens.map(o => o.u),
-    bar: (document.querySelector('#link a') || {}).href || ''}));
-  const ok = s.last === 'keyRc0' && !r.opens.length && r.bar === 'https://example.com/ab-key';
-  return check(ok, `${s.last}: ${r.opens.length ? `tab opened ${r.opens[0].slice(0, 30)}` : 'no tab'}, bar ${r.bar.slice(8, 30) || 'none'}`);
+  lastLinkAt = Date.now();
+  const r = await barState(ctx, p);
+  const ok = s.last === 'keyRc0' && !r.opens.length && r.pages === pages && r.href === 'https://example.com/ab-key';
+  return check(ok, `${s.last}: ${r.opens.length || r.pages !== pages ? 'tab opened' : 'no tab'}, bar ${r.href.slice(8, 30) || 'none'}`);
+}
+
+// #220 recheck: a process under grok asks for a link every 0.55 s (the
+// stand-in on "s": spam1..spam6) and the user clicks blank terminal space in
+// the middle of it.  No tab may open; the bar shows the latest link.
+async function spamCheck(ctx, p) {
+  const pages = ctx.pages().length;
+  await pastPause();
+  await focusTerm(p);
+  await p.evaluate(() => { window.abOpens = []; });
+  await p.keyboard.press('s');
+  // The first spam link, in the bar or (on a page that opens tabs) in a tab.
+  let r = await untilBar(ctx, p, x => /\/spam\d$/.test(x.href) || x.opens.length > 0);
+  if (!/\/spam\d$/.test(r.href) && !r.opens.length) return check(false, `no spam link: bar ${r.href.slice(8, 30) || 'none'}`);
+  const g = await screen(p);
+  await p.mouse.click(g.x + g.w / 2, g.y + g.h / 2);
+  r = await untilBar(ctx, p, x => /\/spam6$/.test(x.href));
+  const ok = /\/spam6$/.test(r.href) && !r.opens.length && r.pages === pages && r.links === 1;
+  return check(ok, `${r.opens.length || r.pages !== pages ? `tab opened ${String(r.opens[0] || '').slice(8, 30)}` : 'no tab'}, bar ${r.href.slice(8, 30) || 'none'}`);
 }
 
 async function openPage(ctx) {
@@ -302,7 +324,8 @@ async function run() {
     checks.resize = check(met, met ? `${r0}x${c0}->${s.termRows}x${s.termCols} grok ${s.rows}x${s.cols}`
                                    : `${r0}x${c0}-> ${seen(s)}`);
     checks.link_open = await linkCheck(ctx, p);
-    checks.link_key = await keyCheck(p);
+    checks.link_key = await keyCheck(ctx, p);
+    checks.link_spam = await spamCheck(ctx, p);
     await ctx.close();
 
     ctx = await b.newContext({viewport: {width: 412, height: 839}, hasTouch: true, isMobile: true, deviceScaleFactor: 2});

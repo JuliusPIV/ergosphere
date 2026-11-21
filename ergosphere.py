@@ -1880,8 +1880,8 @@ class Live:
             self._enqueue(client, frame, 1)
 
     def open_link(self, url):
-        # Every attached page gets it; only one the user just clicked in opens
-        # a tab (the page checks user activation), the rest show the link.
+        # Every attached page gets it and shows it as a link in its bar; only
+        # the user's click on that link opens a tab.
         now = time.monotonic()
         with self.lock:
             if now - self.last_link < LINK_PAUSE:
@@ -4584,36 +4584,23 @@ document.addEventListener("mouseup", function (ev) {
   sock.send(new TextEncoder().encode(bytes));
 }, true);
 // A link grok was asked to open (#34). Only http and https, never this
-// server. A tab opens only right after a mouse click in the terminal: any
-// process under grok can ask for a link, and a key press also counts as user
-// activation for seconds. Otherwise (no click, another tab, a popup blocker
-// in the way) it is a link here.
-var LINK_CLICK_MS = 1000;
-var lastTermClick = -Infinity;
-function markTermClick() { lastTermClick = performance.now(); }
-document.getElementById("term").addEventListener("pointerdown", markTermClick, true);
-document.getElementById("term").addEventListener("mouseup", markTermClick, true);
+// server. The page never opens a tab itself: any process under grok can ask
+// for a link, and no timing tells its request from the user's click. The
+// latest link goes in the bar; the user's own click on it opens it.
 function openLink(u) {
   var parsed;
   try { parsed = new URL(u); } catch (err) { return; }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
   if (parsed.hostname === location.hostname) return;
-  var clicked = performance.now() - lastTermClick < LINK_CLICK_MS;
-  // Read before the open: opening a tab uses up the activation.
-  var ua = navigator.userActivation;
-  var active = clicked && !!(!ua || ua.isActive);
-  if (active) {
-    window.open(parsed.href, "_blank", "noopener,noreferrer");
-    return;
-  }
   var box = document.getElementById("link");
   var a = document.createElement("a");
   a.href = parsed.href;
   a.target = "_blank";
   a.rel = "noopener noreferrer";
+  a.style.textDecoration = "underline";
   a.textContent = parsed.href.length > 80 ? parsed.href.slice(0, 77) + "..." : parsed.href;
-  a.title = parsed.href;
-  box.textContent = " | Link: ";
+  a.title = "Open " + parsed.href + " in a new tab";
+  box.textContent = " | Open link: ";
   box.appendChild(a);
   box.hidden = false;
 }
