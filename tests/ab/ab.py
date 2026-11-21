@@ -138,29 +138,60 @@ def summary(adir, bdir):
     return 1 if regress or broken else 0
 
 
+# Every check tests/pid_reuse_test.py runs, by name.  B must report each one:
+# a crash or skip part-way leaves rows out, and a dropped check would vanish
+# from both columns (the #179 rule for HTTP checks).
+PID_REUSE_CHECKS = [
+    "legit quit (pidfd)",
+    "pid reused before the signal",
+    "pid reused after the pidfd opened",
+    "same-session grok relaunched at the pid, re-read sees it",
+    "same-session grok relaunched at the pid after the re-read",
+    "same-session grok relaunched, re-read sees it (pidfd_send_signal EPERM by policy)",
+    "checked grok exits just before the signal",
+    "checked grok quits right after the re-read",
+    "legit quit (no pidfd fallback)",
+    "pid reused before the signal (no pidfd fallback)",
+    "legit quit (pidfd_send_signal ENOSYS)",
+    "legit quit (pidfd_send_signal EPERM by policy)",
+    "another user's grok (every signal EPERM) refused",
+]
+
+
 def pid_reuse_rows(path):
-    """{check name: passed} from tests/pid_reuse_test.py output ("ok: name" / "FAIL: name -- why")."""
-    rows = {}
+    """({check name: passed}, exit status or None) from tests/pid_reuse_test.py output.
+
+    Rows are "ok: name" / "FAIL: name -- why"; run.sh appends "exit: N".
+    """
+    rows, status = {}, None
     for line in open(path, errors="replace"):
         mark, _, rest = line.rstrip("\n").partition(": ")
-        if mark in ("ok", "FAIL") and not rest[:1].isdigit():  # not the "FAIL: 3 of 13" total
+        if mark == "exit" and rest.strip().lstrip("-").isdigit():
+            status = int(rest)
+        elif mark in ("ok", "FAIL") and not rest[:1].isdigit():  # not the "FAIL: 3 of 13" total
             rows[rest.split(" -- ")[0]] = mark == "ok"
-    return rows
+    return rows, status
 
 
 def pidreuse(apath, bpath):
-    a, b = pid_reuse_rows(apath), pid_reuse_rows(bpath)
+    (a, _astatus), (b, bstatus) = pid_reuse_rows(apath), pid_reuse_rows(bpath)
     cell = lambda ok: "-" if ok is None else ("PASS" if ok else "FAIL")
     lines = ["", "Issues #148, #191: quitting a holder grok whose pid is reused (stand-ins, private pid namespace)",
              "%-84s %-4s %s" % ("check", "A", "B")]
-    lines += ["%-84s %-4s %s" % (name, cell(a.get(name)), cell(ok)) for name, ok in b.items()]
-    failed = [name for name, ok in b.items() if not ok]
-    if not b:
-        lines.append("PID REUSE CHECKS DID NOT RUN on B: %s" % open(bpath, errors="replace").read().strip()[-200:])
-    elif failed:
-        lines.append("FAIL on B: %s" % ", ".join(failed))
-    print("\n".join(lines))
-    return 1 if failed or not b else 0
+    names = PID_REUSE_CHECKS + [n for n in b if n not in PID_REUSE_CHECKS]
+    lines += ["%-84s %-4s %s" % (name, cell(a.get(name)), cell(b.get(name))) for name in names]
+    bad = []
+    missing = [n for n in PID_REUSE_CHECKS if n not in b]
+    if missing:
+        bad.append("PID REUSE FAILURE: B did not report check(s): %s" % ", ".join(missing))
+    failed = [n for n in names if b.get(n) is False]
+    if failed:
+        bad.append("PID REUSE FAILURE: fails on B: %s" % ", ".join(failed))
+    if bstatus != 0:
+        tail = open(bpath, errors="replace").read().strip().splitlines()[-3:]
+        bad.append("PID REUSE FAILURE: B's test exited %s: %s" % (bstatus, " | ".join(tail)))
+    print("\n".join(lines + bad))
+    return 1 if bad else 0
 
 
 def main(argv):

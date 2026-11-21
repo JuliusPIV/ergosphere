@@ -88,12 +88,15 @@ done
 python3 -B "$HERE/slow_start.py" summary "$AB_OUT/slow-A.json" "$AB_OUT/slow-B.json" >>"$AB_OUT/summary.txt" || rc=1
 # Issues #148 and #191: quitting a holder grok whose pid is reused.  B's
 # tests/pid_reuse_test.py (stand-ins in a private pid namespace) against each
-# side's ergosphere.py.  B must run and pass every check.
+# side's ergosphere.py.  B must exit 0 and report every check in ab.py
+# PID_REUSE_CHECKS as passed.
 for side in A B; do
   dir=AB_${side}_DIR
   log "$side: pid reuse checks"
+  prc=0
   (cd "$AB_OUT" && ERGOSPHERE_CODE="${!dir}/ergosphere.py" python3 -B "$AB_B_DIR/tests/pid_reuse_test.py") \
-    >"$AB_OUT/pidreuse-$side.txt" 2>&1
+    >"$AB_OUT/pidreuse-$side.txt" 2>&1 || prc=$?
+  echo "exit: $prc" >>"$AB_OUT/pidreuse-$side.txt"
 done
 python3 -B "$HERE/ab.py" pidreuse "$AB_OUT/pidreuse-A.txt" "$AB_OUT/pidreuse-B.txt" >>"$AB_OUT/summary.txt" || rc=1
 cat "$AB_OUT/summary.txt"
