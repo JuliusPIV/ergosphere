@@ -7,7 +7,9 @@ unrelated file at the master's old number with dup2 (what a reused number
 looks like), runs the other closer, and checks that file is still open and
 untouched.
 
-Run: python3 -B tests/master_close_test.py
+Run: python3 -B tests/master_close_test.py [code-dir]
+(code-dir: the checkout whose ergosphere.py to test; tests/ab/master_close.py
+passes main's for the A side.)
 Stdlib only, no network, no real grok: the PTY child is python.
 """
 import importlib.util
@@ -31,14 +33,14 @@ QUICK = [sys.executable, "-c", "pass"]
 WAIT = 10
 
 
-def load():
-    spec = importlib.util.spec_from_file_location("ergosphere", ROOT / "ergosphere.py")
+def load(code):
+    spec = importlib.util.spec_from_file_location("ergosphere", Path(code) / "ergosphere.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
-erg = load()
+erg = load(sys.argv[1] if len(sys.argv) > 1 else ROOT)
 
 
 def new_live(cmd):
