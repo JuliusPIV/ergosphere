@@ -2341,33 +2341,41 @@ def _poll_snapshot(scan):
                 break
             watch[pid] = scan.cmd.get(pid, b"")
             pid = scan.ppids[pid]
-    return {"scan": scan, "at": time.monotonic(), "pids": frozenset(scan.ppids), "watch": watch}
+    return {"scan": scan, "at": time.monotonic(), "watch": watch}
 
 
 def _poll_snapshot_valid(snap):
+    # Every argv is read again (a process can exec into grok at any time);
+    # only the stat pass, the larger part of a ProcScan, is skipped.
     if time.monotonic() - snap["at"] > POLL_SCAN_MAX_AGE:
         return False
     try:
-        pids = {int(name) for name in os.listdir("/proc") if name.isdigit()}
+        names = os.listdir("/proc")
     except OSError:
         return False
-    for pid, raw in snap["watch"].items():
-        if pid not in pids or read_proc_cmdline(pid) != raw:
-            return False
+    watch = snap["watch"]
     me = os.getpid()
-    for pid in pids - snap["pids"]:
+    seen = 0
+    for name in names:
+        if not name.isdigit():
+            continue
+        pid = int(name)
         raw = read_proc_cmdline(pid)
-        if pid != me and (grok_cmdline(raw) or _turn_marked(raw)):
+        if pid in watch:
+            if raw != watch[pid]:
+                return False
+            seen += 1
+        elif pid != me and (grok_cmdline(raw) or _turn_marked(raw)):
             return False
-    return True
+    return seen == len(watch)
 
 
 def poll_scan():
     """ProcScan for the two polls (/session-info?id=, /list-rows) only (#42).
 
     Reuses the last full /proc pass while nothing it depends on changed
-    (_poll_snapshot_valid), so an unchanged poll costs one /proc listing
-    and a few small reads. own() and open files are read again per call.
+    (_poll_snapshot_valid), so an unchanged poll reads each argv but no
+    stat. own() and open files are read again per call.
     Every action and page load keeps its own fresh ProcScan. No lock is
     held while scanning.
     """

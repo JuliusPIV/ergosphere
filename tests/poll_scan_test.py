@@ -196,6 +196,9 @@ def check_wrapper_execs_grok(erg):
     proc = popen(["sh", "-c", 'while [ ! -e "$0" ]; do sleep 0.02; done; exec "$1" -c "$2" -r "$3"',
                   go, GROK, FAKE, sid])
     wait_for(lambda: cmdline(proc.pid).startswith(b"sh\0"))
+    # A fresh snapshot now holds the wrapper as a plain sh: its later exec
+    # must still be seen.
+    getattr(erg, "_POLL_SCAN", {}).clear()
     failure = expect(erg, sid, "stopped")
     if failure:
         return "before exec: " + failure
