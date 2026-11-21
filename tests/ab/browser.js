@@ -134,13 +134,18 @@ async function keyboardCheck(b, device, kb, pan) {
   }
 }
 
-// The PTY size grok was last started with for session id, from the
-// wrapper's log, as "<rows>x<cols>", or "-".
-function startSize(id) {
+// Session id's starts in the wrapper's log, each as "<rows>x<cols>".
+function starts(id) {
   let text = '';
-  try { text = fs.readFileSync(startsLog, 'utf8'); } catch (e) { return '-'; }
-  const hits = text.split('\n').map(l => l.split(' ')).filter(f => f.length > 2 && f.slice(2).includes(id));
-  return hits.length ? `${hits[hits.length - 1][0]}x${hits[hits.length - 1][1]}` : '-';
+  try { text = fs.readFileSync(startsLog, 'utf8'); } catch (e) { return []; }
+  return text.split('\n').map(l => l.split(' ')).filter(f => f.length > 2 && f.slice(2).includes(id))
+    .map(f => `${f[0]}x${f[1]}`);
+}
+// The size of start number n (1-based) of id, once logged, or '-'.
+async function nthStart(id, n) {
+  const end = Date.now() + WAIT;
+  while (starts(id).length < n && Date.now() < end) await wait(50);
+  return starts(id)[n - 1] || '-';
 }
 // grok starts at the page terminal's size, not 80x24 (#58): Create on the list
 // page, then Quit and Resume on the shared session's page.  Each start's PTY
@@ -158,7 +163,7 @@ async function startSizeCheck(b) {
     const id = new URL(p.url()).searchParams.get('resume');
     let {s, met} = await until(p, x => x.ok);
     if (!met) return check(false, `new: no grok view: ${seen(s)}`);
-    const made = startSize(id), page1 = `${s.termRows}x${s.termCols}`;
+    const made = await nthStart(id, 1), page1 = `${s.termRows}x${s.termCols}`;
     await p.goto(url);
     ({s, met} = await until(p, fitted));
     if (!met) return check(false, `no grok view at page size: ${seen(s)}`);
@@ -168,10 +173,13 @@ async function startSizeCheck(b) {
     const end = Date.now() + WAIT;
     while (await bar() !== 'Resume Ended' && Date.now() < end) await wait(50);
     if (await bar() !== 'Resume Ended') return check(false, `Quit did not end it: ${await bar()}`);
+    // The ended page can still show the old frame: wait for the new start.
+    const before = starts(sid).length;
     await p.click('#stop');
+    const back = await nthStart(sid, before + 1);
     ({s, met} = await until(p, fitted));
     if (!met) return check(false, `resume: no grok view at page size: ${seen(s)}`);
-    const back = startSize(sid), page2 = `${s.termRows}x${s.termCols}`;
+    const page2 = `${s.termRows}x${s.termCols}`;
     return check(made === page1 && back === page2, `new ${made} page ${page1}; resume ${back} page ${page2}`);
   } finally {
     await ctx.close();
