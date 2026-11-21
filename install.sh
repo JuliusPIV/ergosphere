@@ -786,6 +786,42 @@ install_files() {
   if [[ "$n" -gt 0 ]]; then CHANGED+=("$n package files"); fi
 }
 
+# Installers before #97 copied the archive's developer files into DEST, and
+# install_files never removes anything (#199). Removes only those: archive
+# files install_files skips, as regular files in DEST reached through no
+# link, then the folders that leaves empty. A DEST holding .git is a
+# checkout, which no installer wrote: it is left alone.
+remove_dev_files() {
+  local rel dir real n=0 dirs=()
+  if [[ -e "$DEST/.git" || -L "$DEST/.git" ]]; then
+    printf 'install: %s holds .git (a checkout), old developer files not checked\n' "$DEST"
+    return 0
+  fi
+  real=$(realpath -- "$DEST") || fail install "could not resolve $DEST"
+  while IFS= read -r -d '' rel; do
+    rel=${rel#./}
+    case "$rel" in tests/*|docs/*|.git*|.ghflow*|install.sh) ;; *) continue ;; esac
+    dir=$(dirname -- "$rel")
+    [[ -f "$DEST/$rel" && ! -L "$DEST/$rel" ]] || continue
+    # A linked folder on the way would point the rm outside DEST.
+    if [[ "$dir" != . && "$(realpath -- "$DEST/$dir")" != "$real/$dir" ]]; then continue; fi
+    rm -f -- "$DEST/$rel" || fail install "could not remove $DEST/$rel"
+    printf 'install: removed old developer file %s\n' "$rel"
+    n=$((n + 1))
+    while [[ "$dir" != . ]]; do dirs+=("$dir"); dir=$(dirname -- "$dir"); done
+  done < <(cd "$SRC" && find . -type f -print0 | sort -z)
+  # Only folders a removal touched, deepest first, so a folder emptied by its
+  # subfolders goes too. rmdir removes only empty folders; links are skipped.
+  if [[ ${#dirs[@]} -gt 0 ]]; then
+    while IFS= read -r dir; do
+      if [[ -d "$DEST/$dir" && ! -L "$DEST/$dir" && "$(realpath -- "$DEST/$dir")" == "$real/$dir" ]]; then
+        rmdir -- "$DEST/$dir" 2>/dev/null || true
+      fi
+    done < <(printf '%s\n' "${dirs[@]}" | sort -ur)
+  fi
+  if [[ "$n" -gt 0 ]]; then CHANGED+=("$n old developer files removed"); fi
+}
+
 # Creates ergosphere.json, or updates only the keys this run sets: bind/port
 # when given, a manual agent when its name is new. cwd-defaults.json is never
 # changed. The result is read back.
@@ -1004,6 +1040,7 @@ main() {
     return 0
   fi
   install_files
+  remove_dev_files
   write_config
   start_server
   summary
