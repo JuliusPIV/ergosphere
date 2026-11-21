@@ -1,6 +1,7 @@
 """HTTP-level A/B checks and the side-by-side summary.
 
   python3 -B ab.py http <port> <session-id>   -> JSON checks on stdout
+  python3 -B ab.py vendor <code-dir>          -> JSON vendor-manifest check on stdout
   python3 -B ab.py summary <A-dir> <B-dir>    -> summary text on stdout;
                                                  exit 1 when a check passes on A and fails on B,
                                                  or B's browser checks break or miss a check in ORDER
@@ -11,10 +12,12 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 TITLE = "AB seeded session"
-ORDER = ["health", "session_list", "open_session", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios", "resume_box", "ended_view"]
-HTTP_CHECKS = ("health", "session_list", "open_session")
+ORDER = ["vendor_listed", "health", "session_list", "open_session", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios", "resume_box", "ended_view"]
+# Checks that do not come from browser.js (HTTP and the vendor manifest).
+HTTP_CHECKS = ("vendor_listed", "health", "session_list", "open_session")
 
 
 def get(base, path):
@@ -70,6 +73,15 @@ def http_checks(port, sid):
     return {"checks": checks, "info": info}
 
 
+def vendor_checks(code_dir):
+    """vendor/ files match the versions package-lock.json lists, so scanners see them (#7)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    import vendor_manifest_test
+    results = list(vendor_manifest_test.check(Path(code_dir)))
+    bad = [msg for ok, msg in results if not ok]
+    return {"checks": {"vendor_listed": check(not bad, bad[0] if bad else "%d checks" % len(results))}}
+
+
 def load(path):
     try:
         with open(path, encoding="utf-8") as handle:
@@ -82,6 +94,7 @@ def side(dirname):
     server = load(dirname + "/http.json")
     browser = load(dirname + "/browser.json")
     checks = dict(server.get("checks") or {})
+    checks.update(load(dirname + "/vendor.json").get("checks") or {})
     checks.update(browser.get("checks") or {})
     return checks, server.get("info") or {}, browser
 
@@ -139,6 +152,9 @@ def summary(adir, bdir):
 def main(argv):
     if len(argv) == 4 and argv[1] == "http":
         print(json.dumps(http_checks(argv[2], argv[3])))
+        return 0
+    if len(argv) == 3 and argv[1] == "vendor":
+        print(json.dumps(vendor_checks(argv[2])))
         return 0
     if len(argv) == 4 and argv[1] == "summary":
         return summary(argv[2], argv[3])

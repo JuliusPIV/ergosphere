@@ -6,7 +6,8 @@
 # TUI (fakegrok.py), then the shared checks from this folder.  Writes
 # $AB_OUT/summary.txt.  Exit 1 when a check passes on A and fails on B, when the
 # browser checks break on B or leave out a check named in ab.py ORDER, or the
-# run itself breaks.  No browser or playwright on the host is only a warning.
+# run itself breaks (a server never reports ready, or no check passes on A).
+# No browser or playwright on the host is only a warning.
 # Optional: AB_CHROME (browser binary), NODE_PATH (playwright).
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,6 +60,7 @@ run_side() { # label code-dir port
   done
   grep -q ERGOSPHERE_READY "$w/server.log" || log "$label: server not ready: $(tail -n 3 "$w/server.log")"
   python3 -B "$HERE/ab.py" http "$port" "$SID" >"$w/http.json" 2>"$w/http.err"
+  python3 -B "$HERE/ab.py" vendor "$code" >"$w/vendor.json" 2>"$w/vendor.err"
   if [ -z "$browser_off" ]; then
     brc=0
     NODE_PATH="$pw_path" timeout 300 node "$HERE/browser.js" "$port" "$SID" >"$w/browser.json" 2>"$w/browser.err" || brc=$?
@@ -78,6 +80,18 @@ run_side A "$AB_A_DIR" "$AB_PORT_A"
 run_side B "$AB_B_DIR" "$AB_PORT_B"
 rc=0
 python3 -B "$HERE/ab.py" summary "$AB_OUT/A" "$AB_OUT/B" >"$AB_OUT/summary.txt" || rc=$?
+# Issue #113: a side that never started, or an A that passed nothing, means
+# the run tested nothing; equal failures on both sides are not a pass.
+for side in A B; do
+  grep -q ERGOSPHERE_READY "$AB_OUT/$side/server.log" && continue
+  echo "RUN BROKE: $side server never reported ready (see $side/server.log)" >>"$AB_OUT/summary.txt"
+  rc=1
+done
+if ! python3 -B -c 'import sys; sys.path.insert(0, sys.argv[1]); import ab
+sys.exit(0 if any(c.get("ok") for c in ab.side(sys.argv[2])[0].values()) else 1)' "$HERE" "$AB_OUT/A"; then
+  echo "RUN BROKE: no check passed on A" >>"$AB_OUT/summary.txt"
+  rc=1
+fi
 # Issue #45: one session's hung start, on each side's port again (its server has stopped).
 for side in A B; do
   dir=AB_${side}_DIR port=AB_PORT_${side}
@@ -86,6 +100,8 @@ for side in A B; do
   python3 -B "$HERE/slow_start.py" run "${!dir}" "${!port}" "$AB_OUT/slow-$side" >"$AB_OUT/slow-$side.json" 2>"$AB_OUT/slow-$side.err"
 done
 python3 -B "$HERE/slow_start.py" summary "$AB_OUT/slow-A.json" "$AB_OUT/slow-B.json" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #97: what each side's install.sh copies into the install dir.
+bash "$HERE/install_files.sh" >>"$AB_OUT/summary.txt" || rc=1
 cat "$AB_OUT/summary.txt"
 [ -s "$AB_OUT/summary.txt" ] || exit 1
 exit "$rc"
