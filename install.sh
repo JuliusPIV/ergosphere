@@ -321,6 +321,17 @@ probe() {
   out=$("$CURL" --noproxy '*' -s --max-time 3 "http://${host}:${2}/health") || rc=$?
   if [[ "$rc" -eq 7 ]]; then
     PROBE=down
+    # 127.0.0.1 refused, but 0.0.0.0 also needs the port free on every other
+    # address (#150): bind it as the server does. A holder this user can see
+    # gives PROBE_PID, so this install's own server still counts as itself.
+    if [[ "$1" == 0.0.0.0 ]] && ! "$PYTHON" -I -c '
+import socket, sys
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("0.0.0.0", int(sys.argv[1])))' "$2" 2>/dev/null </dev/null; then
+      PROBE=other PROBE_PID=$(port_holder "$2")
+      PROBE_PID=${PROBE_PID%% *}
+    fi
   elif [[ "$rc" -eq 0 ]] && info=$(printf '%s' "$out" | "$PYTHON" -I -c '
 import json, re, sys
 d = json.load(sys.stdin)
