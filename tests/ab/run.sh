@@ -86,6 +86,13 @@ for side in A B; do
   python3 -B "$HERE/slow_start.py" run "${!dir}" "${!port}" "$AB_OUT/slow-$side" >"$AB_OUT/slow-$side.json" 2>"$AB_OUT/slow-$side.err"
 done
 python3 -B "$HERE/slow_start.py" summary "$AB_OUT/slow-A.json" "$AB_OUT/slow-B.json" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #212: Quit's ended frame reaches the quitting tab (in-process server per side).
+for side in A B; do
+  dir=AB_${side}_DIR port=AB_PORT_${side}
+  log "$side: quit ended frame check on ${!port}"
+  python3 -B "$HERE/quit_ended.py" run "${!dir}" "${!port}" >"$AB_OUT/quit-$side.json" 2>"$AB_OUT/quit-$side.err"
+done
+python3 -B "$HERE/quit_ended.py" summary "$AB_OUT/quit-A.json" "$AB_OUT/quit-B.json" >>"$AB_OUT/summary.txt" || rc=1
 cat "$AB_OUT/summary.txt"
 [ -s "$AB_OUT/summary.txt" ] || exit 1
 exit "$rc"

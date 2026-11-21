@@ -1780,7 +1780,9 @@ class Live:
                 self.clients.remove(client)
             except ValueError:
                 pass
-        client.alive = False
+        # alive stays true: the sender still sends what was queued before
+        # this None (the ended frame from Quit, #212). _term joins it, then
+        # marks the client dead and shuts the socket.
         client.queue.put(None)
 
     def write(self, data):
@@ -5749,13 +5751,16 @@ class Handler(BaseHTTPRequestHandler):
             live.repaint(cols, rows)
             self._read_input(live)
         finally:
-            self.ws_closed = True
             if live is not None:
                 live.detach(client)
             if client is not None and client.dropped:
                 print("term drop slow client sid=%s" % sid, flush=True)
             if client is not None and client.sender is not None:
                 client.sender.join(timeout=2)
+            # Only now: closing first dropped frames the sender had queued (#212).
+            self.ws_closed = True
+            if client is not None:
+                client.alive = False
             try:
                 self.connection.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -5800,6 +5805,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_frame(8, struct.pack("!H", exc.code) + str(exc).encode("utf-8"))
             except (EOFError, OSError):
                 pass
+            # Nothing may follow a close frame: the sender stops here.
+            self.ws_closed = True
             return
         except (EOFError, OSError, RuntimeError, ValueError):
             return
