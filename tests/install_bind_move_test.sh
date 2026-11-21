@@ -25,8 +25,13 @@ fail=0
 
 # shellcheck disable=SC2317  # run by the EXIT trap
 cleanup() {
-  local p
+  local p deadline=$((SECONDS + 10))
   for p in ${pids[@]+"${pids[@]}"}; do kill "$p" 2>/dev/null; done
+  # A server takes about 0.5 s to exit after TERM; wait, so a run started
+  # right after this one finds its ports free.
+  for p in ${pids[@]+"${pids[@]}"}; do
+    while kill -0 "$p" 2>/dev/null && (( SECONDS < deadline )); do sleep 0.1; done
+  done
   rm -rf -- "$work"
 }
 trap cleanup EXIT
