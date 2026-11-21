@@ -86,6 +86,14 @@ for side in A B; do
   python3 -B "$HERE/slow_start.py" run "${!dir}" "${!port}" "$AB_OUT/slow-$side" >"$AB_OUT/slow-$side.json" 2>"$AB_OUT/slow-$side.err"
 done
 python3 -B "$HERE/slow_start.py" summary "$AB_OUT/slow-A.json" "$AB_OUT/slow-B.json" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #42: unchanged polls reuse one /proc pass and still see a grok start and quit.
+for side in A B; do
+  dir=AB_${side}_DIR port=AB_PORT_${side}
+  rm -rf "$AB_OUT/poll-$side"; mkdir -p "$AB_OUT/poll-$side"
+  log "$side: poll cost check on ${!port}"
+  python3 -B "$HERE/poll_cost.py" run "${!dir}" "${!port}" "$AB_OUT/poll-$side" >"$AB_OUT/poll-$side.json" 2>"$AB_OUT/poll-$side.err"
+done
+python3 -B "$HERE/poll_cost.py" summary "$AB_OUT/poll-A.json" "$AB_OUT/poll-B.json" >>"$AB_OUT/summary.txt" || rc=1
 cat "$AB_OUT/summary.txt"
 [ -s "$AB_OUT/summary.txt" ] || exit 1
 exit "$rc"
