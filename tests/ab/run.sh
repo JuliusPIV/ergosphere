@@ -78,6 +78,14 @@ run_side A "$AB_A_DIR" "$AB_PORT_A"
 run_side B "$AB_B_DIR" "$AB_PORT_B"
 rc=0
 python3 -B "$HERE/ab.py" summary "$AB_OUT/A" "$AB_OUT/B" >"$AB_OUT/summary.txt" || rc=$?
+# Issue #41: a turn open in events.jsonl reads working with no systemd-inhibit child.
+for side in A B; do
+  dir=AB_${side}_DIR port=AB_PORT_${side}
+  rm -rf "$AB_OUT/turn-$side"; mkdir -p "$AB_OUT/turn-$side"
+  log "$side: turn events check on ${!port}"
+  python3 -B "$HERE/turn_events.py" run "${!dir}" "${!port}" "$AB_OUT/turn-$side" >"$AB_OUT/turn-$side.json" 2>"$AB_OUT/turn-$side.err"
+done
+python3 -B "$HERE/turn_events.py" summary "$AB_OUT/turn-A.json" "$AB_OUT/turn-B.json" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #45: one session's hung start, on each side's port again (its server has stopped).
 for side in A B; do
   dir=AB_${side}_DIR port=AB_PORT_${side}

@@ -2112,11 +2112,95 @@ def _turn_in_children(pid, ppids, cmd=None):
     return False
 
 
-def grok_turn(pid, scan=None):
-    """working or idle for a live grok, from its "agent turn in progress" child."""
+# events.jsonl path -> (st_dev, st_ino, bytes read, unix time of the open
+# turn_started or None). Each read starts where the last one stopped.
+_TURN_EVENTS = {}
+_TURN_EVENTS_LOCK = threading.Lock()
+# turn_started ts is cut to whole seconds and boot time is whole seconds.
+TURN_START_SLACK = 2.0
+
+
+def _open_turn_since(path):
+    """Unix time of a turn_started with no turn_ended after it, else None.
+
+    grok appends one JSON object per line to events.jsonl: turn_started when
+    a turn begins, turn_ended (any outcome) when it ends. A line still being
+    written is read on the next call. A replaced or shorter file is read
+    again from the start.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    with _TURN_EVENTS_LOCK:
+        dev, ino, offset, since = _TURN_EVENTS.get(path, (None, None, 0, None))
+    if (dev, ino) != (st.st_dev, st.st_ino) or st.st_size < offset:
+        offset, since = 0, None
+    if st.st_size > offset:
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(offset)
+                data = handle.read(st.st_size - offset)
+        except OSError:
+            return None
+        end = data.rfind(b"\n") + 1
+        for raw in data[:end].split(b"\n"):
+            if b'"turn_' not in raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except ValueError:
+                continue
+            kind = obj.get("type") if isinstance(obj, dict) else None
+            if kind == "turn_started":
+                _shown, stamp = dashboard_stamp(obj.get("ts"))
+                since = float(stamp) if stamp else 0.0
+            elif kind == "turn_ended":
+                since = None
+        offset += end
+    # Two polls may both read; each stored entry is consistent on its own.
+    with _TURN_EVENTS_LOCK:
+        _TURN_EVENTS[path] = (st.st_dev, st.st_ino, offset, since)
+    return since
+
+
+def proc_start_time(pid):
+    """Unix time a process started, from /proc/<pid>/stat and /proc/stat btime."""
+    ticks = proc_stat_int(pid, 19)
+    if ticks is None:
+        return None
+    try:
+        with open("/proc/stat", "rb") as handle:
+            for raw in handle:
+                if raw.startswith(b"btime "):
+                    return int(raw.split()[1]) + ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _turn_in_events(sid, pid):
+    # Where systemd-inhibit cannot run grok has no turn-mark child (#41).
+    # A turn_started from before this grok started was left by a grok that
+    # died mid-turn: it does not count.
+    folder = session_dir_for(sid) if sid else None
+    if not folder:
+        return False
+    since = _open_turn_since(os.path.join(folder, "events.jsonl"))
+    if since is None:
+        return False
+    started = proc_start_time(pid)
+    return started is not None and since >= started - TURN_START_SLACK
+
+
+def grok_turn(pid, scan=None, sid=None):
+    """working or idle for a live grok: its "agent turn in progress" child,
+    or a turn open in the session's events.jsonl."""
     if scan is None:
         scan = ProcScan()
-    return "working" if _turn_in_children(pid, scan.ppids, scan.cmd) else "idle"
+    if _turn_in_children(pid, scan.ppids, scan.cmd) or _turn_in_events(sid, pid):
+        return "working"
+    return "idle"
 
 
 def live_state(live):
@@ -2166,7 +2250,7 @@ def session_state(sid, with_turn=True, scan=None):
         return out
     if here:
         out["pid"] = live.proc.pid
-        turn = grok_turn(live.proc.pid, scan) if with_turn and here == "running" else "idle"
+        turn = grok_turn(live.proc.pid, scan, sid) if with_turn and here == "running" else "idle"
         out["turn"] = turn
         out["state"] = "starting" if here == "starting" else "running-" + turn
         if holder:
@@ -2176,7 +2260,7 @@ def session_state(sid, with_turn=True, scan=None):
         out["state"] = holder_state(holder)
         out["pid"] = holder["pid"]
         if with_turn:
-            out["turn"] = grok_turn(holder["pid"], scan)
+            out["turn"] = grok_turn(holder["pid"], scan, sid)
     return out
 
 
