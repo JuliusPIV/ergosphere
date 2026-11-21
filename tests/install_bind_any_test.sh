@@ -7,13 +7,14 @@
 # (its own socket must not count as another program).
 #
 # Run: ERGOSPHERE_TEST_PORT=<spare port> bash tests/install_bind_any_test.sh
-# Uses that port and the next one. No network: the package is served from
+# Uses that port and the next two. No network: the package is served from
 # 127.0.0.1 and grok is a stub that only answers --version. Every server it
 # starts is stopped at the end.
 set -u
 repo=$(cd "$(dirname "$0")/.." && pwd)
 port=${ERGOSPHERE_TEST_PORT:-$(python3 -I "$repo/tests/free_port.py" 3)} || exit 1
 own=$((port + 1))
+moved_own=$((port + 2))
 work=$(mktemp -d "${TMPDIR:-/tmp}/ergosphere-bind-any-test.XXXXXX")
 pids=()
 fail=0
@@ -110,6 +111,30 @@ if [[ "$rc" -eq 0 && -n "$moved" && "$moved" != "$old" && "$(health_pid "127.0.0
   ok "own server moved from 127.0.0.2:$own to 0.0.0.0:$own (pid $old -> $moved)"
 else
   bad "move to 0.0.0.0:$own: exit $rc, pid '${moved:-none}', old pid $old $(kill -0 "$old" 2>/dev/null && echo alive || echo gone)"
+  printf '%s\n' "$out" | tail -n 15
+fi
+
+# 3. This install's own server runs on 127.0.0.2:$moved_own, but settings
+# changed the saved bind to 127.0.0.1 (no restart). Bind 0.0.0.0 must still
+# find that server and move it, not call the port another program's (#150).
+out=$(run_install "$work/u/cfgmove" --bind 127.0.0.2 --port "$moved_own")
+old=$(field pid "$out")
+if [[ -n "$old" ]]; then pids+=("$old"); fi
+python3 -I -c '
+import json, sys
+p = sys.argv[1] + "/ergosphere.json"
+d = json.load(open(p))
+d["bind"] = "127.0.0.1"
+json.dump(d, open(p, "w"))' "$work/u/cfgmove" </dev/null
+rc=0
+out=$(run_install "$work/u/cfgmove" --bind 0.0.0.0 --port "$moved_own") || rc=$?
+moved=$(field pid "$out")
+if [[ -n "$moved" ]]; then pids+=("$moved"); fi
+if [[ "$rc" -eq 0 && -n "$old" && -n "$moved" && "$moved" != "$old" && "$(health_pid "127.0.0.1:$moved_own")" == "$moved" ]] &&
+  ! kill -0 "$old" 2>/dev/null; then
+  ok "saved bind 127.0.0.1 but server on 127.0.0.2:$moved_own: moved to 0.0.0.0 (pid $old -> $moved)"
+else
+  bad "saved-bind move to 0.0.0.0:$moved_own: exit $rc, old pid '${old:-none}', pid '${moved:-none}'"
   printf '%s\n' "$out" | tail -n 15
 fi
 

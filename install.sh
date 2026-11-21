@@ -643,7 +643,8 @@ socket.socket().bind((sys.argv[1], 0))' "$BIND" 2>/dev/null; then
   if [[ "$old" -eq 0 || "$OLD_PORT" != "$PORT" ]]; then
     probe "$BIND" "$PORT"
     # With old=1 this install's server was already found and reported above.
-    if [[ "$PROBE" == down && "$old" -eq 0 ]]; then probe_own; fi
+    # other with a PROBE_PID: a bind 0.0.0.0 test found a listener, which may be this install's server on an unconfigured address (#150).
+    if [[ ( "$PROBE" == down || "$PROBE" == other ) && "$old" -eq 0 ]]; then probe_own; fi
     if [[ "$PROBE" == match || "$PROBE" == moved ]]; then same_install; fi
     case "$PROBE" in
       match) row ok server "Ergosphere from this dir already running on ${BIND}:${PORT}, pid $PROBE_PID" ;;
@@ -840,7 +841,7 @@ start_server() {
   SRV_BIND=$BIND SRV_PORT=$PORT
   probe "$OLD_BIND" "$OLD_PORT"
   if [[ "$PROBE" != match && "$PROBE" != moved ]] && ! same_addr "$OLD_BIND:$OLD_PORT" "$BIND:$PORT"; then probe "$BIND" "$PORT"; fi
-  if [[ "$PROBE" == down ]]; then probe_own; fi
+  if [[ "$PROBE" == down || "$PROBE" == other ]]; then probe_own; fi
   if [[ "$PROBE" == match || "$PROBE" == moved ]]; then
     same_install
     PID=$PROBE_PID
