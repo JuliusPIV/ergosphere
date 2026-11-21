@@ -1187,6 +1187,11 @@ def existing_dir(path):
     return os.path.isdir(path)
 
 
+def folder_missing(cwd):
+    # A saved session whose folder was deleted: Resume can never start it (#43).
+    return isinstance(cwd, str) and bool(cwd) and not existing_dir(cwd)
+
+
 def one_query(qs, key):
     values = qs.get(key)
     if not values:
@@ -2138,8 +2143,9 @@ def live_state(live):
 def session_state(sid, with_turn=True, scan=None):
     """The one answer to "who runs this session", for every handler and page.
 
-    state: stopped, starting, running-idle, running-working, stopping,
-    held-by-cli or held-by-other-server. pid: the grok it names.
+    state: stopped, folder-missing (stopped, and its saved folder is gone),
+    starting, running-idle, running-working, stopping, held-by-cli or
+    held-by-other-server. pid: the grok it names.
     holder: another grok on this session (session_holder). Any holder makes
     the state held-by-*, also when this server runs a grok on it too. here:
     this server's own grok is starting or running. With here, pid and turn
@@ -2177,6 +2183,10 @@ def session_state(sid, with_turn=True, scan=None):
         out["pid"] = holder["pid"]
         if with_turn:
             out["turn"] = grok_turn(holder["pid"], scan)
+        return out
+    row = find_session(sid)
+    if row is not None and folder_missing(row.get("cwd")):
+        out["state"] = "folder-missing"
     return out
 
 
@@ -2222,6 +2232,10 @@ def resume_reply(sid):
     if row is None:
         return (404, {"ok": False, "error": "unknown session"})
     cwd = row.get("cwd")
+    # Also a folder deleted after session_state looked.
+    if folder_missing(cwd):
+        return (409, {"ok": False, "state": "folder-missing", "cwd": cwd,
+                      "error": folder_missing_text(cwd)})
     if not existing_dir(cwd):
         return (400, {"ok": False, "error": "session cwd is not an existing absolute directory"})
     try:
@@ -2235,6 +2249,12 @@ def resume_reply(sid):
     except (RuntimeError, OSError) as exc:
         return (400, {"ok": False, "error": str(exc)[:300]})
     return (200, {"ok": True, "id": sid})
+
+
+def folder_missing_text(cwd):
+    return ("The folder this session ran in no longer exists:\n%s\n\n"
+            "grok resumes a session in its own folder, so Resume cannot work "
+            "until that folder is back." % cwd)
 
 
 def running_here(state):
@@ -2315,7 +2335,7 @@ def list_states():
     out = {}
     for sid in sids:
         state = session_state(sid, scan=scan)
-        if state["state"] != "stopped":
+        if state["state"] not in ("stopped", "folder-missing"):
             out[sid] = state
     return out
 
@@ -2472,7 +2492,8 @@ def list_rows_tag(sessions, owners=None):
         owners = list_states()
     key = [
         sorted([sid, st["turn"] == "working", st["pid"], conflict_note(st)] for sid, st in owners.items()),
-        [[row.get(k) for k in ("id", "title", "cwd", "updated")] for row in sessions],
+        [[row.get(k) for k in ("id", "title", "cwd", "updated")] + [folder_missing(row.get("cwd"))]
+         for row in sessions],
     ]
     text = json.dumps(key, default=str, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
@@ -2538,7 +2559,8 @@ def dashboard_rows(sessions, owners=None):
     blocks.append('<div class="empty"%s>- none -</div>' % ("" if not older else " hidden"))
     for seq, row in enumerate(older):
         blocks.append(dashboard_session_row(
-            "older", seq, row, None, seq >= OLDER_WINDOW
+            "older", seq, row, None, seq >= OLDER_WINDOW,
+            note="folder missing" if folder_missing(row.get("cwd")) else "",
         ))
     if len(older) > OLDER_WINDOW:
         blocks.append(
@@ -3805,7 +3827,7 @@ document.getElementById("pick").hidden = false;
 """.replace("@@VERSION@@", html.escape(VERSION))
 
 
-def chat_page(resume="", holder=None, running=False, title="", ask=False):
+def chat_page(resume="", holder=None, running=False, title="", ask=False, gone=""):
     # Full-height xterm. Leaving this page drops the socket and does not
     # ask the server to kill grok. A reload or a second window reattaches.
     # running: this server already has the grok process. Only then does the
@@ -3828,7 +3850,7 @@ def chat_page(resume="", holder=None, running=False, title="", ask=False):
     else:
         busy_css = "#busy { display: none; padding: 0.8rem 1rem; white-space: pre-wrap; }"
         term_css = "#term { flex: 1; min-height: 0; }"
-        status = "connecting" if running else "Ended"
+        status = "connecting" if running else ("folder missing" if gone else "Ended")
         notice = ""
         visible_sid = "" if running else sid_js
     button_attr = "" if can_quit else " hidden"
@@ -4012,6 +4034,8 @@ var running = @@RUN_JS@@;
 // Stopped and its folder exists: ask to resume on load (#52). A missing
 // folder makes every Resume fail (#43), so that page does not ask.
 var askOnLoad = @@ASK_JS@@;
+// Stopped and its folder was deleted: why Resume cannot work, or "" (#43).
+var goneText = @@GONE_JS@@;
 var termOpened = false;
 var sawOutput = false;
 var sessionReady = false;
@@ -4327,7 +4351,7 @@ function resumeAskOpen() {
 }
 function openResumeAsk() {
   var box = document.getElementById("resume-ask");
-  if (!box.hidden) return;
+  if (!box.hidden || goneText) return;
   box.hidden = false;
   document.getElementById("resume-yes").focus();
 }
@@ -4480,7 +4504,7 @@ var stateGen = 0;
 function applyState(data) {
   if (!data || typeof data.state !== "string") return;
   if (hold || ended || stopping || !sawOutput) return;
-  if (data.state === "stopped") {
+  if (data.state === "stopped" || data.state === "folder-missing") {
     showEnded();
     return;
   }
@@ -4528,6 +4552,18 @@ function showEnded() {
   document.getElementById("status").style.color = "#808080";
   document.getElementById("stop").textContent = "Resume";
 }
+// The folder is gone: say so and offer no Resume, which would always fail.
+function showGone(text) {
+  goneText = text;
+  showEnded();
+  closeResumeAsk();
+  hideTerm();
+  document.getElementById("stop").hidden = true;
+  document.getElementById("busy").style.display = "block";
+  document.getElementById("busy-text").textContent = text;
+  document.getElementById("busy-back").hidden = false;
+  setStatus("folder missing", false);
+}
 var retryTimer = null;
 function resumeSession(tries) {
   tries = tries || 0;
@@ -4574,6 +4610,10 @@ function resumeSession(tries) {
     if (data.stopping === true && tries < 40 && !stopping) {
       setStatus("waiting for the last grok to exit", false);
       retryTimer = setTimeout(function () { retryTimer = null; resumeSession(tries + 1); }, 250);
+      return;
+    }
+    if (data.state === "folder-missing" && typeof data.error === "string") {
+      showGone(data.error);
       return;
     }
     showEnded();
@@ -4848,7 +4888,8 @@ else if (!hold) {
   try { fit.fit(); } catch (err) {}
   setSid(sid);
   showEnded();
-  if (askOnLoad) openResumeAsk();
+  if (goneText) showGone(goneText);
+  else if (askOnLoad) openResumeAsk();
 }
 </script>
 </body>
@@ -4867,6 +4908,8 @@ else if (!hold) {
         "@@SID_JS@@", json.dumps(sid_js)
     ).replace("@@HOLD_JS@@", hold_js).replace("@@RUN_JS@@", run_js).replace(
         "@@ASK_JS@@", "true" if ask else "false"
+    ).replace(
+        "@@GONE_JS@@", script_json(gone)
     ).replace(
         "@@TITLE@@", html.escape(title)
     ).replace("@@DOC_TITLE@@", html.escape(doc_title)).replace(
@@ -5227,7 +5270,10 @@ class Handler(BaseHTTPRequestHandler):
             # The same folder check /resume makes: only a stopped session it
             # could start gets the resume prompt on load (#52, #43).
             ask = isinstance(saved, dict) and existing_dir(saved.get("cwd"))
-            self._html(chat_page(resume, holder, running, page_title, ask))
+            gone = ""
+            if state["state"] == "folder-missing" and isinstance(saved, dict):
+                gone = folder_missing_text(saved.get("cwd"))
+            self._html(chat_page(resume, holder, running, page_title, ask, gone))
             return
         if path in VENDOR_FILES:
             self._vendor(path)
