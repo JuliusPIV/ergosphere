@@ -1074,10 +1074,12 @@ def hidden_ids(server):
     return set(config.get("hidden") or ()) if isinstance(config, dict) else set()
 
 
-def visible_sessions(sessions, server):
-    # The list leaves out sessions hidden in Settings; a live one still shows.
+def visible_sessions(sessions, server, owners):
+    # The list leaves out sessions hidden in Settings. A hidden session that a
+    # live grok still runs keeps its Working/Idle row, so it stays in the rows
+    # and in the list tag (#208).
     hidden = hidden_ids(server)
-    return [row for row in sessions if row["id"] not in hidden]
+    return [row for row in sessions if row["id"] not in hidden or row["id"] in owners]
 
 
 def read_json_file(path):
@@ -2658,8 +2660,8 @@ def dashboard_rows(sessions, owners=None):
     return "\n".join(blocks)
 
 
-def dashboard_page(sessions, agents, cwd_defaults):
-    rows_html = dashboard_rows(sessions)
+def dashboard_page(sessions, agents, cwd_defaults, owners=None):
+    rows_html = dashboard_rows(sessions, owners)
     body = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5264,8 +5266,8 @@ class Handler(BaseHTTPRequestHandler):
     def _list_rows(self):
         # The list page polls this. Unchanged rows cost one short reply.
         _total, sessions = load_sessions(None)
-        sessions = visible_sessions(sessions, getattr(self, "server", None))
         owners = list_states()
+        sessions = visible_sessions(sessions, getattr(self, "server", None), owners)
         tag = list_rows_tag(sessions, owners)
         if self.headers.get("X-Rows-Tag", "") == tag:
             self.send_response(204)
@@ -5396,8 +5398,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/":
             _total, sessions = load_sessions(None)
-            sessions = visible_sessions(sessions, getattr(self, "server", None))
-            self._html(dashboard_page(sessions, list_agents(), self.server.cwd_defaults))
+            owners = list_states()
+            sessions = visible_sessions(sessions, getattr(self, "server", None), owners)
+            self._html(dashboard_page(sessions, list_agents(), self.server.cwd_defaults, owners))
             return
         if path == "/list-rows":
             self._list_rows()

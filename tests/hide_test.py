@@ -89,10 +89,10 @@ def list_html(erg, server):
     return get(erg, server, "/").get("html", "")
 
 
-def list_tag(erg, server):
+def list_tag(erg, server, owners=None):
     sessions = erg.load_sessions(None)[1]
-    visible = getattr(erg, "visible_sessions", lambda rows, server: rows)(sessions, server)
-    return erg.list_rows_tag(visible, owners={})
+    visible = erg.visible_sessions(sessions, server, owners or {})
+    return erg.list_rows_tag(visible, owners=owners or {})
 
 
 def saved_hidden():
@@ -188,6 +188,20 @@ def run(erg):
         fails.append("unhidden session is not back in the list")
     if grok_tree_hash() != before:
         fails.append("hide or unhide changed files under ~/.grok")
+
+    # A hidden session that a live grok still runs keeps its Working/Idle row,
+    # so a title change must move the list tag or an open list never refreshes.
+    live_sid = saved_session(keep, "live before")
+    post(erg, server, "/hide", {"id": live_sid, "hidden": True})
+    owners = {live_sid: {"state": "running-idle", "turn": "idle", "pid": 4242,
+                         "here": True, "holder": None}}
+    tag_live = list_tag(erg, server, owners)
+    with open(os.path.join(SESSIONS, "t", live_sid, "summary.json"), "w") as fh:
+        json.dump({"info": {"id": live_sid, "cwd": keep}, "generated_title": "live after",
+                   "updated_at": "2026-01-02T00:00:00Z"}, fh)
+    if list_tag(erg, server, owners) == tag_live:
+        fails.append("hidden live session's title change did not move the list tag")
+    post(erg, server, "/hide", {"id": live_sid, "hidden": False})
 
     return fails
 
