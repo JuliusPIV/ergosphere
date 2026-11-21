@@ -131,6 +131,41 @@ async function keyboardCheck(b, device, kb, pan) {
   }
 }
 
+// Pinch zoom of the page outside the terminal (#158): page scale 2 by CDP,
+// as a pinch does, then back to 1.  The terminal keeps its rows both times,
+// so grok is never resized.  The listener is added after the page's own, so
+// it reads the rows once the page has handled the resize event.
+async function pinchZoomCheck(b) {
+  const ctx = await b.newContext({...devices['Pixel 7']});
+  try {
+    let {p, s, met} = await openPage(ctx);
+    if (!met) return check(false, `no grok view at page size: ${seen(s)}`);
+    const r0 = s.rows;
+    await p.evaluate(() => visualViewport.addEventListener('resize', () => {
+      window.abZoom = {rows: term.rows, scale: visualViewport.scale};
+    }));
+    const cdp = await ctx.newCDPSession(p);
+    const zoom = async scale => {
+      await p.evaluate(() => { window.abZoom = null; });
+      await cdp.send('Emulation.setPageScaleFactor', {pageScaleFactor: scale});
+      const end = Date.now() + WAIT;
+      let z = null;
+      while (Date.now() < end) {
+        z = await p.evaluate(() => window.abZoom);
+        if (z && Math.abs(z.scale - scale) < 0.01) return z.rows;
+        await wait(50);
+      }
+      return `no resize at scale ${scale}`;
+    };
+    const r1 = await zoom(2);
+    const r2 = await zoom(1);
+    ({s, met} = await until(p, x => fitted(x) && x.rows === r0));
+    return check(r1 === r0 && r2 === r0 && met, `rows ${r0}, zoom 2: ${r1}, zoom 1: ${r2}, grok ${s.rows}x${s.cols}`);
+  } finally {
+    await ctx.close();
+  }
+}
+
 // Quit, open the "Resume this session?" box from the ended terminal, then
 // press the bar's Resume instead: the box must close once grok is live (#57).
 async function resumeBoxCheck(b) {
@@ -242,6 +277,7 @@ async function run() {
     await ctx.close();
     checks.keyboard_android = await keyboardCheck(b, 'Pixel 7', 320, false);
     checks.keyboard_ios = await keyboardCheck(b, 'iPhone 14', 300, true);
+    checks.pinch_zoom = await pinchZoomCheck(b);
     // Last: it quits and resumes the session the other checks share.
     checks.resume_box = await resumeBoxCheck(b);
     return {browser: b.version(), checks};
