@@ -8,13 +8,15 @@
    print() lines never interleave; drain_log gives up after its timeout when
    the log stays blocked.
 
-Run: ERGOSPHERE_TEST_PORT=<spare port> python3 -B tests/blocked_log_test.py
+Run: [ERGOSPHERE_TEST_PORT=<spare port>] python3 -B tests/blocked_log_test.py
+(a free port from the OS when unset)
 Stdlib only, no network, no real grok.
 """
 import importlib.util
 import os
 import queue
 import shutil
+import socket
 import sys
 import tempfile
 import threading
@@ -145,8 +147,9 @@ def main():
     failures = []
     port = os.environ.get("ERGOSPHERE_TEST_PORT")
     if not port:
-        print("FAIL: set ERGOSPHERE_TEST_PORT to a spare port")
-        return 1
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = str(s.getsockname()[1])
     ab = load("blocked_log", ROOT / "tests" / "ab" / "blocked_log.py")
     work = tempfile.mkdtemp(prefix="ergo-blocked-log-")
     try:
