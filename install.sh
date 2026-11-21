@@ -786,8 +786,6 @@ check_writes() {
     kib=$((kib + 4 * (($(stat -c %s -- "$SRC/$rel") + 4095) / 4096)))
     dirs+=("$(dirname -- "$DEST/$rel")")
   done < <(cd "$SRC" && find . -type f -print0 | sort -z)
-  # The server log is appended to when the server starts.
-  if [[ -e "$DEST/ergosphere.log" && ! -w "$DEST/ergosphere.log" ]]; then bad+=("$DEST/ergosphere.log"); fi
   for dir in ${dirs[@]+"${dirs[@]}"}; do
     up=$(existing_up "$dir")
     # One entry per folder: vendor/ holds several files.

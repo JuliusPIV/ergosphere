@@ -61,7 +61,10 @@ inst() {
     setsid -w bash "$repo/install.sh" --dir "$home/app" --port "$port" "$@" </dev/null 2>&1); rc=$?
   # A run the gate did not stop may have started a server: stop it.
   # Wait until it is gone, so the next case finds the port free.
-  if [[ "$out" =~ start:\ started\ pid\ ([0-9]+) ]]; then
+  # KEEP_SERVER=1 leaves it running for the next run (stop_server stops it).
+  if [[ "$out" =~ start:\ started\ pid\ ([0-9]+) && "${KEEP_SERVER:-0}" == 1 ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}" >"$work/kept.pid"
+  elif [[ "$out" =~ start:\ started\ pid\ ([0-9]+) ]]; then
     kill "${BASH_REMATCH[1]}" 2>/dev/null
     for _ in $(seq 100); do kill -0 "${BASH_REMATCH[1]}" 2>/dev/null || break; sleep 0.1; done
   fi
@@ -116,5 +119,27 @@ for mode in --auto --check; do
   expect_blocked "full disk $mode" "has 1 KiB free, the release needs" "$rc" "$out"
   if [[ -e "$h/app" || -e "$h/state" ]]; then bad "full disk $mode: install dir or config created"; else ok "full disk $mode: nothing created"; fi
 done
+
+# A read-only ergosphere.log is no blocker when the rerun reuses the running
+# server, which never opens the log (review finding on PR 197).
+h="$work/rolog"
+out=$(KEEP_SERVER=1 inst "$h" "$h/state/ergosphere.json" "$work/none" --auto); rc=$?
+kept=$(cat "$work/kept.pid" 2>/dev/null)
+if [[ "$rc" -eq 0 && -n "$kept" ]]; then
+  pids+=("$kept")
+  chmod 444 "$h/app/ergosphere.log"
+  out=$(inst "$h" "$h/state/ergosphere.json" "$work/none" --auto); rc=$?
+  if [[ "$rc" -eq 0 && "$out" == *"start: already running, pid $kept"* ]]; then
+    ok "read-only log, server running: rerun reuses pid $kept"
+  else
+    bad "read-only log, server running: rc $rc, want the running server reused"
+    printf '%s\n' "$out" | tail -n 8
+  fi
+  kill "$kept" 2>/dev/null
+  for _ in $(seq 100); do kill -0 "$kept" 2>/dev/null || break; sleep 0.1; done
+else
+  bad "read-only log: first install failed, rc $rc"
+  printf '%s\n' "$out" | tail -n 8
+fi
 
 exit "$fail"
