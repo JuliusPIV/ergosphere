@@ -187,7 +187,7 @@ async function settingsPollCheck(b) {
     r = await read();
     while (!zero(r) && Date.now() < end) { await wait(100); r = await read(); }
     return check(zero(r), zero(r) ? 'slow replies: 1->0, Restart on'
-      : `slow replies: still "${r.text.slice(0, 26)}" Restart ${r.off ? 'off' : 'on'}`);
+      : `slow: shows ${(r.text.match(/\d+/) || ['?'])[0]}, Restart ${r.off ? 'off' : 'on'}`);
   } finally {
     await ctx.close();
   }
