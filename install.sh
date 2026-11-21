@@ -272,6 +272,12 @@ port_taken() {
       [[ "$PROBE_SCRIPT" != "$(realpath -m -- "$DEST/ergosphere.py")" ]] || return 1
       HELD_BY="an Ergosphere installed in ${PROBE_SCRIPT%/ergosphere.py} (pid $PROBE_PID)" ;;
     *)
+      # other with a holder pid: the bind 0.0.0.0 test found it (#150). When that
+      # holder is this install's own server, the port is free for it to move to.
+      if [[ -n "$PROBE_PID" ]]; then
+        probe_script
+        [[ "$PROBE_SCRIPT" != "$(realpath -m -- "$DEST/ergosphere.py")" ]] || return 1
+      fi
       h=$(port_holder "$PORT")
       if [[ -n "$h" ]]; then HELD_BY="pid ${h%% *} (${h#* })"; else HELD_BY="a program this user cannot see"; fi ;;
   esac
