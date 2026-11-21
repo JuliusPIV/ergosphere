@@ -4527,6 +4527,12 @@ function showEnded() {
   // Over the default background #000000 that paints #808080.
   document.getElementById("status").style.color = "#808080";
   document.getElementById("stop").textContent = "Resume";
+  // grok's last screen would still look live, and a page loaded ended shows a
+  // blank terminal: clear it so both look the same (#55).  Text from a grok
+  // that never got going (sawOutput false) stays: it says why.
+  if (sawOutput && termOpened) {
+    try { term.reset(); } catch (err) {}
+  }
 }
 var retryTimer = null;
 function resumeSession(tries) {
@@ -4542,6 +4548,9 @@ function resumeSession(tries) {
   if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; }
   document.getElementById("stop").textContent = "Quit";
   setStatus("starting", false);
+  // Nothing of an earlier screen stays up until the new grok draws: the old
+  // frame, then grok's clear, then its first frame flashed black (#55).
+  try { if (termOpened) term.reset(); } catch (err) {}
   var old = sock;
   sock = null;
   if (old) {
