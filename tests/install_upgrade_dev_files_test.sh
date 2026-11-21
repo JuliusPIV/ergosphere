@@ -6,6 +6,7 @@
 #   1. the old installer leaves tests/, docs/, .ghflow*, .git*, install.sh;
 #   2. the user adds files, also inside tests/, edits tests/run_all.sh, and
 #      links docs/ and install.sh to files outside the install dir;
+#      .ghflow.conf is swapped for v0.1.0's copy (an older release's file);
 #   3. the current installer removes the archive's developer files, names each
 #      one, and leaves the config, the log, the runtime, the server, the
 #      user's files, the edited copy, the links and their targets alone;
@@ -92,6 +93,10 @@ else bad "old installer did not copy the developer files; the test cannot run"; 
 printf 'mine\n' >"$app/notes.txt"
 printf 'mine\n' >"$app/tests/my-notes.txt"
 printf '# my edit\n' >>"$app/tests/run_all.sh"
+# An install of an older release holds that release's copy: v0.1.0's .ghflow.conf.
+printf '%s\n' 'BASE=main' \
+  "TEST_CMD=python3 -B -c 'import ast,sys; [ast.parse(open(f).read()) for f in sys.argv[1:]]' ergosphere.py && bash -n install.sh" \
+  >"$app/.ghflow.conf"
 printf 'outside\n' >"$work/outside/install.sh"
 rm -- "$app/install.sh" && ln -s "$work/outside/install.sh" "$app/install.sh"
 mv -- "$app/docs" "$work/outside/docs" && ln -s "$work/outside/docs" "$app/docs"
