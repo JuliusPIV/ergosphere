@@ -418,7 +418,6 @@ python3 ergosphere.py           # runs in the foreground; prints ERGOSPHERE_READ
 - Serving directly on ports 80 or 443, or behind a proxy that drops the port from the Host header, is not supported.
 - Takeover works only on the same machine: a session held by a grok CLI or by another Ergosphere server there can be taken over, one on another machine cannot.
 - Plain HTTP by default.
-- On a phone, pinch-zooming the page outside the terminal also refits the terminal to fewer rows, which resizes grok for every view of that session ([#158](https://github.com/JuliusPIV/ergosphere/issues/158)). Pinch on the terminal itself to change the text size.
 - Clicking a link inside grok does not open it: grok shows "Can't open links without a display" ([#34](https://github.com/JuliusPIV/ergosphere/issues/34)).
 - Linux only. WSL2 is untested. macOS is not supported yet.
 
