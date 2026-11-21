@@ -9,6 +9,8 @@
 # last=noDisplay.  The key "k" alone asks for another link the same way, as
 # a process under grok could with no click: last=keyRc<code> or noDisplay.
 # The key "s" starts a background ask every 0.55 s for spam1..spam6 (last=spam).
+# Keys "1", "2", "3" ask for three long links that share a prefix
+# (last=oneRc<code>, twoRc<code>, threeRc<code>).
 import fcntl
 import os
 import re
@@ -73,9 +75,16 @@ os.set_blocking(wake_r, False)
 os.set_blocking(wake_w, False)
 signal.set_wakeup_fd(wake_w)
 signal.signal(signal.SIGWINCH, lambda *a: None)
-LINK = "https://example.com/ab-link"
+LINK = "https://ab.invalid/ab-link"
 # Asked for on the key "k", as a process under grok could do with no click.
-KEY_LINK = "https://example.com/ab-key"
+KEY_LINK = "https://ab.invalid/ab-key"
+# Keys 1-3: long links with one 79-character prefix (#220 swap check).
+SWAP_PREFIX = "https://ab.invalid/o/oauth2/v2/auth?response_type=code&scope=email&x=aaaaaaaaa"
+SWAP_KEYS = {
+    b"1": (SWAP_PREFIX + "&client_id=legit-app", "one"),
+    b"2": (SWAP_PREFIX + "&client_id=attacker-app", "two"),
+    b"3": (SWAP_PREFIX + "&client_id=third-app", "three"),
+}
 
 
 def open_link(link=LINK, label="link"):
@@ -93,7 +102,7 @@ def open_link(link=LINK, label="link"):
 
 def spam():
     for i in range(1, 7):
-        open_link("https://example.com/spam%d" % i, "spam")
+        open_link("https://ab.invalid/spam%d" % i, "spam")
         time.sleep(0.55)
 
 
@@ -147,6 +156,9 @@ while True:
     rest = SGR.sub(b"", d)
     if rest == b"k":
         last = open_link(KEY_LINK, "key")
+    if rest in SWAP_KEYS:
+        url, label = SWAP_KEYS[rest]
+        last = open_link(url, label)
     if rest == b"s":
         # Never draws: only the main loop writes to the terminal.
         threading.Thread(target=spam, daemon=True).start()

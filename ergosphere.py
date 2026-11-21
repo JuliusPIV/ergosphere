@@ -4587,23 +4587,54 @@ document.addEventListener("mouseup", function (ev) {
 // server. The page never opens a tab itself: any process under grok can ask
 // for a link, and no timing tells its request from the user's click. The
 // latest link goes in the bar; the user's own click on it opens it.
+// The link must not change under the user: while the pointer is on the bar
+// link or it has focus, a new one waits; for a moment after a change (a tap
+// has no hover) a click on it does nothing.
+var LINK_SWAP_MS = 1000;
+var linkBox = document.getElementById("link");
+var linkPending = null;
+var linkChangedAt = -Infinity;
+function linkHeld(next) {
+  return linkBox.matches(":hover") || linkBox.contains(next === undefined ? document.activeElement : next);
+}
 function openLink(u) {
   var parsed;
   try { parsed = new URL(u); } catch (err) { return; }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
   if (parsed.hostname === location.hostname) return;
-  var box = document.getElementById("link");
+  if (linkHeld()) {
+    linkPending = parsed.href;
+    return;
+  }
+  showLink(parsed.href);
+}
+function showLink(href) {
+  linkPending = null;
   var a = document.createElement("a");
-  a.href = parsed.href;
+  a.href = href;
   a.target = "_blank";
   a.rel = "noopener noreferrer";
   a.style.textDecoration = "underline";
-  a.textContent = parsed.href.length > 80 ? parsed.href.slice(0, 77) + "..." : parsed.href;
-  a.title = "Open " + parsed.href + " in a new tab";
-  box.textContent = " | Open link: ";
-  box.appendChild(a);
-  box.hidden = false;
+  // Host and tail both show, so two long links with one prefix look different.
+  a.textContent = href.length > 72 ? href.slice(0, 40) + "..." + href.slice(-30) : href;
+  a.title = "Open " + href + " in a new tab";
+  linkBox.textContent = " | Open link: ";
+  linkBox.appendChild(a);
+  linkBox.hidden = false;
+  linkChangedAt = performance.now();
 }
+linkBox.addEventListener("mouseleave", function () {
+  if (linkPending && !linkHeld()) showLink(linkPending);
+});
+linkBox.addEventListener("focusout", function (ev) {
+  // activeElement is not yet the new focus here; relatedTarget is.
+  if (linkPending && !linkHeld(ev.relatedTarget)) showLink(linkPending);
+});
+function linkTooNew(ev) {
+  if (performance.now() - linkChangedAt < LINK_SWAP_MS) ev.preventDefault();
+}
+linkBox.addEventListener("click", linkTooNew, true);
+linkBox.addEventListener("auxclick", linkTooNew, true);
 function setStatus(text, active) {
   var el = document.getElementById("status");
   el.textContent = text;
