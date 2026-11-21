@@ -1059,7 +1059,27 @@ def check_config(data, label):
     if not isinstance(effort, str) or (effort and not EFFORT_ID_RE.match(effort)):
         raise ValueError("%s last.effort is not an effort level" % label)
     out["last"] = {"model": model, "effort": effort}
+    # Sessions hidden from the list (#208). Only ids: grok's files stay as they are.
+    if "hidden" in out:
+        hidden = out["hidden"]
+        if not isinstance(hidden, list) or not all(isinstance(x, str) and SID_RE.match(x) for x in hidden):
+            raise ValueError("%s hidden must be a list of session ids" % label)
+        out["hidden"] = sorted(set(hidden))
     return out
+
+
+def hidden_ids(server):
+    # A server built without a config (some tests) hides nothing.
+    config = getattr(server, "config", None)
+    return set(config.get("hidden") or ()) if isinstance(config, dict) else set()
+
+
+def visible_sessions(sessions, server, owners):
+    # The list leaves out sessions hidden in Settings. A hidden session that a
+    # live grok still runs keeps its Working/Idle row, so it stays in the rows
+    # and in the list tag (#208).
+    hidden = hidden_ids(server)
+    return [row for row in sessions if row["id"] not in hidden or row["id"] in owners]
 
 
 def read_json_file(path):
@@ -1185,6 +1205,79 @@ def existing_dir(path):
     if "\x00" in path or len(path) > 4096:
         return False
     return os.path.isdir(path)
+
+
+# A stat on a hung mount never returns. GET / and the 4 s /list-rows poll call
+# folder_missing, so wait only this long; a slow folder reads as present. One
+# check per folder is outstanding at a time, so polls do not pile up threads.
+# A hung check keeps its thread forever, so at most FOLDER_CHECK_THREADS run at
+# once. A folder with no slot in time reads as present (#43 review: a list of
+# hundreds of stalled folders must not exhaust the thread budget).
+FOLDER_CHECK_WAIT = 0.5
+FOLDER_CHECK_THREADS = 16
+folder_checks = {}
+folder_checks_lock = threading.Lock()
+folder_check_slots = threading.BoundedSemaphore(FOLDER_CHECK_THREADS)
+
+
+def folder_missing(cwd):
+    # A saved session whose folder was deleted: Resume can never start it (#43).
+    return cwd in missing_folders([cwd])
+
+
+def missing_folders(cwds):
+    # The given folders that do not exist. All share one FOLDER_CHECK_WAIT, so
+    # many stalled folders in one list do not add up.
+    deadline = time.monotonic() + FOLDER_CHECK_WAIT
+    started = []
+    for cwd in set(c for c in cwds if isinstance(c, str) and c):
+        check = start_folder_check(cwd, deadline)
+        if check is not None:
+            started.append((cwd, check))
+    out = set()
+    for cwd, check in started:
+        if check["done"].wait(max(0, deadline - time.monotonic())) and not check["exists"]:
+            out.add(cwd)
+    return out
+
+
+def start_folder_check(cwd, deadline):
+    # A check already outstanding is joined, not started again: 50 rows on one
+    # stuck folder cost one thread. None means no slot came free in time, so
+    # the folder reads as present for this render.
+    with folder_checks_lock:
+        check = folder_checks.get(cwd)
+    if check is not None:
+        return check
+    if not folder_check_slots.acquire(timeout=max(0, deadline - time.monotonic())):
+        return None
+    with folder_checks_lock:
+        check = folder_checks.get(cwd)
+        if check is not None:
+            folder_check_slots.release()
+            return check
+        check = {"done": threading.Event(), "exists": False}
+        folder_checks[cwd] = check
+    try:
+        threading.Thread(target=check_folder, args=(cwd, check), daemon=True).start()
+    except RuntimeError:
+        # The process is out of threads anyway. Forget this check, so the next
+        # render retries it, and read the folder as present rather than fail the list.
+        with folder_checks_lock:
+            folder_checks.pop(cwd, None)
+        folder_check_slots.release()
+        return None
+    return check
+
+
+def check_folder(cwd, check):
+    try:
+        check["exists"] = existing_dir(cwd)
+    finally:
+        check["done"].set()
+        with folder_checks_lock:
+            folder_checks.pop(cwd, None)
+        folder_check_slots.release()
 
 
 def one_query(qs, key):
@@ -2138,8 +2231,9 @@ def live_state(live):
 def session_state(sid, with_turn=True, scan=None):
     """The one answer to "who runs this session", for every handler and page.
 
-    state: stopped, starting, running-idle, running-working, stopping,
-    held-by-cli or held-by-other-server. pid: the grok it names.
+    state: stopped, folder-missing (stopped, and its saved folder is gone),
+    starting, running-idle, running-working, stopping, held-by-cli or
+    held-by-other-server. pid: the grok it names.
     holder: another grok on this session (session_holder). Any holder makes
     the state held-by-*, also when this server runs a grok on it too. here:
     this server's own grok is starting or running. With here, pid and turn
@@ -2177,6 +2271,10 @@ def session_state(sid, with_turn=True, scan=None):
         out["pid"] = holder["pid"]
         if with_turn:
             out["turn"] = grok_turn(holder["pid"], scan)
+        return out
+    row = find_session(sid)
+    if row is not None and folder_missing(row.get("cwd")):
+        out["state"] = "folder-missing"
     return out
 
 
@@ -2222,6 +2320,10 @@ def resume_reply(sid):
     if row is None:
         return (404, {"ok": False, "error": "unknown session"})
     cwd = row.get("cwd")
+    # Also a folder deleted after session_state looked.
+    if folder_missing(cwd):
+        return (409, {"ok": False, "state": "folder-missing", "cwd": cwd,
+                      "error": folder_missing_text(cwd)})
     if not existing_dir(cwd):
         return (400, {"ok": False, "error": "session cwd is not an existing absolute directory"})
     try:
@@ -2235,6 +2337,12 @@ def resume_reply(sid):
     except (RuntimeError, OSError) as exc:
         return (400, {"ok": False, "error": str(exc)[:300]})
     return (200, {"ok": True, "id": sid})
+
+
+def folder_missing_text(cwd):
+    return ("The folder this session ran in no longer exists:\n%s\n\n"
+            "grok resumes a session in its own folder, so Resume cannot work "
+            "until that folder is back." % cwd)
 
 
 def running_here(state):
@@ -2315,7 +2423,7 @@ def list_states():
     out = {}
     for sid in sids:
         state = session_state(sid, scan=scan)
-        if state["state"] != "stopped":
+        if state["state"] not in ("stopped", "folder-missing"):
             out[sid] = state
     return out
 
@@ -2470,9 +2578,11 @@ def list_rows_tag(sessions, owners=None):
     """Change tag of the list rows, from the same inputs, without the HTML."""
     if owners is None:
         owners = list_states()
+    missing = missing_folders(row.get("cwd") for row in sessions)
     key = [
         sorted([sid, st["turn"] == "working", st["pid"], conflict_note(st)] for sid, st in owners.items()),
-        [[row.get(k) for k in ("id", "title", "cwd", "updated")] for row in sessions],
+        [[row.get(k) for k in ("id", "title", "cwd", "updated")] + [row.get("cwd") in missing]
+         for row in sessions],
     ]
     text = json.dumps(key, default=str, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
@@ -2536,9 +2646,11 @@ def dashboard_rows(sessions, owners=None):
     blocks.append(dashboard_head("older"))
     blocks.append('<div class="sec" id="sec-older">')
     blocks.append('<div class="empty"%s>- none -</div>' % ("" if not older else " hidden"))
+    missing = missing_folders(row.get("cwd") for row in older)
     for seq, row in enumerate(older):
         blocks.append(dashboard_session_row(
-            "older", seq, row, None, seq >= OLDER_WINDOW
+            "older", seq, row, None, seq >= OLDER_WINDOW,
+            note="folder missing" if row.get("cwd") in missing else "",
         ))
     if len(older) > OLDER_WINDOW:
         blocks.append(
@@ -2548,8 +2660,8 @@ def dashboard_rows(sessions, owners=None):
     return "\n".join(blocks)
 
 
-def dashboard_page(sessions, agents, cwd_defaults):
-    rows_html = dashboard_rows(sessions)
+def dashboard_page(sessions, agents, cwd_defaults, owners=None):
+    rows_html = dashboard_rows(sessions, owners)
     body = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -3494,7 +3606,17 @@ def settings_state(server, config):
         "names": sorted(set(list_agents()) | set(agents)),
         "sessions": running_sessions(),
         "overrides": settings_overrides(getattr(server, "args", None)),
+        "hidden": hidden_rows(config.get("hidden") or ()),
     }
+
+
+def hidden_rows(ids):
+    # Settings lists hidden sessions so each can be shown again (#208).
+    rows = []
+    for sid in ids:
+        row = find_session(sid) or {}
+        rows.append({"id": sid, "title": row.get("title") or "", "cwd": row.get("cwd") or ""})
+    return rows
 
 
 def settings_page(state):
@@ -3539,6 +3661,10 @@ td.path input { width: 100%; box-sizing: border-box; }
 <table><thead><tr><th>Agent</th><th>Working directory</th><th></th></tr></thead><tbody id="agents"></tbody></table>
 <div class="line"><select id="add-name"></select><input id="add-path" placeholder="/absolute/existing/directory" autocomplete="off"><button type="button" id="add">Add</button></div>
 <div class="note" id="agent-msg"></div>
+<div class="bar"></div>
+<h2>Hidden sessions</h2>
+<table><tbody id="hidden"></tbody></table>
+<div class="note" id="hidden-msg"></div>
 <div class="bar"></div>
 <h2>Restart</h2>
 <div class="note" id="sessions"></div>
@@ -3767,8 +3893,55 @@ el("restart").addEventListener("click", function () {
     renderRestart();
   });
 });
+// Unhide only changes Ergosphere's settings (#208).
+function renderHidden() {
+  var body = el("hidden");
+  var i, tr, td, link, btn;
+  if (!state.hidden) state.hidden = [];
+  body.textContent = "";
+  for (i = 0; i < state.hidden.length; i++) {
+    tr = document.createElement("tr");
+    td = document.createElement("td");
+    link = document.createElement("a");
+    link.href = "/chat?resume=" + encodeURIComponent(state.hidden[i].id);
+    link.textContent = state.hidden[i].title || state.hidden[i].id;
+    td.appendChild(link);
+    tr.appendChild(td);
+    td = document.createElement("td");
+    td.textContent = state.hidden[i].cwd;
+    tr.appendChild(td);
+    td = document.createElement("td");
+    btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Unhide";
+    btn.setAttribute("data-id", state.hidden[i].id);
+    td.appendChild(btn);
+    tr.appendChild(td);
+    body.appendChild(tr);
+  }
+  say("hidden-msg", state.hidden.length ? "" : "None.");
+}
+el("hidden").addEventListener("click", function (ev) {
+  var id = ev.target && ev.target.getAttribute && ev.target.getAttribute("data-id");
+  if (!id) return;
+  ev.target.disabled = true;
+  fetch("/hide", {
+    method: "POST",
+    cache: "no-store",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({id: id, hidden: false})
+  }).then(function (resp) {
+    if (!resp.ok) throw new Error("could not unhide");
+    state.hidden = state.hidden.filter(function (row) { return row.id !== id; });
+    renderHidden();
+  }).catch(function (err) {
+    ev.target.disabled = false;
+    say("hidden-msg", String(err && err.message || err));
+  });
+});
 renderServer();
 renderAgents();
+renderHidden();
 renderRestart();
 setInterval(pollSessions, 2000);
 </script>
@@ -3805,7 +3978,7 @@ document.getElementById("pick").hidden = false;
 """.replace("@@VERSION@@", html.escape(VERSION))
 
 
-def chat_page(resume="", holder=None, running=False, title="", ask=False):
+def chat_page(resume="", holder=None, running=False, title="", ask=False, gone="", hidden=False):
     # Full-height xterm. Leaving this page drops the socket and does not
     # ask the server to kill grok. A reload or a second window reattaches.
     # running: this server already has the grok process. Only then does the
@@ -3828,7 +4001,7 @@ def chat_page(resume="", holder=None, running=False, title="", ask=False):
     else:
         busy_css = "#busy { display: none; padding: 0.8rem 1rem; white-space: pre-wrap; }"
         term_css = "#term { flex: 1; min-height: 0; }"
-        status = "connecting" if running else "Ended"
+        status = "connecting" if running else ("folder missing" if gone else "Ended")
         notice = ""
         visible_sid = "" if running else sid_js
     button_attr = "" if can_quit else " hidden"
@@ -3897,7 +4070,7 @@ body { position: fixed; left: 0; right: 0; top: var(--vv-top, 0px); }
 <body>
 <div id="bar"><a href="/">← Session List</a> | <button id="stop" type="button">Quit</button> | <span id="status">@@STATUS@@</span> | <span id="title"@@TITLE_ATTR@@>@@TITLE@@</span><span id="title-gap"@@GAP_ATTR@@> | </span><span id="sid">Session ID: @@SID_TEXT@@</span></div>
 <div id="version">v@@VERSION@@</div>
-<div id="wrap"><div id="stage"><div id="resume-ask" hidden><div>Resume this session?</div><button type="button" id="resume-yes">Resume</button><button type="button" id="resume-no">Cancel</button></div><div id="busy"><div id="busy-text">@@NOTICE@@</div><a id="open-there" hidden>Open it there</a><button id="take" type="button"@@BUTTON_ATTR@@>@@BUTTON_LABEL@@</button> <a id="busy-back" href="/" hidden>Back</a></div><div id="term"></div></div></div>
+<div id="wrap"><div id="stage"><div id="resume-ask" hidden><div>Resume this session?</div><button type="button" id="resume-yes">Resume</button><button type="button" id="resume-no">Cancel</button></div><div id="busy"><div id="busy-text">@@NOTICE@@</div><a id="open-there" hidden>Open it there</a><button id="take" type="button"@@BUTTON_ATTR@@>@@BUTTON_LABEL@@</button> <button id="hide" type="button" hidden>Hide</button> <a id="busy-back" href="/" hidden>Back</a></div><div id="term"></div></div></div>
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
 <script>
@@ -4012,6 +4185,10 @@ var running = @@RUN_JS@@;
 // Stopped and its folder exists: ask to resume on load (#52). A missing
 // folder makes every Resume fail (#43), so that page does not ask.
 var askOnLoad = @@ASK_JS@@;
+// Stopped and its folder was deleted: why Resume cannot work, or "" (#43).
+var goneText = @@GONE_JS@@;
+// Hidden from the session list in Ergosphere's settings (#208).
+var hiddenNow = @@HIDDEN_JS@@;
 var termOpened = false;
 var sawOutput = false;
 var sessionReady = false;
@@ -4327,7 +4504,7 @@ function resumeAskOpen() {
 }
 function openResumeAsk() {
   var box = document.getElementById("resume-ask");
-  if (!box.hidden) return;
+  if (!box.hidden || goneText) return;
   box.hidden = false;
   document.getElementById("resume-yes").focus();
 }
@@ -4480,7 +4657,7 @@ var stateGen = 0;
 function applyState(data) {
   if (!data || typeof data.state !== "string") return;
   if (hold || ended || stopping || !sawOutput) return;
-  if (data.state === "stopped") {
+  if (data.state === "stopped" || data.state === "folder-missing") {
     showEnded();
     return;
   }
@@ -4528,6 +4705,45 @@ function showEnded() {
   document.getElementById("status").style.color = "#808080";
   document.getElementById("stop").textContent = "Resume";
 }
+// The folder is gone: say so and offer no Resume, which would always fail.
+function showGone(text) {
+  goneText = text;
+  showEnded();
+  closeResumeAsk();
+  hideTerm();
+  document.getElementById("stop").hidden = true;
+  document.getElementById("busy").style.display = "block";
+  document.getElementById("busy-text").textContent = text;
+  document.getElementById("busy-back").hidden = false;
+  setStatus("folder missing", false);
+  showHide();
+}
+// Hide only changes Ergosphere's settings; grok's session files stay.
+function showHide() {
+  var btn = document.getElementById("hide");
+  btn.textContent = hiddenNow ? "Unhide" : "Hide";
+  btn.hidden = false;
+}
+document.getElementById("hide").addEventListener("click", function () {
+  var btn = document.getElementById("hide");
+  var want = !hiddenNow;
+  btn.disabled = true;
+  fetch("/hide", {
+    method: "POST",
+    cache: "no-store",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({id: sid, hidden: want})
+  }).then(function (resp) {
+    return resp.json().catch(function () { return {}; }).then(function (data) {
+      if (!resp.ok || !data.ok) throw new Error(data.error || "could not save");
+      hiddenNow = want;
+      showHide();
+      setStatus(want ? "hidden from the session list" : "shown in the session list", false);
+    });
+  }).catch(function (err) {
+    setStatus(String(err && err.message || err), false);
+  }).then(function () { btn.disabled = false; });
+});
 var retryTimer = null;
 function resumeSession(tries) {
   tries = tries || 0;
@@ -4574,6 +4790,10 @@ function resumeSession(tries) {
     if (data.stopping === true && tries < 40 && !stopping) {
       setStatus("waiting for the last grok to exit", false);
       retryTimer = setTimeout(function () { retryTimer = null; resumeSession(tries + 1); }, 250);
+      return;
+    }
+    if (data.state === "folder-missing" && typeof data.error === "string") {
+      showGone(data.error);
       return;
     }
     showEnded();
@@ -4848,7 +5068,8 @@ else if (!hold) {
   try { fit.fit(); } catch (err) {}
   setSid(sid);
   showEnded();
-  if (askOnLoad) openResumeAsk();
+  if (goneText) showGone(goneText);
+  else if (askOnLoad) openResumeAsk();
 }
 </script>
 </body>
@@ -4867,6 +5088,10 @@ else if (!hold) {
         "@@SID_JS@@", json.dumps(sid_js)
     ).replace("@@HOLD_JS@@", hold_js).replace("@@RUN_JS@@", run_js).replace(
         "@@ASK_JS@@", "true" if ask else "false"
+    ).replace(
+        "@@GONE_JS@@", script_json(gone)
+    ).replace(
+        "@@HIDDEN_JS@@", "true" if hidden else "false"
     ).replace(
         "@@TITLE@@", html.escape(title)
     ).replace("@@DOC_TITLE@@", html.escape(doc_title)).replace(
@@ -5042,6 +5267,7 @@ class Handler(BaseHTTPRequestHandler):
         # The list page polls this. Unchanged rows cost one short reply.
         _total, sessions = load_sessions(None)
         owners = list_states()
+        sessions = visible_sessions(sessions, getattr(self, "server", None), owners)
         tag = list_rows_tag(sessions, owners)
         if self.headers.get("X-Rows-Tag", "") == tag:
             self.send_response(204)
@@ -5172,7 +5398,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/":
             _total, sessions = load_sessions(None)
-            self._html(dashboard_page(sessions, list_agents(), self.server.cwd_defaults))
+            owners = list_states()
+            sessions = visible_sessions(sessions, getattr(self, "server", None), owners)
+            self._html(dashboard_page(sessions, list_agents(), self.server.cwd_defaults, owners))
             return
         if path == "/list-rows":
             self._list_rows()
@@ -5227,7 +5455,11 @@ class Handler(BaseHTTPRequestHandler):
             # The same folder check /resume makes: only a stopped session it
             # could start gets the resume prompt on load (#52, #43).
             ask = isinstance(saved, dict) and existing_dir(saved.get("cwd"))
-            self._html(chat_page(resume, holder, running, page_title, ask))
+            gone = ""
+            if state["state"] == "folder-missing" and isinstance(saved, dict):
+                gone = folder_missing_text(saved.get("cwd"))
+            hidden = resume in hidden_ids(getattr(self, "server", None))
+            self._html(chat_page(resume, holder, running, page_title, ask, gone, hidden))
             return
         if path in VENDOR_FILES:
             self._vendor(path)
@@ -5239,10 +5471,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if not self._guard(path in ("/take", "/launch", "/resume", "/settings")):
+        if not self._guard(path in ("/take", "/launch", "/resume", "/settings", "/hide")):
             return
         if path == "/settings":
             self._settings()
+            return
+        if path == "/hide":
+            self._hide()
             return
         if path == "/take":
             self._take()
@@ -5479,6 +5714,35 @@ class Handler(BaseHTTPRequestHandler):
             self._change_config(change)
         except (ValueError, OSError) as exc:
             print("could not save last model and effort: %s" % exc, flush=True)
+
+    def _hide(self):
+        # Hide or show a session in the list (#208). Only ergosphere.json
+        # changes; nothing under ~/.grok is moved or deleted.
+        obj = self._json_object()
+        sid = obj.get("id") if obj is not None else None
+        hide = obj.get("hidden") if obj is not None else None
+        if not isinstance(sid, str) or not SID_RE.match(sid) or not isinstance(hide, bool):
+            self._json(400, {"ok": False, "error": "invalid request"})
+            return
+        # Unhide works for any id, so one whose grok files are gone can leave the list.
+        if hide and find_session(sid) is None:
+            self._json(404, {"ok": False, "error": "unknown session"})
+            return
+
+        def change(data):
+            ids = set(data.get("hidden") or ())
+            if hide:
+                ids.add(sid)
+            else:
+                ids.discard(sid)
+            data["hidden"] = sorted(ids)
+        try:
+            self._change_config(change)
+        except (ValueError, OSError) as exc:
+            self._json(500, {"ok": False, "error": ("cannot save: %s" % exc)[:300]})
+            return
+        print("session %s %s" % (sid, "hidden" if hide else "shown"), flush=True)
+        self._json(200, {"ok": True, "id": sid, "hidden": hide})
 
     def _resume(self):
         # The Resume action for a saved session. Host and Origin were checked

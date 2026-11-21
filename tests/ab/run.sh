@@ -13,6 +13,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # A fresh id per run: Ergosphere finds a session's holder machine-wide via
 # /proc, so a fixed id makes concurrent runs on one machine block each other.
 SID="$(cat /proc/sys/kernel/random/uuid)" || exit 2
+# Issue #43: a second saved session whose folder does not exist.
+GONE_SID="$(cat /proc/sys/kernel/random/uuid)" || exit 2
 for v in AB_A_DIR AB_B_DIR AB_PORT_A AB_PORT_B AB_OUT; do
   [ -n "${!v:-}" ] || { echo "run.sh: $v is not set" >&2; exit 2; }
 done
@@ -43,6 +45,9 @@ run_side() { # label code-dir port
   rm -rf "$w"; mkdir -p "$w/home/.grok/sessions/ab/$SID" "$w/work" "$w/bin"
   printf '{"info":{"id":"%s","cwd":"%s"},"generated_title":"AB seeded session","updated_at":"2026-01-01T00:00:00Z"}\n' \
     "$SID" "$w/work" >"$w/home/.grok/sessions/ab/$SID/summary.json"
+  mkdir -p "$w/home/.grok/sessions/ab/$GONE_SID"
+  printf '{"info":{"id":"%s","cwd":"%s"},"generated_title":"AB folder gone","updated_at":"2026-01-01T00:00:00Z"}\n' \
+    "$GONE_SID" "$w/gone" >"$w/home/.grok/sessions/ab/$GONE_SID/summary.json"
   printf '{"bind":"127.0.0.1","port":%s}\n' "$port" >"$w/config.json"
   # argv[0] must be "grok": Ergosphere checks /proc/<pid>/cmdline.
   printf '#!/bin/bash\nexec -a grok python3 -B "%s/fakegrok.py" "$@"\n' "$HERE" >"$w/bin/grok"
@@ -58,7 +63,7 @@ run_side() { # label code-dir port
     sleep 0.1
   done
   grep -q ERGOSPHERE_READY "$w/server.log" || log "$label: server not ready: $(tail -n 3 "$w/server.log")"
-  python3 -B "$HERE/ab.py" http "$port" "$SID" >"$w/http.json" 2>"$w/http.err"
+  python3 -B "$HERE/ab.py" http "$port" "$SID" "$GONE_SID" >"$w/http.json" 2>"$w/http.err"
   if [ -z "$browser_off" ]; then
     brc=0
     NODE_PATH="$pw_path" timeout 300 node "$HERE/browser.js" "$port" "$SID" >"$w/browser.json" 2>"$w/browser.err" || brc=$?
