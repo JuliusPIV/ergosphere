@@ -4297,7 +4297,11 @@ function onPinchMove(ev) {
   var size = clampFontSize(Math.round(pinch.size0 * pinchDist(ev.touches) / pinch.d0));
   if (size === term.options.fontSize) return;
   term.options.fontSize = size;
-  try { fit.fit(); } catch (err) {}
+  // xterm 5.5's cell width is the row width, rounded to a whole pixel, over
+  // the columns it has. Right after a font change those are the old columns,
+  // so the first fit can land one column (or row) short, or 1px over (#117).
+  // The second fit measures at the new size; it does nothing when that agrees.
+  try { fit.fit(); fit.fit(); } catch (err) {}
 }
 function onPinchEnd(ev) {
   if (ev.touches.length >= 2) return;

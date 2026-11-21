@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 
 TITLE = "AB seeded session"
-ORDER = ["health", "session_list", "open_session", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios", "resume_box"]
+ORDER = ["health", "session_list", "open_session", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios", "resume_box", "pinch_fit"]
 HTTP_CHECKS = ("health", "session_list", "open_session")
 
 
