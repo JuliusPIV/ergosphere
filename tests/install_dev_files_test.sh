@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # install.sh installs only what the server needs: the developer files a
 # release archive also holds (tests/, docs/, .ghflow*, .git*, install.sh) stay
-# out of the install dir (#97). The archive is `git archive HEAD`, what GitHub
-# serves for a tag. /health still reports the runtime fingerprint and a rerun
-# changes nothing.
+# out of the install dir (#97). The package is the checkout packed as a
+# release archive, developer files included. /health still reports the
+# runtime fingerprint and a rerun changes nothing.
 #
 # Run: ERGOSPHERE_TEST_PORT=<spare port> bash tests/install_dev_files_test.sh
 # No network: the package is served from 127.0.0.1 and grok is a stub that
@@ -27,7 +27,11 @@ ok() { echo "ok:   $1"; }
 bad() { echo "FAIL: $1"; fail=1; }
 
 mkdir -p "$work/bin" "$work/www" "$work/userhome"
-git -C "$repo" archive --format=tar.gz --prefix=ergosphere-test/ -o "$work/www/src.tar.gz" HEAD || exit 1
+# A tar of the checkout, not git archive: the test sandbox has no git.
+mkdir -p "$work/pkg"
+tar -c -C "$repo" --exclude=.git --exclude=__pycache__ --transform 's|^\.|ergosphere-test|' . |
+  tar -x -C "$work/pkg" || exit 1
+tar -czf "$work/www/src.tar.gz" -C "$work/pkg" ergosphere-test || exit 1
 listing=$(tar -tzf "$work/www/src.tar.gz")
 # Without developer files in the archive this test would prove nothing.
 for want in ergosphere-test/tests/run_all.sh ergosphere-test/install.sh ergosphere-test/.ghflow.conf; do
