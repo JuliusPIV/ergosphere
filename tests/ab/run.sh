@@ -86,6 +86,13 @@ for side in A B; do
   python3 -B "$HERE/slow_start.py" run "${!dir}" "${!port}" "$AB_OUT/slow-$side" >"$AB_OUT/slow-$side.json" 2>"$AB_OUT/slow-$side.err"
 done
 python3 -B "$HERE/slow_start.py" summary "$AB_OUT/slow-A.json" "$AB_OUT/slow-B.json" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #132: a stop signal landing while the main thread holds a lock, on each side's port again.
+for side in A B; do
+  dir=AB_${side}_DIR port=AB_PORT_${side}
+  log "$side: stop signal check on ${!port}"
+  python3 -B "$HERE/sigterm_lock.py" run "${!dir}" "${!port}" >"$AB_OUT/sigterm-$side.json" 2>"$AB_OUT/sigterm-$side.err"
+done
+python3 -B "$HERE/sigterm_lock.py" summary "$AB_OUT/sigterm-A.json" "$AB_OUT/sigterm-B.json" >>"$AB_OUT/summary.txt" || rc=1
 cat "$AB_OUT/summary.txt"
 [ -s "$AB_OUT/summary.txt" ] || exit 1
 exit "$rc"
