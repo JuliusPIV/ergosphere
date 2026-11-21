@@ -261,26 +261,33 @@ for pid in sorted((p for p in os.listdir("/proc") if p.isdigit()), key=int):
         pass' "$1" 2>/dev/null </dev/null || true
 }
 
+# True when BIND is 0.0.0.0 and the port is held on another address (say
+# 127.0.0.2) by something other than this install's server: probe asks only
+# 127.0.0.1, so bind the wildcard as the server does (#150).
+wild_busy() {
+  [[ "$BIND" == 0.0.0.0 ]] || return 1
+  "$PYTHON" -I -c '
+import socket, sys
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("0.0.0.0", int(sys.argv[1])))' "$PORT" 2>/dev/null </dev/null && return 1
+  ! find_own | awk -v p="$PORT" '$2 == p { f = 1 } END { exit !f }'
+}
+
 # True when BIND:PORT answers and is not this install's server. Sets HELD_BY.
 port_taken() {
   local h
   probe "$BIND" "$PORT"
   case "$PROBE" in
-    down) return 1 ;;
+    down) wild_busy || return 1 ;;
     match|moved)
       probe_script
       [[ "$PROBE_SCRIPT" != "$(realpath -m -- "$DEST/ergosphere.py")" ]] || return 1
-      HELD_BY="an Ergosphere installed in ${PROBE_SCRIPT%/ergosphere.py} (pid $PROBE_PID)" ;;
-    *)
-      # other with a holder pid: the bind 0.0.0.0 test found it (#150). When that
-      # holder is this install's own server, the port is free for it to move to.
-      if [[ -n "$PROBE_PID" ]]; then
-        probe_script
-        [[ "$PROBE_SCRIPT" != "$(realpath -m -- "$DEST/ergosphere.py")" ]] || return 1
-      fi
-      h=$(port_holder "$PORT")
-      if [[ -n "$h" ]]; then HELD_BY="pid ${h%% *} (${h#* })"; else HELD_BY="a program this user cannot see"; fi ;;
+      HELD_BY="an Ergosphere installed in ${PROBE_SCRIPT%/ergosphere.py} (pid $PROBE_PID)"
+      return 0 ;;
   esac
+  h=$(port_holder "$PORT")
+  if [[ -n "$h" ]]; then HELD_BY="pid ${h%% *} (${h#* })"; else HELD_BY="a program this user cannot see"; fi
   return 0
 }
 
@@ -327,17 +334,6 @@ probe() {
   out=$("$CURL" --noproxy '*' -s --max-time 3 "http://${host}:${2}/health") || rc=$?
   if [[ "$rc" -eq 7 ]]; then
     PROBE=down
-    # 127.0.0.1 refused, but 0.0.0.0 also needs the port free on every other
-    # address (#150): bind it as the server does. A holder this user can see
-    # gives PROBE_PID, so this install's own server still counts as itself.
-    if [[ "$1" == 0.0.0.0 ]] && ! "$PYTHON" -I -c '
-import socket, sys
-s = socket.socket()
-s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(("0.0.0.0", int(sys.argv[1])))' "$2" 2>/dev/null </dev/null; then
-      PROBE=other PROBE_PID=$(port_holder "$2")
-      PROBE_PID=${PROBE_PID%% *}
-    fi
   elif [[ "$rc" -eq 0 ]] && info=$(printf '%s' "$out" | "$PYTHON" -I -c '
 import json, re, sys
 d = json.load(sys.stdin)
@@ -399,9 +395,6 @@ for pid in sorted((p for p in os.listdir("/proc") if p.isdigit()), key=int):
 # sessions kept it running. Sets PROBE=moved and PROBE_AT when one answers.
 probe_own() {
   local info b p pid
-  # other with no holder pid means a program answered on the configured address
-  # and it is not Ergosphere: it is not ours to move, so the check must block (#150).
-  if [[ "$PROBE" == other && -z "$PROBE_PID" ]]; then return 0; fi
   info=$(find_own)
   [[ -n "$info" ]] || return 0
   read -r b p pid <<<"$info"
@@ -652,9 +645,9 @@ socket.socket().bind((sys.argv[1], 0))' "$BIND" 2>/dev/null; then
   if [[ "$old" -eq 0 || "$OLD_PORT" != "$PORT" ]]; then
     probe "$BIND" "$PORT"
     # With old=1 this install's server was already found and reported above.
-    # other with a PROBE_PID: a bind 0.0.0.0 test found a listener, which may be this install's server on an unconfigured address (#150).
-    if [[ ( "$PROBE" == down || "$PROBE" == other ) && "$old" -eq 0 ]]; then probe_own; fi
+    if [[ "$PROBE" == down && "$old" -eq 0 ]]; then probe_own; fi
     if [[ "$PROBE" == match || "$PROBE" == moved ]]; then same_install; fi
+    if [[ "$PROBE" == down || "$PROBE" == moved ]] && wild_busy; then PROBE=other; fi
     case "$PROBE" in
       match) row ok server "Ergosphere from this dir already running on ${BIND}:${PORT}, pid $PROBE_PID" ;;
       moved) row ok server "Ergosphere from this dir running on ${PROBE_AT}, pid $PROBE_PID; it moves to ${BIND}:${PORT}" ;;
@@ -850,7 +843,7 @@ start_server() {
   SRV_BIND=$BIND SRV_PORT=$PORT
   probe "$OLD_BIND" "$OLD_PORT"
   if [[ "$PROBE" != match && "$PROBE" != moved ]] && ! same_addr "$OLD_BIND:$OLD_PORT" "$BIND:$PORT"; then probe "$BIND" "$PORT"; fi
-  if [[ "$PROBE" == down || "$PROBE" == other ]]; then probe_own; fi
+  if [[ "$PROBE" == down ]]; then probe_own; fi
   if [[ "$PROBE" == match || "$PROBE" == moved ]]; then
     same_install
     PID=$PROBE_PID

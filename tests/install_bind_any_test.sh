@@ -7,15 +7,17 @@
 # (its own socket must not count as another program).
 #
 # Run: ERGOSPHERE_TEST_PORT=<spare port> bash tests/install_bind_any_test.sh
-# Uses that port and the next three. No network: the package is served from
+# Uses that port and the next five. No network: the package is served from
 # 127.0.0.1 and grok is a stub that only answers --version. Every server it
 # starts is stopped at the end.
 set -u
 repo=$(cd "$(dirname "$0")/.." && pwd)
-port=${ERGOSPHERE_TEST_PORT:-$(python3 -I "$repo/tests/free_port.py" 4)} || exit 1
+port=${ERGOSPHERE_TEST_PORT:-$(python3 -I "$repo/tests/free_port.py" 6)} || exit 1
 own=$((port + 1))
 moved_own=$((port + 2))
 held_own=$((port + 3))
+far_own=$((port + 4))
+far_other=$((port + 5))
 work=$(mktemp -d "${TMPDIR:-/tmp}/ergosphere-bind-any-test.XXXXXX")
 pids=()
 fail=0
@@ -178,6 +180,45 @@ else
 fi
 if [[ -n "$old" ]] && kill -0 "$old" 2>/dev/null; then
   ok "own server pid $old on 127.0.0.2:$held_own was not stopped"
+else
+  bad "own server pid ${old:-none} is gone"
+fi
+
+# 5. This install's server runs on 127.0.0.2:$far_own while the saved bind
+# says 127.0.0.1 (no restart after Settings), and another program holds
+# 127.0.0.2:$far_other. A move to 0.0.0.0:$far_other must stop at check:
+# finding this install's server on another port must not hide that program.
+out=$(run_install "$work/u/far" --bind 127.0.0.2 --port "$far_own")
+old=$(field pid "$out")
+if [[ -n "$old" ]]; then pids+=("$old"); fi
+python3 -I -c '
+import json, sys
+p = sys.argv[1] + "/ergosphere.json"
+d = json.load(open(p))
+d["bind"] = "127.0.0.1"
+json.dump(d, open(p, "w"))' "$work/u/far" </dev/null
+before=$(cat "$work/u/far/ergosphere.json")
+python3 -I -c '
+import http.server, sys
+class Quiet(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self): self.send_error(404)
+s = http.server.HTTPServer(("127.0.0.2", int(sys.argv[1])), Quiet)
+open(sys.argv[2], "w").write("up")
+s.serve_forever()' "$far_other" "$work/far-other.up" </dev/null >/dev/null 2>&1 &
+pids+=($!)
+for _ in $(seq 50); do [[ -s "$work/far-other.up" ]] && break; sleep 0.1; done
+[[ -s "$work/far-other.up" ]] || { bad "could not start the other program on 127.0.0.2:$far_other"; exit 1; }
+rc=0
+out=$(run_install "$work/u/far" --bind 0.0.0.0 --port "$far_other") || rc=$?
+if [[ "$rc" -ne 0 ]] && grep -q '^failed at check' <<<"$out" && [[ "$(cat "$work/u/far/ergosphere.json")" == "$before" ]]; then
+  ok "own server on 127.0.0.2:$far_own, other on 127.0.0.2:$far_other: failed at check, config unchanged"
+else
+  bad "own server elsewhere, other on 127.0.0.2:$far_other: exit $rc, want failed at check with config unchanged"
+  printf '%s\n' "$out" | tail -n 15
+fi
+if [[ -n "$old" ]] && kill -0 "$old" 2>/dev/null; then
+  ok "own server pid $old on 127.0.0.2:$far_own was not stopped"
 else
   bad "own server pid ${old:-none} is gone"
 fi
