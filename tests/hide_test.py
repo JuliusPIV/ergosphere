@@ -91,7 +91,8 @@ def list_html(erg, server):
 
 def list_tag(erg, server, owners=None):
     sessions = erg.load_sessions(None)[1]
-    visible = erg.visible_sessions(sessions, server, owners or {})
+    # Base code has no visible_sessions: fall back so the test reports what is missing.
+    visible = getattr(erg, "visible_sessions", lambda rows, srv, own: rows)(sessions, server, owners or {})
     return erg.list_rows_tag(visible, owners=owners or {})
 
 
