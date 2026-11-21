@@ -10,7 +10,7 @@
 # starting "SKIP" or "skip:" counts as skipped in the final line.
 # Browser tests get NODE_PATH (playwright) and ERGO_CHROME, found as
 # tests/ab/run.sh finds them: NODE_PATH, `npm root -g`, /usr/local/lib/*/node_modules;
-# ERGO_CHROME, AB_CHROME, then google-chrome, chromium, chromium-browser.
+# ERGO_CHROME, AB_CHROME, then google-chrome, chromium, chromium-browser, /usr/bin/google-chrome (the tests' own default).
 # --require-browser (the review gate's TEST_CMD passes it): fail, after running
 # every test, when node, playwright or the browser is missing, so browser tests
 # cannot pass the gate by skipping (#147).
@@ -33,7 +33,7 @@ for d in "$(npm root -g 2>/dev/null)" /usr/local/lib/*/node_modules; do
 done
 [ -n "$pw_path" ] && export NODE_PATH="$pw_path"
 if [ -z "${ERGO_CHROME:-}" ]; then
-  for c in "${AB_CHROME:-}" google-chrome chromium chromium-browser; do
+  for c in "${AB_CHROME:-}" google-chrome chromium chromium-browser /usr/bin/google-chrome; do
     [ -n "$c" ] && ERGO_CHROME="$(command -v "$c" 2>/dev/null)" && break
   done
 fi
