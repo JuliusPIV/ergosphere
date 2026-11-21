@@ -1187,9 +1187,39 @@ def existing_dir(path):
     return os.path.isdir(path)
 
 
+# A stat on a hung mount never returns. GET / and the 4 s /list-rows poll call
+# folder_missing, so wait only this long; a slow folder reads as present. One
+# check per folder is outstanding at a time, so polls do not pile up threads.
+FOLDER_CHECK_WAIT = 0.5
+folder_checks = {}
+folder_checks_lock = threading.Lock()
+
+
 def folder_missing(cwd):
     # A saved session whose folder was deleted: Resume can never start it (#43).
-    return isinstance(cwd, str) and bool(cwd) and not existing_dir(cwd)
+    if not (isinstance(cwd, str) and cwd):
+        return False
+    with folder_checks_lock:
+        check = folder_checks.get(cwd)
+        fresh = check is None
+        if fresh:
+            check = {"done": threading.Event(), "exists": False}
+            folder_checks[cwd] = check
+            threading.Thread(target=check_folder, args=(cwd, check), daemon=True).start()
+    # A check already outstanding is not waited on again: 50 rows on one stuck
+    # folder cost one wait, not fifty.
+    if check["done"].wait(FOLDER_CHECK_WAIT if fresh else 0):
+        return not check["exists"]
+    return False
+
+
+def check_folder(cwd, check):
+    try:
+        check["exists"] = existing_dir(cwd)
+    finally:
+        check["done"].set()
+        with folder_checks_lock:
+            folder_checks.pop(cwd, None)
 
 
 def one_query(qs, key):
