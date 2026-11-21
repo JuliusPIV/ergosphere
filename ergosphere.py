@@ -4583,11 +4583,6 @@ document.addEventListener("mouseup", function (ev) {
   if (!bytes || ended || stopping || !sock || sock.readyState !== 1) return;
   sock.send(new TextEncoder().encode(bytes));
 }, true);
-function setStatus(text, active) {
-  var el = document.getElementById("status");
-  el.textContent = text;
-  el.style.color = active ? "#00ff00" : "";
-}
 // A link grok was asked to open (#34). Only http and https, never this
 // server. A tab opens only right after a mouse click in the terminal: any
 // process under grok can ask for a link, and a key press also counts as user
@@ -4621,6 +4616,11 @@ function openLink(u) {
   box.textContent = " | Link: ";
   box.appendChild(a);
   box.hidden = false;
+}
+function setStatus(text, active) {
+  var el = document.getElementById("status");
+  el.textContent = text;
+  el.style.color = active ? "#00ff00" : "";
 }
 function setTitle(text) {
   var el = document.getElementById("title");
