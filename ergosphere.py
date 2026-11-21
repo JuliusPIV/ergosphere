@@ -11,6 +11,7 @@ Bytes both ways are a WebSocket. There is no grok agent serve child.
 
 import argparse
 import base64
+import contextlib
 import copy
 from datetime import datetime, timedelta, timezone
 import errno
@@ -1611,6 +1612,15 @@ def resize_pty(master, proc, cols, rows):
             pass
 
 
+def close_fd(fd):
+    if fd < 0:
+        return
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
 def write_master(master, data):
     view = data
     while view:
@@ -1636,7 +1646,11 @@ class Live:
         self.lock = threading.Lock()
         self.write_lock = threading.Lock()
         # master is the fd, or -1 once closed; only _close_master changes it.
+        # fd_users counts calls between taking the fd and ending their syscall
+        # (_master_fd); a close they would race waits in fd_doomed (#227).
         self.fd_lock = threading.Lock()
+        self.fd_users = 0
+        self.fd_doomed = -1
         self.reader = None
         self.watcher = None
         self.closed = False
@@ -1799,14 +1813,16 @@ class Live:
             if self.proc.poll() is not None or self.closed:
                 return
             try:
-                write_master(self.master, data)
+                with self._master_fd() as fd:
+                    write_master(fd, data)
             except OSError:
                 if self.proc.poll() is not None or self.closed:
                     return
                 raise
 
     def resize(self, cols, rows):
-        resize_pty(self.master, self.proc, cols, rows)
+        with self._master_fd() as fd:
+            resize_pty(fd, self.proc, cols, rows)
 
     def repaint(self, cols, rows):
         # The replay is only an approximation of the screen: it can be trimmed,
@@ -1815,9 +1831,9 @@ class Live:
         # step one row away and back to make it clear and paint every cell.
         rows = dim_arg(str(rows), 24)
         bump = rows - 1 if rows > 1 else rows + 1
-        resize_pty(self.master, self.proc, cols, bump)
+        self.resize(cols, bump)
         time.sleep(REPAINT_PAUSE)
-        resize_pty(self.master, self.proc, cols, rows)
+        self.resize(cols, rows)
 
     def _read(self):
         hold = b""
@@ -1833,7 +1849,8 @@ class Live:
                         break
                     continue
                 try:
-                    data = os.read(self.master, 32768)
+                    with self._master_fd() as fd:
+                        data = os.read(fd, 32768)
                 except OSError:
                     if self.proc.poll() is not None or self.closed:
                         break
@@ -1992,14 +2009,31 @@ class Live:
         # shutdown and the reader's exit both get here. A second os.close
         # would close whatever file reused the number since (#218); the -1
         # also keeps a later read off that file.
+        # A call still using the fd (_master_fd) keeps the number open
+        # until it ends, so nothing can reuse it under that call.
         with self.fd_lock:
             fd, self.master = self.master, -1
-        if fd < 0:
-            return
+            if fd >= 0 and self.fd_users:
+                fd, self.fd_doomed = -1, fd
+        close_fd(fd)
+
+    @contextlib.contextmanager
+    def _master_fd(self):
+        # The fd for one syscall, or -1 once closed. The lock is held only to
+        # take and give back the fd, never across the call: a write blocked
+        # on a full PTY must not hold up shutdown (#227).
+        with self.fd_lock:
+            fd = self.master
+            self.fd_users += 1
         try:
-            os.close(fd)
-        except OSError:
-            pass
+            yield fd
+        finally:
+            with self.fd_lock:
+                self.fd_users -= 1
+                doomed = -1
+                if not self.fd_users:
+                    doomed, self.fd_doomed = self.fd_doomed, -1
+            close_fd(doomed)
 
     def _release_on_exit(self):
         # grok outlived the kill: the entry stays (state stopping) until grok
