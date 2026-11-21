@@ -796,7 +796,9 @@ check_writes() {
     # new sizes would refuse an upgrade that replaces the files one at a time.
     dir="$DEST/$rel"
     existing_up "${dir%/*}"; up=$UP
-    dev=$(stat -c %d -- "$up")
+    # -L: a folder symlink (vendor/) must report its target's filesystem, the one
+    # df and the copy use. Without it stat reports the link's own filesystem.
+    dev=$(stat -L -c %d -- "$up")
     new=$(blocks_kib "$SRC/$rel")
     old=0
     if [[ -e "$DEST/$rel" ]]; then old=$(blocks_kib "$DEST/$rel"); fi

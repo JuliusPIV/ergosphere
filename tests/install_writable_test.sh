@@ -195,6 +195,34 @@ else
   printf '%s\n' "$out" | tail -n 8
 fi
 
+# The same symlinked vendor/ with its filesystem full and the install dir's
+# roomy. The copy must be charged to vendor/'s filesystem, so the gate refuses.
+# The symlink's own device is not the target's, so this needs a real second
+# filesystem; /dev/shm is one on Linux. Skipped where there is none.
+shm=/dev/shm
+if [[ -d "$shm" && -w "$shm" && "$(stat -c %d "$shm")" != "$(stat -c %d "$work")" ]]; then
+  vt=$(mktemp -d "$shm/ergosphere-vendorfs.XXXXXX")
+  h="$work/symfull"
+  mkdir -p "$h/app" "$h/state" "$work/dffull"
+  cp -p "$d/ergosphere.py" "$d/LICENSE" "$h/app/"
+  cp -rp "$d/vendor/." "$vt/"
+  ln -s "$vt" "$h/app/vendor"
+  echo "/* older release */" >>"$vt/xterm.js"
+  # A file in the install dir changes too: both files then share one device
+  # group, and only the vendor copy's filesystem is full.
+  echo "# older release" >>"$h/app/ergosphere.py"
+  # Stub df, as real df does, follows symlinks: the full filesystem has 1 KiB,
+  # every other path has plenty.
+  # shellcheck disable=SC2016  # the stub's $p and $r are expanded by the stub
+  printf '#!/bin/sh\nfor p; do :; done\nr=$(realpath -- "$p")\ncase "$r" in\n  %s|%s/*) a=1 ;;\n  *) a=99999999 ;;\nesac\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/x 100 99 $a 1%% /"\n' "$vt" "$vt" >"$work/dffull/df"
+  chmod +x "$work/dffull/df"
+  out=$(inst "$h" "$h/state/ergosphere.json" "$work/dffull" --check); rc=$?
+  expect_blocked "vendor/ on a full filesystem behind a symlink" "$h/app/vendor has 1 KiB free, the release needs" "$rc" "$out"
+  rm -rf -- "$vt"
+else
+  echo "skip: no second filesystem at $shm for the full vendor/ symlink case"
+fi
+
 # A writable config folder whose name ends in a newline (no folder of the name
 # without it) passes: the nearest-parent walk keeps the name intact.
 h="$work/nlcfg"
