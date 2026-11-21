@@ -1068,9 +1068,15 @@ def check_config(data, label):
     return out
 
 
-def visible_sessions(sessions, config):
+def hidden_ids(server):
+    # A server built without a config (some tests) hides nothing.
+    config = getattr(server, "config", None)
+    return set(config.get("hidden") or ()) if isinstance(config, dict) else set()
+
+
+def visible_sessions(sessions, server):
     # The list leaves out sessions hidden in Settings; a live one still shows.
-    hidden = set(config.get("hidden") or ())
+    hidden = hidden_ids(server)
     return [row for row in sessions if row["id"] not in hidden]
 
 
@@ -3849,6 +3855,7 @@ el("restart").addEventListener("click", function () {
 function renderHidden() {
   var body = el("hidden");
   var i, tr, td, link, btn;
+  if (!state.hidden) state.hidden = [];
   body.textContent = "";
   for (i = 0; i < state.hidden.length; i++) {
     tr = document.createElement("tr");
@@ -5217,7 +5224,7 @@ class Handler(BaseHTTPRequestHandler):
     def _list_rows(self):
         # The list page polls this. Unchanged rows cost one short reply.
         _total, sessions = load_sessions(None)
-        sessions = visible_sessions(sessions, self.server.config)
+        sessions = visible_sessions(sessions, getattr(self, "server", None))
         owners = list_states()
         tag = list_rows_tag(sessions, owners)
         if self.headers.get("X-Rows-Tag", "") == tag:
@@ -5349,7 +5356,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/":
             _total, sessions = load_sessions(None)
-            sessions = visible_sessions(sessions, self.server.config)
+            sessions = visible_sessions(sessions, getattr(self, "server", None))
             self._html(dashboard_page(sessions, list_agents(), self.server.cwd_defaults))
             return
         if path == "/list-rows":
@@ -5408,7 +5415,7 @@ class Handler(BaseHTTPRequestHandler):
             gone = ""
             if state["state"] == "folder-missing" and isinstance(saved, dict):
                 gone = folder_missing_text(saved.get("cwd"))
-            hidden = resume in (self.server.config.get("hidden") or ())
+            hidden = resume in hidden_ids(getattr(self, "server", None))
             self._html(chat_page(resume, holder, running, page_title, ask, gone, hidden))
             return
         if path in VENDOR_FILES:
