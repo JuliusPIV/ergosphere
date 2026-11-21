@@ -15,7 +15,7 @@ import urllib.request
 from pathlib import Path
 
 TITLE = "AB seeded session"
-ORDER = ["vendor_listed", "health", "session_list", "open_session", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios", "resume_box"]
+ORDER = ["vendor_listed", "health", "session_list", "open_session", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios", "resume_box", "input_latency"]
 # Checks that do not come from browser.js (HTTP and the vendor manifest).
 HTTP_CHECKS = ("vendor_listed", "health", "session_list", "open_session")
 
@@ -99,6 +99,37 @@ def side(dirname):
     return checks, server.get("info") or {}, browser
 
 
+# B is slow when its median wheel round trip is over both the floor and
+# SLOW_RATIO times A's, measured in the same run on the same host (#151).
+# A median of several samples, never one reading: one slow sample under load
+# does not move it, and the ratio absorbs a host that slows both sides.
+SLOW_FLOOR_MS = 2000
+SLOW_RATIO = 3
+
+
+def median(xs):
+    xs = sorted(x for x in xs if isinstance(x, (int, float)))
+    return xs[len(xs) // 2] if xs else None
+
+
+def timing(abrowser, bbrowser, b):
+    """Time-to-condition lines for the summary.  Marks B's input_latency
+    failed when B is much slower than A, so the table reports a regression."""
+    ams, bms = abrowser.get("ms") or {}, bbrowser.get("ms") or {}
+    cells = ["%s %s/%s" % (n, ams.get(n, "-"), bms.get(n, "-")) for n in ORDER if n in ams or n in bms]
+    lines = []
+    if cells:
+        lines.append("time to condition, ms A/B: " + ", ".join(cells))
+    ma, mb = median(abrowser.get("latency") or []), median(bbrowser.get("latency") or [])
+    if ma is None or mb is None:
+        return lines
+    limit = max(SLOW_FLOOR_MS, SLOW_RATIO * ma)
+    lines.append("input_latency median ms: A=%s B=%s (B fails over %s)" % (ma, mb, limit))
+    if mb > limit and (b.get("input_latency") or {}).get("ok"):
+        b["input_latency"] = check(False, "slow: median %sms, A %sms" % (mb, ma))
+    return lines
+
+
 def summary(adir, bdir):
     a, ainfo, abrowser = side(adir)
     b, binfo, bbrowser = side(bdir)
@@ -109,6 +140,7 @@ def summary(adir, bdir):
     else:
         why = lambda r: str(r.get("browser") and "ran" or r.get("unavailable") or r.get("error") or "no result")
         lines.append("BROWSER CHECKS DID NOT RUN (A: %s; B: %s)" % (why(abrowser)[:150], why(bbrowser)[:150]))
+    lines.extend(timing(abrowser, bbrowser, b))
     # No browser on this host is a warning; a browser.js that breaks on B, or
     # that ran but left out a page check in ORDER, fails the run.  Both sides
     # run B's browser.js, so a check dropped there is missing on A too:

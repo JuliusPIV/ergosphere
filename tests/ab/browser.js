@@ -14,6 +14,15 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
 const STATUS = /off=(\d+)\/(\d+) size=(\d+)x(\d+) n=(\d+) last=(\w+) \$/;
 const check = (ok, value) => ({ok: !!ok, value: String(value).slice(0, 60)});
 
+// Time to condition (#151): every wait adds its time to the check that is
+// running (timing.now), shown beside the checks in the summary.  One reading
+// per check is only shown; input_latency repeats a round trip and ab.py
+// compares the two sides' medians.
+const timing = {now: '', ms: {}};
+const timed = name => { timing.now = name; timing.ms[name] = 0; };
+const waited = t0 => { if (timing.now) timing.ms[timing.now] += Date.now() - t0; };
+const LATENCY_SAMPLES = 7;
+
 // Counts the SGR wheel reports the page sends to grok, so a check can wait
 // until the stand-in has handled all of them.
 function countWheelReports() {
@@ -50,9 +59,10 @@ const caughtUp = from => s => fitted(s) && s.sent > from.sent && s.n - from.n ==
 // Polls until pred holds or WAIT runs out; returns the last reading and
 // whether pred held, so a failed check can say what it saw.
 async function until(p, pred) {
-  const end = Date.now() + WAIT;
+  const t0 = Date.now(), end = t0 + WAIT;
   let s = await status(p);
   while (!pred(s) && Date.now() < end) { await wait(50); s = await status(p); }
+  waited(t0);
   return {s, met: pred(s)};
 }
 const seen = s => `saw "${s.text.slice(0, 30)}" page ${s.termRows}x${s.termCols} sent ${s.sent}`;
@@ -142,9 +152,10 @@ async function resumeBoxCheck(b) {
       status: document.getElementById('status').textContent,
       box: !document.getElementById('resume-ask').hidden}));
     const pageUntil = async pred => {
-      const end = Date.now() + WAIT;
+      const t0 = Date.now(), end = t0 + WAIT;
       let r = await page();
       while (!pred(r) && Date.now() < end) { await wait(50); r = await page(); }
+      waited(t0);
       return {r, met: pred(r)};
     };
     await p.click('#stop');
@@ -162,6 +173,31 @@ async function resumeBoxCheck(b) {
   }
 }
 
+// One wheel notch, alternately up and down so the view stays put, until
+// the stand-in has handled it; LATENCY_SAMPLES times.  Returns the check
+// and each round trip in ms.  Stops at the first round trip that never
+// completes.
+async function latencyCheck(b) {
+  const ctx = await b.newContext({viewport: {width: 1280, height: 800}});
+  try {
+    let {p, s, met} = await openPage(ctx);
+    if (!met) return {c: check(false, `no grok view at page size: ${seen(s)}`), samples: []};
+    const g = await screen(p);
+    await p.mouse.move(g.x + g.w / 2, g.y + g.h / 2);
+    const samples = [];
+    for (let i = 0; i < LATENCY_SAMPLES; i++) {
+      const from = s, t0 = Date.now();
+      await p.mouse.wheel(0, i % 2 ? 100 : -100);
+      ({s, met} = await until(p, caughtUp(from)));
+      if (!met) return {c: check(false, `notch ${i + 1} not handled: ${seen(s)}`), samples};
+      samples.push(Date.now() - t0);
+    }
+    return {c: check(true, `${samples.length} wheel round trips handled`), samples};
+  } finally {
+    await ctx.close();
+  }
+}
+
 async function run() {
   const exe = process.env.AB_CHROME || undefined;
   let b;
@@ -172,6 +208,7 @@ async function run() {
   }
   const checks = {};
   try {
+    timed('terminal');
     let ctx = await b.newContext({viewport: {width: 1280, height: 800}});
     let {p, s, met} = await openPage(ctx);
     checks.terminal = check(met, met ? `grok drawn at ${s.rows}x${s.cols}` : `no grok view at page size: ${seen(s)}`);
@@ -180,6 +217,7 @@ async function run() {
     const g = await screen(p);
     await p.mouse.move(g.x + g.w / 2, g.y + g.h / 2);
     const before = s;
+    timed('wheel_scroll');
     for (let i = 0; i < 3; i++) await p.mouse.wheel(0, -100);
     ({s, met} = await until(p, caughtUp(before)));
     checks.wheel_scroll = check(met && s.off < before.off,
@@ -199,6 +237,7 @@ async function run() {
       await p.mouse.up();
     }
     const fromOff = s.off;
+    timed('bar_drag');
     await barDrag(low, high);
     ({s, met} = await until(p, x => fitted(x) && x.last === 'release' && x.off <= x.max / 20));
     checks.bar_drag = check(met, `bar to top: off ${fromOff}->${s.off} of ${s.max} last=${s.last}`);
@@ -210,12 +249,14 @@ async function run() {
     }
 
     const r0 = s.rows, c0 = s.cols;
+    timed('resize');
     await p.setViewportSize({width: 900, height: 600});
     ({s, met} = await until(p, x => fitted(x) && (x.rows !== r0 || x.cols !== c0)));
     checks.resize = check(met, met ? `${r0}x${c0}->${s.termRows}x${s.termCols} grok ${s.rows}x${s.cols}`
                                    : `${r0}x${c0}-> ${seen(s)}`);
     await ctx.close();
 
+    timed('touch_scroll');
     ctx = await b.newContext({viewport: {width: 412, height: 839}, hasTouch: true, isMobile: true, deviceScaleFactor: 2});
     ({p, s, met} = await openPage(ctx));
     if (!met) {
@@ -240,14 +281,20 @@ async function run() {
     checks.touch_scroll = check(met && s.off < tb.off,
       met ? `drag down 300px: moved ${s.off - tb.off}` : `not handled: ${seen(s)}`);
     await ctx.close();
+    timed('keyboard_android');
     checks.keyboard_android = await keyboardCheck(b, 'Pixel 7', 320, false);
+    timed('keyboard_ios');
     checks.keyboard_ios = await keyboardCheck(b, 'iPhone 14', 300, true);
-    // Last: it quits and resumes the session the other checks share.
+    // It quits and resumes the session the other checks share.
+    timed('resume_box');
     checks.resume_box = await resumeBoxCheck(b);
-    return {browser: b.version(), checks};
+    timed('input_latency');
+    const lat = await latencyCheck(b);
+    checks.input_latency = lat.c;
+    return {browser: b.version(), checks, latency: lat.samples};
   } finally {
     await b.close();
   }
 }
 
-run().then(r => console.log(JSON.stringify(r)), e => console.log(JSON.stringify({error: String(e && e.message || e).split('\n')[0]})));
+run().then(r => console.log(JSON.stringify(r.checks ? {...r, ms: timing.ms} : r)), e => console.log(JSON.stringify({error: String(e && e.message || e).split('\n')[0]})));
