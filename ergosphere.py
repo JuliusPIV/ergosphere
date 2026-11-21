@@ -4682,9 +4682,9 @@ function connect() {
           setStatus(msg.text, false);
           if (msg.text === "session is already running") {
             hold = true;
-            // A Quit pressed before this frame had nothing to quit: plain held,
-            // so pollHold still sees the holder exit.
-            stopping = false;
+            // A Quit pressed before this frame stays asked (stopping): onclose ends
+            // the page, and a Resume reply that still starts grok here (the holder
+            // exited meanwhile) connects with stopping, so onopen quits it.
             syncStop();
             waitGen += 1;
             if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; }

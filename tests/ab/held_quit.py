@@ -26,6 +26,8 @@ ORDER = [
     "load_no_quit", "load_ends",
     "resume_no_quit", "resume_ends",
     "pending_not_stuck", "pending_ends",
+    "late_not_stuck", "late_ends",
+    "latepoll_not_stuck", "latepoll_ends",
     "take_quit_back", "take_quit_ends",
     "refused_no_quit", "refused_ends",
     "tabs_no_quit", "tabs_end",
@@ -94,6 +96,52 @@ async function endsAfterHolder(p, pid, name) {
   ck(name, isEnded(s), show(s));
 }
 
+// Resume, then Quit before the /resume reply (held back by page.route). Then:
+// reply_first: the reply, then the holder exits; holder_first: the holder exits
+// and the page shows Ended, then the reply; reply_before_poll: /holder is held
+// back too, the holder exits, the reply arrives, then /holder answers.
+// Quit was pressed, so the page ends and this server runs no grok for it.
+async function pending(page, sid, order, name) {
+  const p = await page();
+  await p.goto(chatUrl(sid));
+  await until(p, s => s.bar === 'Resume');
+  const pid = await holdStart(sid);
+  let release = null;
+  const caught = new Promise(r => {
+    p.route('**/resume', route => { release = () => route.continue(); r(); });
+  });
+  const stalled = [];
+  if (order === 'reply_before_poll') await p.route('**/holder*', route => { stalled.push(route); });
+  await p.click('#stop');
+  await caught;
+  await p.click('#stop');
+  let s = await until(p, s => s.status !== 'quitting' && s.status !== 'starting', END_WAIT);
+  ck(name + '_not_stuck', s.status !== 'quitting' && !(isHeld(s) && s.quit), show(s));
+  const replied = p.waitForResponse(r => r.url().includes('/resume'));
+  if (order === 'reply_first') {
+    release();
+    await replied;
+    await holdEnd(pid);
+  } else {
+    await holdEnd(pid);
+    await waitFor(async () => (await holdFetch('/session-info?id=' + sid)).state === 'stopped');
+    if (order === 'holder_first') await until(p, isEnded, END_WAIT);
+    release();
+    await replied;
+    if (order === 'reply_before_poll') {
+      await p.unroute('**/holder*');
+      for (const route of stalled) await route.continue();
+    }
+  }
+  s = await until(p, isEnded, END_WAIT);
+  const here = await waitFor(async () => {
+    const d = await (await fetch(pageBase + '/session-info?id=' + sid)).json();
+    return d.state === 'stopped' ? d.state : null;
+  }, END_WAIT);
+  ck(name + '_ends', isEnded(s) && here === 'stopped', show(s) + ', here ' + (here || 'not stopped'));
+  await p.close();
+}
+
 (async () => {
   const b = await chromium.launch({executablePath: chrome});
   const ctx = await b.newContext({viewport: {width: 1280, height: 800}});
@@ -121,23 +169,11 @@ async function endsAfterHolder(p, pid, name) {
     await endsAfterHolder(p, pid, 'resume_ends');
     await p.close();
 
-    // 3. Quit pressed while that Resume's reply is still on its way.
-    p = await page();
-    await p.goto(chatUrl(sids.pending));
-    await until(p, s => s.bar === 'Resume');
-    pid = await holdStart(sids.pending);
-    let release = null;
-    const caught = new Promise(r => {
-      p.route('**/resume', route => { release = () => route.continue(); r(); });
-    });
-    await p.click('#stop');
-    await caught;
-    await p.click('#stop');
-    release();
-    s = await until(p, s => s.status !== 'quitting' && s.status !== 'starting', END_WAIT);
-    ck('pending_not_stuck', s.status !== 'quitting' && !(isHeld(s) && s.quit), show(s));
-    await endsAfterHolder(p, pid, 'pending_ends');
-    await p.close();
+    // 3. Quit pressed while that Resume's reply is still on its way, each order
+    // of that reply against the holder's exit and the page's /holder poll forced.
+    await pending(page, sids.pending, 'reply_first', 'pending');
+    await pending(page, sids.late, 'holder_first', 'late');
+    await pending(page, sids.latepoll, 'reply_before_poll', 'latepoll');
 
     // 4. Take over: Quit comes back for this server's own grok.
     pid = await holdStart(sids.take);
@@ -269,7 +305,7 @@ def run(code, port, hold_port, work):
     home, bin_dir = os.path.join(work, "home"), os.path.join(work, "bin")
     os.makedirs(bin_dir)
     # Fresh ids: the holder scan is machine-wide, so concurrent runs never meet.
-    sids = {name: str(uuid.uuid4()) for name in ("load", "resume", "pending", "take", "refused", "tabs", "gone")}
+    sids = {name: str(uuid.uuid4()) for name in ("load", "resume", "pending", "late", "latepoll", "take", "refused", "tabs", "gone")}
     for name, sid in sids.items():
         seed(home, sid, os.path.join(work, "work-" + name))
     with open(os.path.join(bin_dir, "grok"), "w") as handle:
