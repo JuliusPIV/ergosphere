@@ -23,13 +23,15 @@ fail=0
 # shellcheck disable=SC2317  # run by the EXIT trap
 cleanup() {
   local p
+  # One SIGTERM per pid (track keeps them unique), then up to 10 s for them
+  # to go, then SIGKILL, so no server outlives the test or holds the port.
   for p in ${pids[@]+"${pids[@]}"}; do kill "$p" 2>/dev/null; done
-  # Wait (up to 10 s) until they are gone, so the port is free for what runs next.
   for _ in $(seq 100); do
     for p in ${pids[@]+"${pids[@]}"}; do kill -0 "$p" 2>/dev/null && break; p=""; done
     [[ -z "${p:-}" ]] && break
     sleep 0.1
   done
+  for p in ${pids[@]+"${pids[@]}"}; do kill -9 "$p" 2>/dev/null && echo "note: pid $p ignored SIGTERM, killed"; done
   rm -rf -- "$work"
 }
 trap cleanup EXIT
@@ -97,7 +99,12 @@ health() {
   curl --noproxy '*' -s --max-time 3 "http://127.0.0.1:$port/health" |
     python3 -I -c 'import json,sys; d=json.load(sys.stdin); print(d["pid"], d["code_sha256"]) if d.get("product") == "ergosphere" else None' 2>/dev/null
 }
-track() { if [[ -n "$1" ]]; then pids+=("$1"); fi; }
+# track PID: stop it at the end. Each pid once: back-to-back SIGTERMs can
+# leave the server hung (#216); one is what a user sends.
+track() {
+  [[ -n "$1" && " ${pids[*]} " != *" $1 "* ]] && pids+=("$1")
+  return 0
+}
 # installed_sha: one hash over every file in the install dir except the log,
 # which the server appends to.
 installed_sha() {
