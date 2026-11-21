@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -28,6 +29,7 @@ import tempfile
 import time
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 FORBIDDEN_PORTS = {9241, 9242, 9119, 9120, 9121}
@@ -146,6 +148,30 @@ BROWSER_JS = r"""
 const {chromium, devices} = require('playwright');
 const [url, chrome] = process.argv.slice(1);
 const wait = ms => new Promise(r => setTimeout(r, ms));
+// Settle steps wait for a page condition with a deadline, never a fixed
+// sleep: on a loaded machine a fixed sleep can end before the page fits or
+// the fling stops (#187, #190). The short sleeps left pace the input events.
+const WAIT = 15000;
+async function until(p, fn, arg) {
+  const end = Date.now() + WAIT;
+  let ok;
+  while (!(ok = await p.evaluate(fn, arg)) && Date.now() < end) await wait(50);
+  return !!ok;
+}
+const fitted = () => {
+  let want = null;
+  try { want = fit.proposeDimensions() || null; } catch (err) {}
+  return !!want && term.cols === want.cols && term.rows === want.rows;
+};
+// Loaded: grok's socket is open, its alternate screen is drawn and the
+// terminal is fitted to the page (not xterm's default 80x24).
+const loaded = p => until(p, () => {
+  let want = null;
+  try { want = fit.proposeDimensions() || null; } catch (err) {}
+  return !!sock && sock.readyState === 1 && term.buffer.active.type === 'alternate'
+    && !!want && term.cols === want.cols && term.rows === want.rows;
+});
+const flingStopped = p => until(p, () => window.fling == null);
 async function measure(p) {
   return p.evaluate(() => {
     const se = document.scrollingElement;
@@ -168,32 +194,34 @@ async function normalScreen(p) {
   }));
 }
 const viewTop = p => p.evaluate(() => term.buffer.active.viewportY);
-// One finger: down, a single move event, up at once; then let a fling run.
-async function oneMove(cdp, x, ya, yb) {
+// One finger: down, a single move event, up at once; then wait until the
+// fling has stopped. Returns what the move alone sent and whether it stopped.
+async function oneMove(p, cdp, x, ya, yb) {
   await cdp.send('Input.dispatchTouchEvent', {type: 'touchStart', touchPoints: [{x, y: ya}]});
   await wait(30);
   await cdp.send('Input.dispatchTouchEvent', {type: 'touchMove', touchPoints: [{x, y: yb}]});
+  const moveSent = await p.evaluate(() => SENT.join(''));
   await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
-  await wait(1500);
+  return {moveSent, settled: await flingStopped(p)};
 }
 (async () => {
   const b = await chromium.launch({executablePath: chrome, ignoreDefaultArgs: ['--hide-scrollbars']});
-  const res = {};
+  const res = {loaded: {}};
   let ctx = await b.newContext({viewport: {width: 1280, height: 800}});
   let p = await ctx.newPage();
-  await p.goto(url); await wait(2500);
+  await p.goto(url); res.loaded.desktop = await loaded(p);
   res.desktop = await measure(p);
   res.desktop.normal = await normalScreen(p);
   const d = await p.evaluate(() => document.querySelector('#term .xterm-screen').getBoundingClientRect().toJSON());
   await p.mouse.move(d.left + d.width / 2, d.top + d.height / 2);
   for (let i = 0; i < 3; i++) { await p.mouse.wheel(0, -200); await wait(80); }
-  await wait(300);
+  await until(p, base => term.buffer.active.viewportY < base, res.desktop.normal.base);
   res.desktop.normalTopAfterWheel = await viewTop(p);
   await ctx.close();
   ctx = await b.newContext({...devices['Pixel 7']});
   p = await ctx.newPage();
   let cdp = await ctx.newCDPSession(p);
-  await p.goto(url); await wait(2500);
+  await p.goto(url); res.loaded.mobile = await loaded(p);
   res.mobile = await measure(p);
   await p.evaluate(() => { window.SENT = []; const s = sock.send.bind(sock);
     sock.send = d => { SENT.push(typeof d === 'string' ? d : new TextDecoder().decode(d)); s(d); }; });
@@ -207,12 +235,12 @@ async function oneMove(cdp, x, ya, yb) {
   }
   await wait(150);
   await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
-  await wait(400);
+  await flingStopped(p);
   res.dragSent = await p.evaluate(() => SENT.join(''));
   res.scrollY = await p.evaluate(() => scrollY);
   // A flick delivered as one 200px move: it scrolls, and the fling goes on.
   await p.evaluate(() => { SENT.length = 0; });
-  await oneMove(cdp, x, y0, y0 + 200);
+  res.oneMove = await oneMove(p, cdp, x, y0, y0 + 200);
   res.oneMoveSent = await p.evaluate(() => SENT.join(''));
   // Two fingers: no wheel report and no preventDefault (left for pinch).
   // Count preventDefault itself: xterm's cancel also stops propagation, so a
@@ -227,15 +255,18 @@ async function oneMove(cdp, x, ya, yb) {
     await cdp.send('Input.dispatchTouchEvent', {type: 'touchMove', touchPoints: [{x: x - 40, y: y0 + 20 * i, id: 1}, {x: x + 40, y: y0 + 20 * i, id: 2}]});
     await wait(30);
   }
+  // Hold still before lifting, as the slow drag does: a lift at speed starts
+  // Chrome's own fling, and the tap below would only stop it, not focus.
+  await wait(150);
   await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
-  await wait(300);
+  await flingStopped(p);
   res.twoSent = await p.evaluate(() => SENT.join(''));
   res.twoPrevented = await p.evaluate(() => PREVENTED);
   // A tap focuses the terminal and sends no wheel report.
   await p.evaluate(() => { SENT.length = 0; document.activeElement && document.activeElement.blur(); });
   await p.touchscreen.tap(x, r.top + 200);
-  await wait(300);
-  res.tapFocused = await p.evaluate(() => !!document.activeElement && document.activeElement.classList.contains('xterm-helper-textarea'));
+  res.tapFocused = await until(p, () => !!document.activeElement && document.activeElement.classList.contains('xterm-helper-textarea'));
+  await flingStopped(p);
   res.tapSent = await p.evaluate(() => SENT.join(''));
   // On the normal screen a drag scrolls xterm's own scrollback.
   res.mobile.normal = await normalScreen(p);
@@ -246,9 +277,9 @@ async function oneMove(cdp, x, ya, yb) {
   }
   await wait(150);
   await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
-  await wait(400);
+  await flingStopped(p);
   res.mobile.normalTopAfterDrag = await viewTop(p);
-  await oneMove(cdp, x, y0, y0 + 200);
+  res.mobile.normalOneMove = await oneMove(p, cdp, x, y0, y0 + 200);
   res.mobile.normalTopAfterOneMove = await viewTop(p);
   await ctx.close();
   // Pinch in a fresh page: two fingers change the font size and refit, grok
@@ -257,7 +288,7 @@ async function oneMove(cdp, x, ya, yb) {
   ctx = await b.newContext({...devices['Pixel 7']});
   p = await ctx.newPage();
   cdp = await ctx.newCDPSession(p);
-  await p.goto(url); await wait(2500);
+  await p.goto(url); res.loaded.pinch = await loaded(p);
   await p.evaluate(() => { window.SENT = []; const s = sock.send.bind(sock);
     sock.send = d => { SENT.push(typeof d === 'string' ? d : new TextDecoder().decode(d)); s(d); }; });
   const fontState = () => p.evaluate(() => ({font: term.options.fontSize, cols: term.cols, rows: term.rows,
@@ -273,7 +304,7 @@ async function oneMove(cdp, x, ya, yb) {
       await wait(30);
     }
     await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
-    await wait(500);
+    await until(p, fitted);
   }
   res.pinch = {start: await fontState()};
   await pinch(100, 150);
@@ -286,13 +317,121 @@ async function oneMove(cdp, x, ya, yb) {
   res.pinch.min = await fontState();
   res.pinchSent = await p.evaluate(() => SENT.join(''));
   res.pinch.resizes = await p.evaluate(() => SENT.filter(s => s.startsWith('{"type":"resize"')).length);
-  await p.reload(); await wait(2500);
+  await p.reload(); res.loaded.reload = await loaded(p);
   res.pinch.reload = await fontState();
   await ctx.close();
   await b.close();
   console.log(JSON.stringify(res));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 """
+
+
+BROWSER_WAIT_S = 15  # WAIT in BROWSER_JS, in seconds
+
+
+def has_home(pid, home):
+    # True while process pid still has this run's throwaway HOME in its environment.
+    mark = ("\0HOME=%s\0" % home).encode()
+    try:
+        with open("/proc/%d/environ" % pid, "rb") as f:
+            return mark in b"\0" + f.read()
+    except OSError:
+        return False
+
+
+def run_pids(home):
+    # Our own processes started with this run's throwaway HOME: the server,
+    # the stand-in grok (its own session), node and Chrome all inherit it.
+    # A snapshot only: kill_run checks each PID again before it signals it.
+    pids = []
+    for d in os.listdir("/proc"):
+        if d.isdigit() and int(d) != os.getpid() and has_home(int(d), home):
+            pids.append(int(d))
+    return pids
+
+
+def have_pidfd():
+    # os.pidfd_open and signal.pidfd_send_signal arrived in Python 3.9. Without
+    # them a PID cannot be pinned, so kill_if_run must not signal it blind.
+    return callable(getattr(os, "pidfd_open", None)) and callable(getattr(signal, "pidfd_send_signal", None))
+
+
+def kill_if_run(pid, home):
+    # A PID can be reused once its process is reaped, so the snapshot may name
+    # someone else by now. An open pidfd pins the process the PID names, so the
+    # HOME check and the signal hit the same process. Signal one process, not a
+    # group: a group ID could be reused too.
+    if not have_pidfd():
+        return
+    try:
+        fd = os.pidfd_open(pid)
+    except OSError:
+        return  # already gone
+    try:
+        if has_home(pid, home):
+            signal.pidfd_send_signal(fd, signal.SIGKILL)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def kill_run(home):
+    # Kill what the run left (also after a failure or a timeout), then wait
+    # until it is gone. Returns how many were left before and after.
+    left = run_pids(home)
+    for pid in left:
+        kill_if_run(pid, home)
+    end = time.monotonic() + 10
+    still = run_pids(home)
+    while still and time.monotonic() < end:
+        time.sleep(0.05)
+        still = run_pids(home)
+    return len(left), len(still)
+
+
+def check_kill_run():
+    # The PID list is a snapshot: by the time kill_run signals a PID, it can
+    # belong to an unrelated process (the run's own process exited and the
+    # PID was reused). Such a process must survive.
+    if not have_pidfd():
+        return None  # SKIP: no pidfd on this Python (3.8 and older), so nothing is signalled
+    other = subprocess.Popen(["sleep", "30"], env=dict(os.environ, HOME="/nonexistent-unrelated"))
+    calls = []
+
+    def stale(home):
+        calls.append(home)
+        return [other.pid] if len(calls) == 1 else []
+
+    try:
+        with mock.patch.dict(globals(), {"run_pids": stale}):
+            kill_run("/nonexistent-ergo-touch-home")  # no process has this HOME
+        try:
+            other.wait(timeout=5)  # a SIGKILL lands asynchronously, so give it time
+            alive = False
+        except subprocess.TimeoutExpired:
+            alive = True
+    finally:
+        other.kill()
+        other.wait()
+    if alive:
+        return []
+    return ["kill_run SIGKILLed an unrelated process (pid %d) named by a stale PID list" % other.pid]
+
+
+def check_kill_no_pidfd():
+    # On an interpreter without pidfd the kill check must SKIP (None), not raise
+    # and abort the other checks in main().
+    # create=True: on 3.8 these attributes do not exist at all, and patch.object
+    # would otherwise raise AttributeError here, before the try below.
+    with mock.patch.object(os, "pidfd_open", None, create=True), mock.patch.object(signal, "pidfd_send_signal", None, create=True):
+        try:
+            got = check_kill_run()
+        except Exception as e:
+            return ["check_kill_run raised %s without pidfd" % type(e).__name__]
+    if got is None:
+        return []
+    return ["check_kill_run returned %r without pidfd, expected SKIP (None)" % (got,)]
 
 
 def free_port():
@@ -381,9 +520,17 @@ def check_browser():
             srv.wait(10)
         except subprocess.TimeoutExpired:
             srv.kill()
+            srv.wait()
+        left, still = kill_run(home)
+        if left:
+            print("note: killed %d processes the run left behind, %d still running" % (left, still))
         shutil.rmtree(tmp, ignore_errors=True)
     print("browser: %s" % json.dumps(res))
     fails = []
+    for name, ok in sorted(res["loaded"].items()):
+        if not ok:
+            fails.append("%s: the page did not load within %ds (socket open, alternate screen, terminal fitted)"
+                         % (name, BROWSER_WAIT_S))
     for name in ("desktop", "mobile"):
         m = res[name]
         if m["vpBarPx"] > 0 or m["vpOverflowY"] != "hidden":
@@ -415,9 +562,15 @@ def check_browser():
     n = res["mobile"]["normal"]
     if not res["mobile"]["normalTopAfterDrag"] < n["base"]:
         fails.append("mobile: a drag does not scroll the normal screen's history (top %s, base %s)" % (res["mobile"]["normalTopAfterDrag"], n["base"]))
+    for name, om in (("alternate", res["oneMove"]), ("normal", res["mobile"]["normalOneMove"])):
+        if not om["settled"]:
+            fails.append("%s screen: the fling after a 200px flick did not stop within %ds" % (name, BROWSER_WAIT_S))
+    # The move alone sends a few reports; the fling must clearly add to them.
+    at_move = len(re.findall(r"\x1b\[<64;\d+;\d+M", res["oneMove"]["moveSent"]))
     ones = re.findall(r"\x1b\[<64;\d+;\d+M", res["oneMoveSent"])
-    if len(ones) < 4:
-        fails.append("a 200px flick in one move event sent %d wheel-up reports, want the move plus a fling" % len(ones))
+    if not at_move or len(ones) < 2 * at_move:
+        fails.append("a 200px flick in one move event sent %d wheel-up reports, %d from the move alone; "
+                     "want the move plus a fling of at least as many again" % (len(ones), at_move))
     if not res["mobile"]["normalTopAfterOneMove"] < res["mobile"]["normalTopAfterDrag"]:
         fails.append("normal screen: a 200px flick in one move event did not scroll (top %s, was %s)" % (
             res["mobile"]["normalTopAfterOneMove"], res["mobile"]["normalTopAfterDrag"]))
@@ -430,11 +583,13 @@ def check_browser():
 
 
 def main():
+    # SIGTERM (a runner's timeout) runs the cleanup in check_browser too.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     erg = load()
     page = erg.chat_page("", None, True, "")
     script = page_script(page)
     fails = []
-    for name, got in (("css", check_css(page)), ("syntax", check_node_syntax(script)),
+    for name, got in (("kill", check_kill_run()), ("kill-no-pidfd", check_kill_no_pidfd()), ("css", check_css(page)), ("syntax", check_node_syntax(script)),
                       ("gutter", check_gutter(script)), ("browser", check_browser())):
         if got is None:
             print("SKIP %s" % name)

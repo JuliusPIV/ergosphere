@@ -28,7 +28,8 @@ ergosphere.json next to ergosphere.py. A rerun keeps them;
 --bind and --port change only those two keys.
   --yes        approve a non-loopback bind without asking
   --version vA.B.C  install this release instead of the latest (pin or roll back)
-  --check      run the checks only; change nothing
+  --check      run the checks only: download the release to a temp dir and check
+               its files are all there; run nothing from it, change nothing
   --help       this help
 EOF
 }
@@ -646,6 +647,7 @@ socket.socket().bind((sys.argv[1], 0))' "$BIND" 2>/dev/null; then
     row warn bind "$BIND: anyone who can reach port $PORT can run grok as this user"
   fi
   find_release
+  if [[ ${#BLOCKERS[@]} -eq 0 ]]; then verify_release; fi
   if [[ ${#BLOCKERS[@]} -gt 0 ]]; then
     fail check "blocked by ${BLOCKERS[*]} (see above); nothing was changed"
   fi
@@ -691,6 +693,9 @@ approve_bind() {
 download() {
   local url="${ERGOSPHERE_INSTALL_SOURCE_URL:-$SOURCE_URL}" hits types
   STAGE=$(mktemp -d "${TMPDIR:-/tmp}/ergosphere-install.XXXXXX") || fail download "could not create a temp dir"
+  # Absolute, because verify_release cds into STAGE before running the release
+  # check, and a relative TMPDIR would make SRC and the config path wrong there.
+  STAGE=$(cd -- "$STAGE" && pwd) || fail download "could not resolve the temp dir"
   printf 'download: %s\n' "$url"
   "$CURL" --proto '=http,https' -fsSL --connect-timeout 15 --max-time 120 \
     -o "$STAGE/src.tar.gz" -- "$url" || fail download "could not fetch $url"
@@ -705,6 +710,49 @@ download() {
   hits=("$STAGE"/x/*/ergosphere.py)
   [[ ${#hits[@]} -eq 1 && -f "${hits[0]}" ]] || fail download "archive does not hold one ergosphere.py"
   SRC=${hits[0]%/ergosphere.py}
+}
+
+# Before anything changes. --check only looks at the downloaded files and runs
+# nothing from them. A real run also runs the release's own --check (vendor
+# files, grok, the server's config validators) against the config this run
+# would write, built in STAGE from copies; that --check never writes config.
+verify_release() {
+  local out sb=0 sp=0 cand legacy f missing=()
+  download
+  for f in vendor/xterm.js vendor/xterm.css vendor/addon-fit.js; do
+    if [[ ! -f "$SRC/$f" ]]; then missing+=("$f"); fi
+  done
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    row invalid release "archive is missing ${missing[*]}"
+    return 0
+  fi
+  if [[ "$WANT_CHECK" -eq 1 ]]; then
+    row ok release "archive holds ergosphere.py and its vendor files (--check runs nothing from it)"
+    return 0
+  fi
+  cand="$STAGE/cfg/ergosphere.json" legacy="$STAGE/cfg/cwd-defaults.json"
+  mkdir -- "$STAGE/cfg" || fail download "could not create $STAGE/cfg"
+  # Copy only the file the server would read: the legacy file is ignored once
+  # ergosphere.json exists, so an unreadable one must not block the run.
+  if [[ -e "$CFG_FILE" ]]; then
+    cp -- "$CFG_FILE" "$cand" || fail check "could not read $CFG_FILE"
+  elif [[ -e "$LEGACY_FILE" ]]; then
+    cp -- "$LEGACY_FILE" "$legacy" || fail check "could not read $LEGACY_FILE"
+  fi
+  if [[ -n "$ARG_BIND" ]]; then sb=1; fi
+  if [[ -n "$ARG_PORT" ]]; then sp=1; fi
+  if ! out=$(cfg_py write "$cand" "$legacy" "$BIND" "$PORT" "$sb" "$sp" "$AGENT" "$AGENT_DIR" 2>&1); then
+    out=${out//"$cand"/"$CFG_FILE"}
+    row invalid config "${out//$'\n'/; }"
+    return 0
+  fi
+  if out=$(cd -- "$STAGE" && unset ERGOSPHERE_PORT && PATH="${GROK%/*}:$PATH" ERGOSPHERE_CONFIG="$cand" \
+      "$PYTHON" -I -B "$SRC/ergosphere.py" --check </dev/null 2>&1); then
+    row ok release "ergosphere.py --check passed with the settings this run writes"
+  else
+    out=${out//"$cand"/"$CFG_FILE"}
+    row invalid release "ergosphere.py --check failed: ${out//$'\n'/; }"
+  fi
 }
 
 # Copies only files whose sha256 differs from the archive, then reads each
@@ -944,13 +992,14 @@ main() {
   [[ -n "${HOME:-}" || "$DEST" != "$DEFAULT_DEST" ]] || fail check "HOME is not set; pass --dir"
   load_config
   if [[ "$WANT_CHECK" -eq 0 && "$MODE" == manual ]]; then ask_manual; fi
+  # Every question comes before check_target, whose release check runs the
+  # downloaded ergosphere.py in a real run.
+  if [[ "$WANT_CHECK" -eq 0 ]]; then approve_bind; fi
   check_target
   if [[ "$WANT_CHECK" -eq 1 ]]; then
     printf 'ready: checks passed, nothing changed\n'
     return 0
   fi
-  approve_bind
-  download
   install_files
   write_config
   start_server

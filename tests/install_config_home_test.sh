@@ -3,12 +3,14 @@
 # server does (pathlib expanduser), and refuses a ~user it cannot resolve.
 #
 # Run: ERGOSPHERE_TEST_PORT=<spare port> bash tests/install_config_home_test.sh
-# --check only: nothing is downloaded, installed or written outside a
-# throwaway dir. The port is only probed.
+# --check only: nothing is installed or written outside a throwaway dir.
+# The release download points at a closed local port, so --check stops at
+# download; the config rows it checks are printed before that. The port is
+# only probed.
 # shellcheck disable=SC2088  # a literal ~ is the input under test
 set -u
 repo=$(cd "$(dirname "$0")/.." && pwd)
-port=${ERGOSPHERE_TEST_PORT:-9550}
+port=${ERGOSPHERE_TEST_PORT:-$(python3 -I "$repo/tests/free_port.py" 3)} || exit 1
 work=$(mktemp -d "${TMPDIR:-/tmp}/ergosphere-home-test.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 fail=0
