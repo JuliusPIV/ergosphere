@@ -288,7 +288,13 @@ for t in ("/proc/net/tcp", "/proc/net/tcp6"):
         continue
     for row in rows:
         c = row.split()
-        if len(c) > 9 and c[3] == "0A" and int(c[1].rsplit(":", 1)[1], 16) == port:
+        # IPv6 listeners count only on an IPv4-mapped address (::ffff:a.b.c.d);
+        # an IPv6-only one does not clash with 0.0.0.0, and a dual-stack [::]
+        # cannot share the port with an IPv4 socket at all.
+        if len(c) <= 9 or c[3] != "0A":
+            continue
+        a, p = c[1].rsplit(":", 1)
+        if int(p, 16) == port and (len(a) == 8 or a.startswith("0000000000000000FFFF0000")):
             held.add(c[9])
 mine = set()
 try:

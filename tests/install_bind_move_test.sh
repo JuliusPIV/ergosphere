@@ -89,7 +89,8 @@ class Quiet(http.server.BaseHTTPRequestHandler):
 s = http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), Quiet)
 open(sys.argv[2], "w").write("up")
 s.serve_forever()' "$port" "$work/other.up" </dev/null >/dev/null 2>&1 &
-pids+=($!)
+other=$!
+pids+=("$other")
 for _ in $(seq 50); do [[ -s "$work/other.up" ]] && break; sleep 0.1; done
 [[ -s "$work/other.up" ]] || { bad "could not start the other program on 127.0.0.1:$port"; exit 1; }
 before=$(cat "$work/u/held/ergosphere.json")
@@ -115,6 +116,36 @@ if curl --noproxy '*' -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/
   ok "the program on 127.0.0.1:$port was not touched"
 else
   bad "the program on 127.0.0.1:$port no longer answers"
+fi
+
+# 1b. That program gone, an IPv6-only listener on [::1]:$port instead: it does
+# not clash with 0.0.0.0, so a bind-only move to 0.0.0.0 goes ahead.
+kill "$other" 2>/dev/null
+while kill -0 "$other" 2>/dev/null; do sleep 0.1; done
+python3 -I -c '
+import socket, sys, time
+s = socket.socket(socket.AF_INET6)
+s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+s.bind(("::1", int(sys.argv[1])))
+s.listen()
+open(sys.argv[2], "w").write("up")
+time.sleep(600)' "$port" "$work/v6.up" </dev/null >/dev/null 2>&1 &
+pids+=($!)
+for _ in $(seq 50); do [[ -s "$work/v6.up" ]] && break; sleep 0.1; done
+if [[ ! -s "$work/v6.up" ]]; then
+  echo "skip: no IPv6 loopback here, the [::1]:$port step did not run"
+else
+  rc=0
+  out=$(run_install "$work/u/held" --bind 0.0.0.0 --port "$port") || rc=$?
+  new=$(field pid "$out")
+  if [[ -n "$new" ]]; then pids+=("$new"); fi
+  if [[ "$rc" -eq 0 && -n "$new" && "$new" != "$old" && "$(health_pid "127.0.0.1:$port")" == "$new" ]] &&
+    ! kill -0 "$old" 2>/dev/null; then
+    ok "IPv6-only [::1]:$port: own server moved to 0.0.0.0 (pid $old -> $new)"
+  else
+    bad "IPv6-only [::1]:$port: exit $rc, pid '${old:-none}' -> '${new:-none}', want a move to 0.0.0.0"
+    printf '%s\n' "$out" | tail -n 15
+  fi
 fi
 
 # 2. Bind-only move with the new address free: 127.0.0.2:$free -> 127.0.0.1:$free,
