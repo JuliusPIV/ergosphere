@@ -4,6 +4,7 @@
   python3 -B ab.py vendor <code-dir>          -> JSON vendor-manifest check on stdout
   python3 -B ab.py summary <A-dir> <B-dir>    -> summary text on stdout;
                                                  exit 1 when a check passes on A and fails on B,
+                                                 or B misses an HTTP check in ORDER,
                                                  or B's browser checks break or miss a check in ORDER
 Stdlib only.
 """
@@ -145,8 +146,13 @@ def summary(adir, bdir):
         lines.append("REGRESSION: passes on A, fails on B: %s" % ", ".join(regress))
     for why in broken:
         lines.append("BROWSER FAILURE: %s" % why)
+    # The HTTP checks always run, and both sides run B's ab.py: a check dropped
+    # from http_checks() vanishes from both columns, so require each name (#179).
+    http_missing = [n for n in HTTP_CHECKS if n not in (load(bdir + "/http.json").get("checks") or {})]
+    if http_missing:
+        lines.append("HTTP FAILURE: B did not report HTTP check(s): %s" % ", ".join(http_missing))
     print("\n".join(lines))
-    return 1 if regress or broken else 0
+    return 1 if regress or broken or http_missing else 0
 
 
 def main(argv):
