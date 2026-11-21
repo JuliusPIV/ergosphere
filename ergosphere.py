@@ -1208,27 +1208,64 @@ def existing_dir(path):
 # A stat on a hung mount never returns. GET / and the 4 s /list-rows poll call
 # folder_missing, so wait only this long; a slow folder reads as present. One
 # check per folder is outstanding at a time, so polls do not pile up threads.
+# A hung check keeps its thread forever, so at most FOLDER_CHECK_THREADS run at
+# once. A folder with no slot in time reads as present (#43 review: a list of
+# hundreds of stalled folders must not exhaust the thread budget).
 FOLDER_CHECK_WAIT = 0.5
+FOLDER_CHECK_THREADS = 16
 folder_checks = {}
 folder_checks_lock = threading.Lock()
+folder_check_slots = threading.BoundedSemaphore(FOLDER_CHECK_THREADS)
 
 
 def folder_missing(cwd):
     # A saved session whose folder was deleted: Resume can never start it (#43).
-    if not (isinstance(cwd, str) and cwd):
-        return False
+    return cwd in missing_folders([cwd])
+
+
+def missing_folders(cwds):
+    # The given folders that do not exist. All share one FOLDER_CHECK_WAIT, so
+    # many stalled folders in one list do not add up.
+    deadline = time.monotonic() + FOLDER_CHECK_WAIT
+    started = []
+    for cwd in set(c for c in cwds if isinstance(c, str) and c):
+        check = start_folder_check(cwd, deadline)
+        if check is not None:
+            started.append((cwd, check))
+    out = set()
+    for cwd, check in started:
+        if check["done"].wait(max(0, deadline - time.monotonic())) and not check["exists"]:
+            out.add(cwd)
+    return out
+
+
+def start_folder_check(cwd, deadline):
+    # A check already outstanding is joined, not started again: 50 rows on one
+    # stuck folder cost one thread. None means no slot came free in time, so
+    # the folder reads as present for this render.
     with folder_checks_lock:
         check = folder_checks.get(cwd)
-        fresh = check is None
-        if fresh:
-            check = {"done": threading.Event(), "exists": False}
-            folder_checks[cwd] = check
-            threading.Thread(target=check_folder, args=(cwd, check), daemon=True).start()
-    # A check already outstanding is not waited on again: 50 rows on one stuck
-    # folder cost one wait, not fifty.
-    if check["done"].wait(FOLDER_CHECK_WAIT if fresh else 0):
-        return not check["exists"]
-    return False
+    if check is not None:
+        return check
+    if not folder_check_slots.acquire(timeout=max(0, deadline - time.monotonic())):
+        return None
+    with folder_checks_lock:
+        check = folder_checks.get(cwd)
+        if check is not None:
+            folder_check_slots.release()
+            return check
+        check = {"done": threading.Event(), "exists": False}
+        folder_checks[cwd] = check
+    try:
+        threading.Thread(target=check_folder, args=(cwd, check), daemon=True).start()
+    except RuntimeError:
+        # The process is out of threads anyway. Forget this check, so the next
+        # render retries it, and read the folder as present rather than fail the list.
+        with folder_checks_lock:
+            folder_checks.pop(cwd, None)
+        folder_check_slots.release()
+        return None
+    return check
 
 
 def check_folder(cwd, check):
@@ -1238,6 +1275,7 @@ def check_folder(cwd, check):
         check["done"].set()
         with folder_checks_lock:
             folder_checks.pop(cwd, None)
+        folder_check_slots.release()
 
 
 def one_query(qs, key):
@@ -2538,9 +2576,10 @@ def list_rows_tag(sessions, owners=None):
     """Change tag of the list rows, from the same inputs, without the HTML."""
     if owners is None:
         owners = list_states()
+    missing = missing_folders(row.get("cwd") for row in sessions)
     key = [
         sorted([sid, st["turn"] == "working", st["pid"], conflict_note(st)] for sid, st in owners.items()),
-        [[row.get(k) for k in ("id", "title", "cwd", "updated")] + [folder_missing(row.get("cwd"))]
+        [[row.get(k) for k in ("id", "title", "cwd", "updated")] + [row.get("cwd") in missing]
          for row in sessions],
     ]
     text = json.dumps(key, default=str, separators=(",", ":"))
@@ -2605,10 +2644,11 @@ def dashboard_rows(sessions, owners=None):
     blocks.append(dashboard_head("older"))
     blocks.append('<div class="sec" id="sec-older">')
     blocks.append('<div class="empty"%s>- none -</div>' % ("" if not older else " hidden"))
+    missing = missing_folders(row.get("cwd") for row in older)
     for seq, row in enumerate(older):
         blocks.append(dashboard_session_row(
             "older", seq, row, None, seq >= OLDER_WINDOW,
-            note="folder missing" if folder_missing(row.get("cwd")) else "",
+            note="folder missing" if row.get("cwd") in missing else "",
         ))
     if len(older) > OLDER_WINDOW:
         blocks.append(
