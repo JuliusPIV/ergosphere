@@ -39,6 +39,7 @@ const state = p => p.evaluate(() => {
     why: getComputedStyle(document.getElementById('busy')).display === 'none' ? '' :
       document.getElementById('busy-text').textContent,
     back: !document.getElementById('busy-back').hidden,
+    hide: document.getElementById('hide').hidden ? '' : document.getElementById('hide').textContent,
     cols: term.cols, rows: term.rows,
     want: want ? {cols: want.cols, rows: want.rows} : null};
 });
@@ -67,6 +68,14 @@ async function until(p, pred) {
     g.setDefaultTimeout(WAIT);
     await g.goto(goneUrl);
     res.gone = await until(g, s => s.status === 'folder missing' && !!s.why);
+    // Hide (#208): the list leaves it out; Unhide brings it back.
+    const listed = () => g.evaluate(() => fetch('/').then(r => r.text()).then(t => t.indexOf('folder gone') !== -1));
+    await g.click('#hide');
+    res.hid = await until(g, s => s.hide === 'Unhide');
+    res.hid.listed = await listed();
+    await g.click('#hide');
+    res.unhid = await until(g, s => s.hide === 'Hide');
+    res.unhid.listed = await listed();
     // Opened while the folder was there, Resume pressed after it went.
     const l = await ctx.newPage();
     l.setDefaultTimeout(WAIT);
@@ -184,6 +193,12 @@ def check(res):
             fails.append("%s: the page still offers Resume, which always fails: %r" % (name, g))
         if not g["back"]:
             fails.append("%s: no Back link: %r" % (name, g))
+    if res["gone"]["hide"] != "Hide":
+        fails.append("gone: no Hide button: %r" % res["gone"])
+    if res["hid"]["hide"] != "Unhide" or res["hid"]["listed"]:
+        fails.append("Hide did not take the session out of the list: %r" % res["hid"])
+    if res["unhid"]["hide"] != "Hide" or not res["unhid"]["listed"]:
+        fails.append("Unhide did not bring the session back: %r" % res["unhid"])
     return fails
 
 

@@ -1059,7 +1059,19 @@ def check_config(data, label):
     if not isinstance(effort, str) or (effort and not EFFORT_ID_RE.match(effort)):
         raise ValueError("%s last.effort is not an effort level" % label)
     out["last"] = {"model": model, "effort": effort}
+    # Sessions hidden from the list (#208). Only ids: grok's files stay as they are.
+    if "hidden" in out:
+        hidden = out["hidden"]
+        if not isinstance(hidden, list) or not all(isinstance(x, str) and SID_RE.match(x) for x in hidden):
+            raise ValueError("%s hidden must be a list of session ids" % label)
+        out["hidden"] = sorted(set(hidden))
     return out
+
+
+def visible_sessions(sessions, config):
+    # The list leaves out sessions hidden in Settings; a live one still shows.
+    hidden = set(config.get("hidden") or ())
+    return [row for row in sessions if row["id"] not in hidden]
 
 
 def read_json_file(path):
@@ -3546,7 +3558,17 @@ def settings_state(server, config):
         "names": sorted(set(list_agents()) | set(agents)),
         "sessions": running_sessions(),
         "overrides": settings_overrides(getattr(server, "args", None)),
+        "hidden": hidden_rows(config.get("hidden") or ()),
     }
+
+
+def hidden_rows(ids):
+    # Settings lists hidden sessions so each can be shown again (#208).
+    rows = []
+    for sid in ids:
+        row = find_session(sid) or {}
+        rows.append({"id": sid, "title": row.get("title") or "", "cwd": row.get("cwd") or ""})
+    return rows
 
 
 def settings_page(state):
@@ -3591,6 +3613,10 @@ td.path input { width: 100%; box-sizing: border-box; }
 <table><thead><tr><th>Agent</th><th>Working directory</th><th></th></tr></thead><tbody id="agents"></tbody></table>
 <div class="line"><select id="add-name"></select><input id="add-path" placeholder="/absolute/existing/directory" autocomplete="off"><button type="button" id="add">Add</button></div>
 <div class="note" id="agent-msg"></div>
+<div class="bar"></div>
+<h2>Hidden sessions</h2>
+<table><tbody id="hidden"></tbody></table>
+<div class="note" id="hidden-msg"></div>
 <div class="bar"></div>
 <h2>Restart</h2>
 <div class="note" id="sessions"></div>
@@ -3819,8 +3845,54 @@ el("restart").addEventListener("click", function () {
     renderRestart();
   });
 });
+// Unhide only changes Ergosphere's settings (#208).
+function renderHidden() {
+  var body = el("hidden");
+  var i, tr, td, link, btn;
+  body.textContent = "";
+  for (i = 0; i < state.hidden.length; i++) {
+    tr = document.createElement("tr");
+    td = document.createElement("td");
+    link = document.createElement("a");
+    link.href = "/chat?resume=" + encodeURIComponent(state.hidden[i].id);
+    link.textContent = state.hidden[i].title || state.hidden[i].id;
+    td.appendChild(link);
+    tr.appendChild(td);
+    td = document.createElement("td");
+    td.textContent = state.hidden[i].cwd;
+    tr.appendChild(td);
+    td = document.createElement("td");
+    btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Unhide";
+    btn.setAttribute("data-id", state.hidden[i].id);
+    td.appendChild(btn);
+    tr.appendChild(td);
+    body.appendChild(tr);
+  }
+  say("hidden-msg", state.hidden.length ? "" : "None.");
+}
+el("hidden").addEventListener("click", function (ev) {
+  var id = ev.target && ev.target.getAttribute && ev.target.getAttribute("data-id");
+  if (!id) return;
+  ev.target.disabled = true;
+  fetch("/hide", {
+    method: "POST",
+    cache: "no-store",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({id: id, hidden: false})
+  }).then(function (resp) {
+    if (!resp.ok) throw new Error("could not unhide");
+    state.hidden = state.hidden.filter(function (row) { return row.id !== id; });
+    renderHidden();
+  }).catch(function (err) {
+    ev.target.disabled = false;
+    say("hidden-msg", String(err && err.message || err));
+  });
+});
 renderServer();
 renderAgents();
+renderHidden();
 renderRestart();
 setInterval(pollSessions, 2000);
 </script>
@@ -3857,7 +3929,7 @@ document.getElementById("pick").hidden = false;
 """.replace("@@VERSION@@", html.escape(VERSION))
 
 
-def chat_page(resume="", holder=None, running=False, title="", ask=False, gone=""):
+def chat_page(resume="", holder=None, running=False, title="", ask=False, gone="", hidden=False):
     # Full-height xterm. Leaving this page drops the socket and does not
     # ask the server to kill grok. A reload or a second window reattaches.
     # running: this server already has the grok process. Only then does the
@@ -3949,7 +4021,7 @@ body { position: fixed; left: 0; right: 0; top: var(--vv-top, 0px); }
 <body>
 <div id="bar"><a href="/">← Session List</a> | <button id="stop" type="button">Quit</button> | <span id="status">@@STATUS@@</span> | <span id="title"@@TITLE_ATTR@@>@@TITLE@@</span><span id="title-gap"@@GAP_ATTR@@> | </span><span id="sid">Session ID: @@SID_TEXT@@</span></div>
 <div id="version">v@@VERSION@@</div>
-<div id="wrap"><div id="stage"><div id="resume-ask" hidden><div>Resume this session?</div><button type="button" id="resume-yes">Resume</button><button type="button" id="resume-no">Cancel</button></div><div id="busy"><div id="busy-text">@@NOTICE@@</div><a id="open-there" hidden>Open it there</a><button id="take" type="button"@@BUTTON_ATTR@@>@@BUTTON_LABEL@@</button> <a id="busy-back" href="/" hidden>Back</a></div><div id="term"></div></div></div>
+<div id="wrap"><div id="stage"><div id="resume-ask" hidden><div>Resume this session?</div><button type="button" id="resume-yes">Resume</button><button type="button" id="resume-no">Cancel</button></div><div id="busy"><div id="busy-text">@@NOTICE@@</div><a id="open-there" hidden>Open it there</a><button id="take" type="button"@@BUTTON_ATTR@@>@@BUTTON_LABEL@@</button> <button id="hide" type="button" hidden>Hide</button> <a id="busy-back" href="/" hidden>Back</a></div><div id="term"></div></div></div>
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
 <script>
@@ -4066,6 +4138,8 @@ var running = @@RUN_JS@@;
 var askOnLoad = @@ASK_JS@@;
 // Stopped and its folder was deleted: why Resume cannot work, or "" (#43).
 var goneText = @@GONE_JS@@;
+// Hidden from the session list in Ergosphere's settings (#208).
+var hiddenNow = @@HIDDEN_JS@@;
 var termOpened = false;
 var sawOutput = false;
 var sessionReady = false;
@@ -4593,7 +4667,34 @@ function showGone(text) {
   document.getElementById("busy-text").textContent = text;
   document.getElementById("busy-back").hidden = false;
   setStatus("folder missing", false);
+  showHide();
 }
+// Hide only changes Ergosphere's settings; grok's session files stay.
+function showHide() {
+  var btn = document.getElementById("hide");
+  btn.textContent = hiddenNow ? "Unhide" : "Hide";
+  btn.hidden = false;
+}
+document.getElementById("hide").addEventListener("click", function () {
+  var btn = document.getElementById("hide");
+  var want = !hiddenNow;
+  btn.disabled = true;
+  fetch("/hide", {
+    method: "POST",
+    cache: "no-store",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({id: sid, hidden: want})
+  }).then(function (resp) {
+    return resp.json().catch(function () { return {}; }).then(function (data) {
+      if (!resp.ok || !data.ok) throw new Error(data.error || "could not save");
+      hiddenNow = want;
+      showHide();
+      setStatus(want ? "hidden from the session list" : "shown in the session list", false);
+    });
+  }).catch(function (err) {
+    setStatus(String(err && err.message || err), false);
+  }).then(function () { btn.disabled = false; });
+});
 var retryTimer = null;
 function resumeSession(tries) {
   tries = tries || 0;
@@ -4941,6 +5042,8 @@ else if (!hold) {
     ).replace(
         "@@GONE_JS@@", script_json(gone)
     ).replace(
+        "@@HIDDEN_JS@@", "true" if hidden else "false"
+    ).replace(
         "@@TITLE@@", html.escape(title)
     ).replace("@@DOC_TITLE@@", html.escape(doc_title)).replace(
         "@@VERSION@@", html.escape(VERSION)
@@ -5114,6 +5217,7 @@ class Handler(BaseHTTPRequestHandler):
     def _list_rows(self):
         # The list page polls this. Unchanged rows cost one short reply.
         _total, sessions = load_sessions(None)
+        sessions = visible_sessions(sessions, self.server.config)
         owners = list_states()
         tag = list_rows_tag(sessions, owners)
         if self.headers.get("X-Rows-Tag", "") == tag:
@@ -5245,6 +5349,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/":
             _total, sessions = load_sessions(None)
+            sessions = visible_sessions(sessions, self.server.config)
             self._html(dashboard_page(sessions, list_agents(), self.server.cwd_defaults))
             return
         if path == "/list-rows":
@@ -5303,7 +5408,8 @@ class Handler(BaseHTTPRequestHandler):
             gone = ""
             if state["state"] == "folder-missing" and isinstance(saved, dict):
                 gone = folder_missing_text(saved.get("cwd"))
-            self._html(chat_page(resume, holder, running, page_title, ask, gone))
+            hidden = resume in (self.server.config.get("hidden") or ())
+            self._html(chat_page(resume, holder, running, page_title, ask, gone, hidden))
             return
         if path in VENDOR_FILES:
             self._vendor(path)
@@ -5315,10 +5421,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if not self._guard(path in ("/take", "/launch", "/resume", "/settings")):
+        if not self._guard(path in ("/take", "/launch", "/resume", "/settings", "/hide")):
             return
         if path == "/settings":
             self._settings()
+            return
+        if path == "/hide":
+            self._hide()
             return
         if path == "/take":
             self._take()
@@ -5555,6 +5664,35 @@ class Handler(BaseHTTPRequestHandler):
             self._change_config(change)
         except (ValueError, OSError) as exc:
             print("could not save last model and effort: %s" % exc, flush=True)
+
+    def _hide(self):
+        # Hide or show a session in the list (#208). Only ergosphere.json
+        # changes; nothing under ~/.grok is moved or deleted.
+        obj = self._json_object()
+        sid = obj.get("id") if obj is not None else None
+        hide = obj.get("hidden") if obj is not None else None
+        if not isinstance(sid, str) or not SID_RE.match(sid) or not isinstance(hide, bool):
+            self._json(400, {"ok": False, "error": "invalid request"})
+            return
+        # Unhide works for any id, so one whose grok files are gone can leave the list.
+        if hide and find_session(sid) is None:
+            self._json(404, {"ok": False, "error": "unknown session"})
+            return
+
+        def change(data):
+            ids = set(data.get("hidden") or ())
+            if hide:
+                ids.add(sid)
+            else:
+                ids.discard(sid)
+            data["hidden"] = sorted(ids)
+        try:
+            self._change_config(change)
+        except (ValueError, OSError) as exc:
+            self._json(500, {"ok": False, "error": ("cannot save: %s" % exc)[:300]})
+            return
+        print("session %s %s" % (sid, "hidden" if hide else "shown"), flush=True)
+        self._json(200, {"ok": True, "id": sid, "hidden": hide})
 
     def _resume(self):
         # The Resume action for a saved session. Host and Origin were checked

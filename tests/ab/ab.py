@@ -13,8 +13,8 @@ import urllib.error
 import urllib.request
 
 TITLE = "AB seeded session"
-ORDER = ["health", "session_list", "open_session", "folder_missing", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios", "resume_box"]
-HTTP_CHECKS = ("health", "session_list", "open_session", "folder_missing")
+ORDER = ["health", "session_list", "open_session", "folder_missing", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios", "resume_box", "hide"]
+HTTP_CHECKS = ("health", "session_list", "open_session", "folder_missing", "hide")
 
 
 def get(base, path):
@@ -76,6 +76,20 @@ def http_checks(port, sid, gone=""):
             checks["folder_missing"] = check(
                 gstate == "folder-missing" and c2 == 409 and rstate == "folder-missing" and marked and says,
                 "state=%s resume=%s list=%s page=%s" % (gstate or "-", c2, "y" if marked else "n", "y" if says else "n"))
+            # Issue #208: Hide takes it out of the list, Unhide brings it back.
+            h1, _ = post(base, "/hide", {"id": gone, "hidden": True})
+            _, page = get(base, "/")
+            gone_after_hide = "AB folder gone" not in page
+            _, settings = get(base, "/settings")
+            in_settings = gone in settings
+            h2, _ = post(base, "/hide", {"id": gone, "hidden": False})
+            _, page = get(base, "/")
+            back = "AB folder gone" in page
+            checks["hide"] = check(
+                h1 == 200 and gone_after_hide and in_settings and h2 == 200 and back,
+                "hide=%s unlisted=%s settings=%s unhide=%s back=%s" % (
+                    h1, "y" if gone_after_hide else "n", "y" if in_settings else "n",
+                    h2, "y" if back else "n"))
     except (OSError, ValueError) as exc:
         checks.setdefault("health", check(False, "error %s" % exc))
         for name in HTTP_CHECKS:
