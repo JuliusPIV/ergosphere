@@ -6,7 +6,8 @@
 # handled> last=<event> $".  The "$" ends it: the page can see a frame half
 # drawn, and a reading without it is not one.  A click on row 1, column 1
 # opens a link as grok does (#34): last=linkRc<$BROWSER's exit code> or
-# last=noDisplay.
+# last=noDisplay.  The key "k" alone asks for another link the same way, as
+# a process under grok could with no click: last=keyRc<code> or noDisplay.
 import fcntl
 import os
 import re
@@ -70,19 +71,21 @@ os.set_blocking(wake_w, False)
 signal.set_wakeup_fd(wake_w)
 signal.signal(signal.SIGWINCH, lambda *a: None)
 LINK = "https://example.com/ab-link"
+# Asked for on the key "k", as a process under grok could do with no click.
+KEY_LINK = "https://example.com/ab-key"
 
 
-def open_link():
+def open_link(link=LINK, label="link"):
     # What grok does on a click on a link (#34): run $BROWSER with the URL,
     # or with no BROWSER and no display show "Can't open links without a display".
     browser = os.environ.get("BROWSER", "").split()
     if not browser:
         return "noDisplay"
-    args = [a.replace("%s", LINK) for a in browser]
-    if LINK not in args:
-        args.append(LINK)
+    args = [a.replace("%s", link) for a in browser]
+    if link not in args:
+        args.append(link)
     rc = subprocess.call(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return "linkRc%d" % rc
+    return "%sRc%d" % (label, rc)
 
 
 cols, view, maxoff = draw()
@@ -133,6 +136,8 @@ while True:
             if x == 1 and y == 1:
                 last = open_link()
     rest = SGR.sub(b"", d)
-    off -= rest.count(b"\x1b[5~") * view + rest.count(b"\x1b[A") + rest.count(b"\x1bOA")
+    if rest == b"k":
+        last = open_link(KEY_LINK, "key")
+    off -=rest.count(b"\x1b[5~") * view + rest.count(b"\x1b[A") + rest.count(b"\x1bOA")
     off += rest.count(b"\x1b[6~") * view + rest.count(b"\x1b[B") + rest.count(b"\x1bOB")
     cols, view, maxoff = draw()

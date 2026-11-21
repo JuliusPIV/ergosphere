@@ -61,6 +61,8 @@ const seen = s => `saw "${s.text.slice(0, 30)}" page ${s.termRows}x${s.termCols}
 // had user activation then.  The real open still runs.
 function recordOpens() {
   window.abOpens = [];
+  window.abLastPointer = -Infinity;
+  addEventListener('pointerdown', () => { window.abLastPointer = performance.now(); }, true);
   const open = window.open;
   window.open = function (u, target, features) {
     const ua = navigator.userActivation;
@@ -117,8 +119,28 @@ async function linkCheck(ctx, p) {
     return check(false, `tab ok; other tab: ${a ? `${a.href.slice(0, 25) || 'no bar link'} opens=${a.opens}` : 'nothing'}`);
   }
   const bad = await look(`openLink('javascript:alert(1)'); openLink('file:///etc/passwd');
+    openLink(location.origin + '/models');
     window.abOpens.length > 0 || document.querySelector('#link a').href !== 'https://example.com/ab-link'`);
-  return check(!bad, `${s.last} tab noopener; other tab bar link; ${bad ? 'bad link taken' : 'js/file refused'}`);
+  return check(!bad, `${s.last} tab noopener; other tab bar link; ${bad ? 'bad link taken' : 'js/file/self refused'}`);
+}
+
+// A key press is user activation too, for seconds, and any process under
+// grok can ask for a link (#220 review).  The stand-in asks for one when it
+// reads "k", as a model's shell tool could right after the user typed: the
+// page must show it in the bar and open no tab.
+async function keyCheck(p) {
+  await p.bringToFront();
+  // The last mouse press in the terminal is more than a second old.
+  await p.waitForFunction(() => performance.now() - window.abLastPointer > 1500, null, {timeout: WAIT});
+  await p.evaluate(() => { window.abOpens = []; });
+  await p.keyboard.press('k');
+  const {s, met} = await until(p, x => x.ok && /^(keyRc\d+|noDisplay)$/.test(x.last));
+  if (!met) return check(false, `key not handled: ${seen(s)}`);
+  // As for the click: the open frame came before the redraw showing keyRc0.
+  const r = await p.evaluate(() => ({opens: window.abOpens.map(o => o.u),
+    bar: (document.querySelector('#link a') || {}).href || ''}));
+  const ok = s.last === 'keyRc0' && !r.opens.length && r.bar === 'https://example.com/ab-key';
+  return check(ok, `${s.last}: ${r.opens.length ? `tab opened ${r.opens[0].slice(0, 30)}` : 'no tab'}, bar ${r.bar.slice(8, 30) || 'none'}`);
 }
 
 async function openPage(ctx) {
@@ -280,6 +302,7 @@ async function run() {
     checks.resize = check(met, met ? `${r0}x${c0}->${s.termRows}x${s.termCols} grok ${s.rows}x${s.cols}`
                                    : `${r0}x${c0}-> ${seen(s)}`);
     checks.link_open = await linkCheck(ctx, p);
+    checks.link_key = await keyCheck(p);
     await ctx.close();
 
     ctx = await b.newContext({viewport: {width: 412, height: 839}, hasTouch: true, isMobile: true, deviceScaleFactor: 2});

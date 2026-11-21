@@ -1581,7 +1581,10 @@ def spawn_grok(cmd, cwd, cols, rows):
         # A link grok opens must reach the user's browser, not this machine's
         # desktop or browser (#34). grok runs BROWSER with the URL; the helper
         # posts it here with this grok's token, and the page opens it.
-        for name in ("DISPLAY", "WAYLAND_DISPLAY", "BROWSER"):
+        # A server started inside another grok inherits that grok's link
+        # variables; its own groks must never get them.
+        for name in ("DISPLAY", "WAYLAND_DISPLAY", "BROWSER",
+                     "ERGOSPHERE_LINK_URL", "ERGOSPHERE_LINK_TOKEN"):
             env.pop(name, None)
         token = secrets.token_urlsafe(32)
         helper = link_browser()
@@ -1624,19 +1627,50 @@ def link_browser():
     return "%s -B %s --open-link %%s" % (exe, script)
 
 
-def link_url_ok(url):
+def link_url_ok(url, bound_host=None):
     if not isinstance(url, str) or not url or len(url) > LINK_MAX:
         return False
-    if any(ord(ch) <= 32 or ord(ch) == 127 for ch in url):
+    # A browser reads "\" as "/" and decodes %xx in a host; Python does
+    # neither, so such a URL could name another host here than in the page.
+    if any(ord(ch) <= 32 or ord(ch) == 127 or ch == "\\" for ch in url):
         return False
     try:
         parsed = urlparse(url)
         parsed.port
     except ValueError:
         return False
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or "%" in parsed.netloc:
         return False
-    return parsed.username is None and parsed.password is None
+    if parsed.username is not None or parsed.password is not None:
+        return False
+    return not link_host_is_self(parsed.hostname, bound_host)
+
+
+def link_host_is_self(host, bound_host):
+    # This server, its loopback names and its bound address: a tab opened
+    # there is same-origin with the page and passes the Sec-Fetch-Site guard
+    # on the GETs that start grok (#34 review).
+    try:
+        # idna maps fullwidth digits and case the way a browser does.
+        name = host.encode("idna").decode("ascii").lower().rstrip(".")
+    except UnicodeError:
+        return True
+    if not name or name == "localhost" or name.endswith(".localhost"):
+        return True
+    if name in listener_names(bound_host):
+        return True
+    try:
+        addr = ipaddress.ip_address(name.strip("[]"))
+    except ValueError:
+        try:
+            # inet_aton reads the short forms a browser also takes (127.1, 0x7f.1, 2130706433).
+            addr = ipaddress.IPv4Address(socket.inet_aton(name))
+        except OSError:
+            return False
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        addr = mapped
+    return addr.is_loopback or addr.is_unspecified or str(addr) in listener_names(bound_host)
 
 
 def live_for_link(token):
@@ -4554,18 +4588,29 @@ function setStatus(text, active) {
   el.textContent = text;
   el.style.color = active ? "#00ff00" : "";
 }
-// A link grok was asked to open (#34). Only http and https. A tab opens only
-// inside the click that asked for it (transient user activation); otherwise,
-// in another tab on this session or a popup blocker's way, it is a link here.
+// A link grok was asked to open (#34). Only http and https, never this
+// server. A tab opens only right after a mouse click in the terminal: any
+// process under grok can ask for a link, and a key press also counts as user
+// activation for seconds. Otherwise (no click, another tab, a popup blocker
+// in the way) it is a link here.
+var LINK_CLICK_MS = 1000;
+var lastTermClick = -Infinity;
+function markTermClick() { lastTermClick = performance.now(); }
+document.getElementById("term").addEventListener("pointerdown", markTermClick, true);
+document.getElementById("term").addEventListener("mouseup", markTermClick, true);
 function openLink(u) {
   var parsed;
   try { parsed = new URL(u); } catch (err) { return; }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
+  if (parsed.hostname === location.hostname) return;
+  var clicked = performance.now() - lastTermClick < LINK_CLICK_MS;
   // Read before the open: opening a tab uses up the activation.
   var ua = navigator.userActivation;
-  var active = !!(ua && ua.isActive);
-  if (!ua || active) window.open(parsed.href, "_blank", "noopener,noreferrer");
-  if (active) return;
+  var active = clicked && !!(!ua || ua.isActive);
+  if (active) {
+    window.open(parsed.href, "_blank", "noopener,noreferrer");
+    return;
+  }
   var box = document.getElementById("link");
   var a = document.createElement("a");
   a.href = parsed.href;
@@ -5560,7 +5605,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"ok": False, "error": "no live session for this token"})
             return
         url = obj.get("url")
-        if not link_url_ok(url):
+        if not link_url_ok(url, self._bound_endpoint()[0]):
             self._json(400, {"ok": False, "error": "only http and https links open"})
             return
         if not live.open_link(url):

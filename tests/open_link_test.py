@@ -11,7 +11,10 @@ whether it got the server's DISPLAY.  Checks:
   refused: javascript:, file: and user:pass@ links never reach the page;
   token: /open-link with a wrong token is refused (404);
   rate/scheme/ended: with the grok's own token, a second open inside the
-    pause is 429, a javascript: link 400, and after the grok is gone 404.
+    pause is 429, a javascript: link 400, and after the grok is gone 404;
+  self: links to this server (loopback names, short IPv4, ::1, a "\\@" trick)
+    are 400: a tab there would be same-origin with the page;
+  inherited: with no helper, grok gets no ERGOSPHERE_LINK_* from the server's env.
 
 Run: python3 -B tests/open_link_test.py
 Stdlib only, no network, no real grok.
@@ -43,6 +46,8 @@ os.environ["BROWSER"] = "/bin/false"
 WAIT = 15
 GOOD = "https://example.com/x?a=1"
 BAD = ["javascript:alert(1)", "file:///etc/passwd", "https://user:pw@example.com/"]
+SELF_URLS = ["http://127.0.0.1:%d/models", "http://localhost:%d/", "http://127.1:%d/",
+             "http://[::1]:%d/", "http://127.0.0.1:%d\\@example.com/"]
 
 FAKE = r'''
 import os, subprocess, sys
@@ -109,6 +114,35 @@ def ws_frames(reader):
         yield head[0] & 0x0F, reader.read(n)
 
 
+def inherited_env(erg):
+    # A server started inside another grok, with no helper of its own: its
+    # grok must not get the outer grok's link variables.
+    saved = erg.LINK_URL
+    erg.LINK_URL = None
+    os.environ["ERGOSPHERE_LINK_URL"] = "http://127.0.0.1:1/open-link"
+    os.environ["ERGOSPHERE_LINK_TOKEN"] = "outer-grok-token"
+    code = ("import os; print(os.environ.get('ERGOSPHERE_LINK_URL', 'unset'),"
+            " os.environ.get('ERGOSPHERE_LINK_TOKEN', 'unset'), 'END')")
+    try:
+        proc, master = erg.spawn_grok([sys.executable, "-c", code], TMP, 80, 24)
+    finally:
+        erg.LINK_URL = saved
+        os.environ.pop("ERGOSPHERE_LINK_URL", None)
+        os.environ.pop("ERGOSPHERE_LINK_TOKEN", None)
+    out = b""
+    try:
+        while b"END" not in out:
+            data = os.read(master, 4096)
+            if not data:
+                break
+            out += data
+    except OSError:
+        pass  # EIO once the child has exited and the pty is drained
+    proc.wait(WAIT)
+    os.close(master)
+    return out.decode("utf-8", "replace").split("END")[0].strip()
+
+
 def post(port, obj):
     req = urllib.request.Request("http://127.0.0.1:%d/open-link" % port, json.dumps(obj).encode(),
                                  {"Content-Type": "application/json"})
@@ -157,9 +191,12 @@ def main():
             erg.LINK_PAUSE = 3600
             again = post(port, {"token": token, "url": GOOD})
             script = post(port, {"token": token, "url": "javascript:alert(1)"})
+            # This server itself: a tab there is same-origin with the page (#220 review).
+            selfs = [post(port, {"token": token, "url": u % port}) for u in SELF_URLS]
             erg.kill_all()
             # grok gone (quit, exited, server restarting): its token opens nothing.
             ended = post(port, {"token": token, "url": GOOD})
+            inherited = inherited_env(erg)
         finally:
             erg.kill_all()
             server.shutdown()
@@ -178,6 +215,10 @@ def main():
         failures.append("token: the live grok has no link token")
     elif (again, script, ended) != (429, 400, 404):
         failures.append("rate/scheme/ended: got %r, want (429, 400, 404)" % ((again, script, ended),))
+    if token and selfs != [400] * len(SELF_URLS):
+        failures.append("self: links to this server got %r, want 400 each" % list(zip(SELF_URLS, selfs)))
+    if inherited != "unset unset":
+        failures.append("inherited: a grok with no helper got the parent grok's link vars (%s)" % inherited)
     for failure in failures:
         print("FAIL: " + failure)
     if failures:
