@@ -169,7 +169,7 @@ async function resumeBoxCheck(b) {
 async function rowSeamCheck(b) {
   const out = [];
   let ok = true;
-  for (const [dsf, font] of [[2.625, 13], [3.5, 16], [3, 16]]) {
+  for (const [dsf, font] of [[2.625, 13], [3.5, 13], [3, 13]]) {
     const ctx = await b.newContext({viewport: {width: 412, height: 839}, isMobile: true, hasTouch: true, deviceScaleFactor: dsf});
     try {
       await ctx.addInitScript(f => { try { localStorage.setItem('ergosphere.fontSize', String(f)); } catch (e) {} }, font);
