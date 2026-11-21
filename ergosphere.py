@@ -1197,20 +1197,31 @@ folder_checks_lock = threading.Lock()
 
 def folder_missing(cwd):
     # A saved session whose folder was deleted: Resume can never start it (#43).
-    if not (isinstance(cwd, str) and cwd):
-        return False
+    return cwd in missing_folders([cwd])
+
+
+def missing_folders(cwds):
+    # The given folders that do not exist. All are checked at once and share
+    # one FOLDER_CHECK_WAIT, so many stalled folders in one list do not add up.
+    started = []
     with folder_checks_lock:
-        check = folder_checks.get(cwd)
-        fresh = check is None
-        if fresh:
-            check = {"done": threading.Event(), "exists": False}
-            folder_checks[cwd] = check
-            threading.Thread(target=check_folder, args=(cwd, check), daemon=True).start()
-    # A check already outstanding is not waited on again: 50 rows on one stuck
-    # folder cost one wait, not fifty.
-    if check["done"].wait(FOLDER_CHECK_WAIT if fresh else 0):
-        return not check["exists"]
-    return False
+        for cwd in set(c for c in cwds if isinstance(c, str) and c):
+            check = folder_checks.get(cwd)
+            fresh = check is None
+            if fresh:
+                check = {"done": threading.Event(), "exists": False}
+                folder_checks[cwd] = check
+                threading.Thread(target=check_folder, args=(cwd, check), daemon=True).start()
+            started.append((cwd, check, fresh))
+    deadline = time.monotonic() + FOLDER_CHECK_WAIT
+    out = set()
+    for cwd, check, fresh in started:
+        # A check already outstanding is not waited on again: 50 rows on one
+        # stuck folder cost one wait, not fifty.
+        left = max(0, deadline - time.monotonic()) if fresh else 0
+        if check["done"].wait(left) and not check["exists"]:
+            out.add(cwd)
+    return out
 
 
 def check_folder(cwd, check):
@@ -2520,9 +2531,10 @@ def list_rows_tag(sessions, owners=None):
     """Change tag of the list rows, from the same inputs, without the HTML."""
     if owners is None:
         owners = list_states()
+    missing = missing_folders(row.get("cwd") for row in sessions)
     key = [
         sorted([sid, st["turn"] == "working", st["pid"], conflict_note(st)] for sid, st in owners.items()),
-        [[row.get(k) for k in ("id", "title", "cwd", "updated")] + [folder_missing(row.get("cwd"))]
+        [[row.get(k) for k in ("id", "title", "cwd", "updated")] + [row.get("cwd") in missing]
          for row in sessions],
     ]
     text = json.dumps(key, default=str, separators=(",", ":"))
@@ -2587,10 +2599,11 @@ def dashboard_rows(sessions, owners=None):
     blocks.append(dashboard_head("older"))
     blocks.append('<div class="sec" id="sec-older">')
     blocks.append('<div class="empty"%s>- none -</div>' % ("" if not older else " hidden"))
+    missing = missing_folders(row.get("cwd") for row in older)
     for seq, row in enumerate(older):
         blocks.append(dashboard_session_row(
             "older", seq, row, None, seq >= OLDER_WINDOW,
-            note="folder missing" if folder_missing(row.get("cwd")) else "",
+            note="folder missing" if row.get("cwd") in missing else "",
         ))
     if len(older) > OLDER_WINDOW:
         blocks.append(

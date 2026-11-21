@@ -3,7 +3,8 @@
 folder_missing stats a saved session's folder. On a hung mount that stat never
 returns, so GET / and /list-rows must not wait on it. The check is bounded,
 a slow folder reads as present, and only one check per folder is outstanding,
-so the 4 s poll does not pile up threads.
+so the 4 s poll does not pile up threads.  Many distinct stalled folders in
+one list share one wait; they do not add up.
 
 Run: python3 -B tests/folder_check_wait_test.py
 Stdlib only. The hung stat is simulated by blocking os.path.isdir.
@@ -14,6 +15,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -69,8 +71,21 @@ def check_poll_does_not_pile_up(erg):
     # folder is statted once, while that first stat is still outstanding.
     for _ in range(10):
         returns_within(lambda: erg.folder_missing(STALLED))
-    if len(STALL_CALLS) != 1:
-        return ["stalled folder stat started %d times, want 1" % len(STALL_CALLS)]
+    if STALL_CALLS.count(STALLED) != 1:
+        return ["stalled folder stat started %d times, want 1" % STALL_CALLS.count(STALLED)]
+    return []
+
+
+def check_many_stalled_folders_share_one_wait(erg):
+    # 10 distinct folders on one hung mount: at 0.5 s each that is 5 s, the
+    # bound is one wait for the whole render (FOLDER_CHECK_WAIT), checked at 2 s.
+    rows = [{"id": "m%d" % i, "title": "t", "cwd": "%s/many-%d" % (STALLED, i), "updated": "x"}
+            for i in range(10)]
+    start = time.monotonic()
+    done, _ = returns_within(lambda: erg.dashboard_rows(rows, {}), seconds=10)
+    took = time.monotonic() - start
+    if not done or took > 2.0:
+        return ["10 stalled folders: one list render took %.1f s, want under 2 s" % took]
     return []
 
 
@@ -93,7 +108,8 @@ def main():
     fails = []
     try:
         for check in (check_list_rows_tag_bounded, check_dashboard_rows_bounded,
-                      check_poll_does_not_pile_up, check_fast_missing_and_present_unchanged):
+                      check_poll_does_not_pile_up, check_many_stalled_folders_share_one_wait,
+                      check_fast_missing_and_present_unchanged):
             try:
                 fails += check(erg)
             except Exception as exc:
