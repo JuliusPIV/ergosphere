@@ -86,6 +86,16 @@ for side in A B; do
   python3 -B "$HERE/slow_start.py" run "${!dir}" "${!port}" "$AB_OUT/slow-$side" >"$AB_OUT/slow-$side.json" 2>"$AB_OUT/slow-$side.err"
 done
 python3 -B "$HERE/slow_start.py" summary "$AB_OUT/slow-A.json" "$AB_OUT/slow-B.json" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #134: a page held by another server (the other side's port runs the holder server).
+for side in A B; do
+  dir=AB_${side}_DIR port=AB_PORT_${side} other=AB_PORT_B
+  [ "$side" = B ] && other=AB_PORT_A
+  rm -rf "$AB_OUT/held-$side"; mkdir -p "$AB_OUT/held-$side"
+  log "$side: held page check on ${!port} (holder ${!other})"
+  NODE_PATH="$pw_path" python3 -B "$HERE/held_quit.py" run "${!dir}" "${!port}" "${!other}" "$AB_OUT/held-$side" \
+    >"$AB_OUT/held-$side.json" 2>"$AB_OUT/held-$side.err"
+done
+python3 -B "$HERE/held_quit.py" summary "$AB_OUT/held-A.json" "$AB_OUT/held-B.json" >>"$AB_OUT/summary.txt" || rc=1
 cat "$AB_OUT/summary.txt"
 [ -s "$AB_OUT/summary.txt" ] || exit 1
 exit "$rc"
