@@ -6,7 +6,8 @@
 # TUI (fakegrok.py), then the shared checks from this folder.  Writes
 # $AB_OUT/summary.txt.  Exit 1 when a check passes on A and fails on B, when the
 # browser checks break on B or leave out a check named in ab.py ORDER, or the
-# run itself breaks.  No browser or playwright on the host is only a warning.
+# run itself breaks (a server never reports ready, or no check passes on A).
+# No browser or playwright on the host is only a warning.
 # Optional: AB_CHROME (browser binary), NODE_PATH (playwright).
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,6 +80,18 @@ run_side A "$AB_A_DIR" "$AB_PORT_A"
 run_side B "$AB_B_DIR" "$AB_PORT_B"
 rc=0
 python3 -B "$HERE/ab.py" summary "$AB_OUT/A" "$AB_OUT/B" >"$AB_OUT/summary.txt" || rc=$?
+# Issue #113: a side that never started, or an A that passed nothing, means
+# the run tested nothing; equal failures on both sides are not a pass.
+for side in A B; do
+  grep -q ERGOSPHERE_READY "$AB_OUT/$side/server.log" && continue
+  echo "RUN BROKE: $side server never reported ready (see $side/server.log)" >>"$AB_OUT/summary.txt"
+  rc=1
+done
+if ! python3 -B -c 'import sys; sys.path.insert(0, sys.argv[1]); import ab
+sys.exit(0 if any(c.get("ok") for c in ab.side(sys.argv[2])[0].values()) else 1)' "$HERE" "$AB_OUT/A"; then
+  echo "RUN BROKE: no check passed on A" >>"$AB_OUT/summary.txt"
+  rc=1
+fi
 # Issue #45: one session's hung start, on each side's port again (its server has stopped).
 for side in A B; do
   dir=AB_${side}_DIR port=AB_PORT_${side}
