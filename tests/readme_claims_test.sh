@@ -9,6 +9,13 @@ fail=0
 has()   { if grep -qF -- "$2" <<<"$1"; then echo "ok:   $3"; else echo "FAIL: $3"; fail=1; fi; }
 lacks() { if grep -qF -- "$2" <<<"$1"; then echo "FAIL: $3"; fail=1; else echo "ok:   $3"; fi; }
 
+# #99: the README's recompute command for /health code_sha256 must give what the server reports.
+recompute='import hashlib as h; print(h.sha256(b"".join(h.sha256(open(f, "rb").read()).digest() for f in ("ergosphere.py", "vendor/addon-fit.js", "vendor/xterm.css", "vendor/xterm.js"))).hexdigest())'
+has "$readme" "python3 -c '$recompute'" 'README gives the code_sha256 recompute command'
+want="$(cd "$root" && python3 -B -c 'import ergosphere; print(ergosphere.runtime_fingerprint())')"
+got="$(cd "$root" && python3 -B -c "$recompute")"
+if [ -n "$want" ] && [ "$got" = "$want" ]; then echo "ok:   that command gives the server's code_sha256"; else echo "FAIL: that command gives the server's code_sha256"; fail=1; fi
+
 # No release so far has a login; a version number in the claim goes stale.
 lacks "$readme" 'v0.1'                    'README ties no-login to no version'
 lacks "$skill"  'v0.1'                    'SKILL.md ties no-login to no version'
@@ -18,9 +25,29 @@ has   "$skill"  'has no login yet'        'SKILL.md says there is no login yet'
 lacks "$readme" '<b>Active</b>'           'README names no Active group'
 lacks "$readme" 'Active, Idle and Older'  'screenshot caption names no Active group'
 has   "$readme" '<b>Working now</b>'      'README names the Working now group'
+# Phones (#121): touch scroll with fling (#66), pinch text size 8-28 px (#86),
+# keyboard refit (#137); the scroll bar drag (#136) is mouse only; #158 is open.
+has   "$readme" '<b>Works on phones</b>'  'Features has a Works on phones row'
+has   "$readme" 'Drag one finger on the terminal to scroll grok' 'README says a one-finger drag scrolls grok'
+has   "$readme" 'from 8 to 28 px'         'README gives the pinch text size range'
+has   "$readme" "so grok's input line stays in view" 'README says the keyboard does not hide the input line'
+has   "$readme" "Dragging grok's scroll bar takes a mouse" 'README says the scroll bar drag is mouse only'
+has   "$readme" 'issues/158'              'Known limits lists the page pinch resize (#158)'
 # The button on the session list is "+ New Agent".
 has   "$readme" '**+ New Agent**'         'README names the + New Agent button'
 lacks "$readme" '| New session |'         'keyboard table names no New session action'
 # Since #135 a session held by another Ergosphere server on this machine can be taken over.
 lacks "$readme" 'does not attach to sessions run by another Ergosphere server' 'Known limits allows takeover from another server'
+# #115: the installer refuses a fresh install dir that already holds the ERGOSPHERE_CONFIG file.
+has   "$readme" 'Point it at a file outside the install directory, for example' 'README says to keep ERGOSPHERE_CONFIG outside the install dir'
+has   "$readme" 'is refused on purpose'  'README says a non-Ergosphere non-empty install dir is refused on purpose'
+# The README spells the approval modes as the + New Agent dialog labels them (#163).
+labels="$(sed -n 's/.*name="approval" value="[^"]*"[^>]*> \([^<]*\)<\/label>.*/\1/p' "$root/ergosphere.py")"
+[ "$(grep -c . <<<"$labels")" -eq 3 ] || { echo "FAIL: dialog has 3 approval labels"; fail=1; }
+while IFS= read -r label; do
+  [ -n "$label" ] && has "$readme" "<b>$label</b>" "README names the dialog's '$label' mode"
+done <<<"$labels"
+for word in '<b>Ask</b>' '<b>Auto</b>' '<b>Always approve</b>' 'Ask is `' 'Auto is `' 'Always approve is `' 'Auto or Always approve' 'in Ask mode' 'resumes in Ask,'; do
+  lacks "$readme" "$word" "README does not spell a mode as $word"
+done
 exit "$fail"

@@ -136,24 +136,30 @@ def main():
     for name, table in tables:
         erg.LIVE.clear()
         erg.LIVE.update(table)
-        steps.append({"body": {"sessions": erg.list_live()}})
+        steps.append({"body": erg.live_info()})
         want.append((name, erg.running_sessions()))
+    # A spawn blocked in STARTING is a running session for the restart gate
+    # but has no LIVE row: the poll must still count it (and keep Restart off).
+    erg.STARTING.add("spawning")
+    steps.append({"body": erg.live_info()})
+    want.append(("blocked spawn, no live session", erg.running_sessions()))
+    erg.STARTING.clear()
     # Restart refused (a session started first), then that session ends:
     # the refusal must not stay on screen next to an enabled button.
     busy = "1 grok session running; restart needs zero"
-    one = {"sessions": [{"id": "e", "alive": True}]}
+    one = {"sessions": [{"id": "e", "alive": True}], "running": 1}
     steps.append({"click": True, "refuse": {"ok": False, "sessions": 1, "error": busy}, "body": one})
-    steps.append({"body": {"sessions": []}})
+    steps.append({"body": {"sessions": [], "running": 0}})
     # A poll goes out at zero and its reply is held; a session starts and a
     # restart is refused with a count of one; then the old reply lands.  It
     # must not reset the count to zero, clear the refusal or enable Restart.
     steps.append({"hold": True, "body": None})
     steps.append({"click": True, "refuse": {"ok": False, "sessions": 1, "error": busy},
-                  "release": {"sessions": []}})
+                  "release": {"sessions": [], "running": 0}})
     # Restart pressed at zero; while its request is out a session starts and
     # ends again.  The poll must not re-enable the button.
-    steps.append({"click": True, "body": {"sessions": [{"id": "e", "alive": True}]}})
-    steps.append({"body": {"sessions": []}})
+    steps.append({"click": True, "body": {"sessions": [{"id": "e", "alive": True}], "running": 1}})
+    steps.append({"body": {"sessions": [], "running": 0}})
     # #156: with one session running, the restart's /health check fails, or
     # the restart is refused without a count.  Restart must stay disabled,
     # also after the next poll at the same count.

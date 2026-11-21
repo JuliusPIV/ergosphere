@@ -11,6 +11,7 @@ fail=0
 ok()  { echo "ok:   $1"; }
 bad() { echo "FAIL: $1"; fail=1; }
 tmp=$(mktemp -d)
+port=${ERGOSPHERE_TEST_PORT:-$(python3 -I "$root/tests/free_port.py")} || exit 1
 stub_pid=""
 trap '[ -n "$stub_pid" ] && kill "$stub_pid" 2>/dev/null; rm -rf "$tmp"' EXIT
 
@@ -26,13 +27,18 @@ if grep -q 'badge/version-v' README.md; then bad "README version badge is hard-c
 ver_of() { python3 -I -c 'import runpy,sys; print(runpy.run_path(sys.argv[1])["VERSION"])' "$1"; }
 v=$(ver_of ergosphere.py)
 if [ "$v" = dev ]; then ok "checkout reports dev"; else bad "checkout reports '$v', expected dev"; fi
-mkdir "$tmp/arc"
-git archive --format=tar HEAD ergosphere.py | tar -x -C "$tmp/arc"
-want=$(git describe --tags --match 'v[0-9]*' HEAD 2>/dev/null)
-v=$(ver_of "$tmp/arc/ergosphere.py")
-if [ -z "$want" ]; then echo "skip: no release tags in this clone; archive reports '$v'"
-elif [ "$v" = "${want#v}" ]; then ok "archive reports $v (git describe $want)"
-else bad "archive reports '$v', expected '${want#v}'"; fi
+# Tag a commit in a throwaway repo rather than reading this clone's tags: a review
+# checkout can be a worktree whose git dir is out of reach (every git command fails
+# there), and a clone may have no tags at all.  Either way the check must still run.
+g() { env -u GIT_DIR -u GIT_WORK_TREE GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  git -C "$tmp/rel" -c user.name=t -c user.email= -c commit.gpgsign=false -c tag.gpgsign=false "$@"; }
+mkdir "$tmp/rel" "$tmp/arc"
+cp ergosphere.py .gitattributes "$tmp/rel/"
+if g init -q && g add ergosphere.py .gitattributes && g commit -q -m release && g tag v9.8.7 &&
+   g archive --format=tar HEAD ergosphere.py | tar -x -C "$tmp/arc"; then
+  v=$(ver_of "$tmp/arc/ergosphere.py")
+  if [ "$v" = 9.8.7 ]; then ok "archive of tag v9.8.7 reports $v"; else bad "archive of tag v9.8.7 reports '$v', expected 9.8.7"; fi
+else bad "could not build a tagged test archive with git"; fi
 # An archive where describe found no tag expands the placeholder to "".
 v=$(sed 's/^_ARCHIVE_DESCRIBE = .*/_ARCHIVE_DESCRIBE = ""/' ergosphere.py |
   python3 -I -c 'import sys; ns = {"__name__": "t"}; exec(sys.stdin.read(), ns); print(ns["VERSION"])')
@@ -41,6 +47,10 @@ if [ "$v" = dev ]; then ok "archive with no tag reports dev"; else bad "archive 
 # 3. The installer: latest-release lookup and --version, in --check mode (changes nothing).
 mkdir -p "$tmp/bin"
 printf '#!/bin/sh\necho "grok 0.0.0-test"\n' >"$tmp/bin/grok"; chmod +x "$tmp/bin/grok"
+# --check downloads the release it verifies; refuse that GitHub fetch offline.
+# shellcheck disable=SC2016  # $@ and $a belong to the stub
+printf '#!/bin/sh\nfor a in "$@"; do case "$a" in https://github.com/*/archive/*) exit 7 ;; esac; done\nexec %q "$@"\n' \
+  "$(command -v curl)" >"$tmp/bin/curl"; chmod +x "$tmp/bin/curl"
 python3 -I -c '
 import http.server, sys
 class H(http.server.BaseHTTPRequestHandler):
@@ -58,7 +68,7 @@ for _ in $(seq 50); do [ -s "$tmp/port" ] && break; sleep 0.1; done
 latest="http://127.0.0.1:$(cat "$tmp/port")/releases/latest"
 run() {
   env -u ERGOSPHERE_PORT -u ERGOSPHERE_INSTALL_SOURCE_URL -u ERGOSPHERE_TOKEN PATH="$tmp/bin:$PATH" \
-    ERGOSPHERE_INSTALL_LATEST_URL="$latest" bash "$root/install.sh" --check --dir "$tmp/dest" --port "${ERGOSPHERE_TEST_PORT:-9560}" "$@" 2>&1 </dev/null
+    ERGOSPHERE_INSTALL_LATEST_URL="$latest" bash "$root/install.sh" --check --dir "$tmp/dest" --port "$port" "$@" 2>&1 </dev/null
 }
 out=$(run)
 if grep -q 'release  *v9\.8\.7 (latest)' <<<"$out"; then ok "lookup finds the latest release"; else bad "lookup: $out"; fi
