@@ -2330,23 +2330,42 @@ def _turn_marked(raw):
     return bool(raw) and _TURN_MARK in raw.replace(b"\0", b" ")
 
 
+def _proc_ident(pid):
+    """(ppid, start time) from one read of /proc/<pid>/stat, or None.
+
+    The start time (field 22) tells a reused pid from the process the
+    snapshot saw, even when the new process has the same argv.
+    """
+    try:
+        raw = open("/proc/%d/stat" % int(pid), "rb").read()
+    except (OSError, ValueError):
+        return None
+    fields = raw[raw.rfind(b")") + 2:].split()
+    if len(fields) < 20:
+        return None
+    return fields[1], fields[19]
+
+
 def _poll_snapshot(scan):
-    # Watched: every grok, every turn-mark process, and their ancestors. A
-    # grok quitting, a turn ending, a pid taken by another program, or a
-    # reparent (only when a parent exits) changes one of these.
+    # Watched: every grok, every turn-mark process, and their ancestors, by
+    # argv, ppid and start time. A grok quitting, a turn ending, a pid taken
+    # by another process (even with the same argv), or a reparent changes one.
     watch = {}
     for pid in list(scan.groks) + [p for p, raw in scan.cmd.items() if _turn_marked(raw)]:
         for _ in range(64):
             if pid in watch or pid not in scan.ppids:
                 break
-            watch[pid] = scan.cmd.get(pid, b"")
+            ident = _proc_ident(pid)
+            if ident is not None and ident[0] != str(scan.ppids[pid]).encode():
+                ident = None  # changed since the scan read it: the next check rescans
+            watch[pid] = (scan.cmd.get(pid, b""), ident)
             pid = scan.ppids[pid]
     return {"scan": scan, "at": time.monotonic(), "watch": watch}
 
 
 def _poll_snapshot_valid(snap):
     # Every argv is read again (a process can exec into grok at any time);
-    # only the stat pass, the larger part of a ProcScan, is skipped.
+    # stat is read only for watched pids, not for every pid as ProcScan does.
     if time.monotonic() - snap["at"] > POLL_SCAN_MAX_AGE:
         return False
     try:
@@ -2362,7 +2381,8 @@ def _poll_snapshot_valid(snap):
         pid = int(name)
         raw = read_proc_cmdline(pid)
         if pid in watch:
-            if raw != watch[pid]:
+            argv, ident = watch[pid]
+            if raw != argv or ident is None or _proc_ident(pid) != ident:
                 return False
             seen += 1
         elif pid != me and (grok_cmdline(raw) or _turn_marked(raw)):

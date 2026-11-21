@@ -3,7 +3,8 @@
 Covers: unchanged polls make at most one full /proc pass; the polls still see
 at once a grok that starts, a wrapper that execs grok, a grok that opens the
 session's file after a poll, a grok that quits, a
-pid taken by another program, a turn starting and ending, this server
+pid taken by another program (also one with the same argv, told apart by
+parent and start time), a turn starting and ending, this server
 starting and stopping its own grok, and a wrapper parent exiting (reparent);
 concurrent polls agree; a slow poll scan holds no lock that actions need;
 a /proc listing that fails mid-way; actions still make their own scan.
@@ -139,12 +140,18 @@ def frozen_proc(erg):
     names = [n for n in real_listdir("/proc") if n.isdigit()]
     cmd = {int(n): real_cmd(int(n)) for n in names}
     ppid = {int(n): real_ppid(int(n)) for n in names}
+    real_ident = getattr(erg, "_proc_ident", None)
+    ident = {int(n): (str(ppid[int(n)]).encode(), b"1") for n in names}
     os.listdir = lambda path=".": list(names) if path == "/proc" else real_listdir(path)
     erg.read_proc_cmdline = lambda pid: cmd.get(int(pid), b"")
     erg.proc_stat_ppid = lambda pid: ppid.get(int(pid))
+    if real_ident is not None:
+        erg._proc_ident = lambda pid: ident.get(int(pid))
 
     def undo():
         os.listdir, erg.read_proc_cmdline, erg.proc_stat_ppid = real_listdir, real_cmd, real_ppid
+        if real_ident is not None:
+            erg._proc_ident = real_ident
     return undo
 
 
@@ -262,6 +269,73 @@ def check_pid_reused(erg):
         proc.kill()
         proc.wait()
     return "reuse: " + failure if failure else None
+
+
+def reuse_pid(erg, pid, ppid):
+    """Make pid read as a new process with the same argv: new start time, given parent."""
+    real_ident = getattr(erg, "_proc_ident", None)
+    real_ppid = erg.proc_stat_ppid
+    if real_ident is not None:
+        erg._proc_ident = lambda p: (str(ppid).encode(), b"999999999") if int(p) == pid else real_ident(p)
+    erg.proc_stat_ppid = lambda p: ppid if int(p) == pid else real_ppid(p)
+
+    def undo():
+        if real_ident is not None:
+            erg._proc_ident = real_ident
+        erg.proc_stat_ppid = real_ppid
+    return undo
+
+
+def check_pid_reused_same_argv(erg):
+    # This server's wrapper runs grok; that grok exits and an outside grok with
+    # the same argv gets its pid under another parent: it must read as a holder.
+    sid = new_sid(13)
+    wrapper = ["sh", "-c", '"$0" -c "$1" --resume "$2"; sleep 600', GROK, FAKE, sid]
+    live, _reused = erg.open_live(sid, wrapper, CWD, 80, 24)
+    child = []
+    wait_for(lambda: child.extend(p for p in (int(n) for n in os.listdir("/proc") if n.isdigit())
+                                  if grok_argv(p) and sid.encode() in cmdline(p)) or child)
+    if not child:
+        return "same argv: grok under the wrapper never started"
+    got = info(erg, sid)
+    if not got["here"] or got["holder"]:
+        erg.kill_proc(live.proc)
+        return "same argv setup: here=%s holder=%s" % (got["here"], got["holder"])
+    undo = reuse_pid(erg, child[0], 1)
+    try:
+        got = info(erg, sid)
+    finally:
+        undo()
+        erg.kill_proc(live.proc)
+        with erg.LIVE_LOCK:
+            erg.LIVE.pop(sid, None)
+        try:
+            os.kill(child[0], signal.SIGKILL)
+        except OSError:
+            pass
+    if not got["holder"] or got["holder"]["pid"] != child[0]:
+        return "same argv: poll says holder=%s, want pid %d" % (got["holder"], child[0])
+    return None
+
+
+def check_new_start_time_rescans(erg):
+    # Same pid, argv and parent, new start time: another process. Rescan.
+    sid = new_sid(14)
+    proc = popen([GROK, "-c", FAKE, "-r", sid])
+    wait_for(lambda: grok_argv(proc.pid))
+    failure = expect(erg, sid, "held-by-cli")
+    if failure:
+        return "start time setup: " + failure
+    undo = reuse_pid(erg, proc.pid, os.getpid())
+    count = Count(erg)
+    try:
+        info(erg, sid)
+    finally:
+        count.done()
+        undo()
+        proc.kill()
+        proc.wait()
+    return None if count.n == 1 else "start time: %d full /proc passes after a new start time (want 1)" % count.n
 
 
 def check_turn_start_and_end(erg):
@@ -433,7 +507,8 @@ def main():
     erg = load()
     erg.print = lambda *a, **k: None
     checks = (check_unchanged_polls_reuse_one_pass, check_grok_starts_and_quits,
-              check_wrapper_execs_grok, check_grok_opens_session_later, check_pid_reused, check_turn_start_and_end,
+              check_wrapper_execs_grok, check_grok_opens_session_later, check_pid_reused,
+              check_pid_reused_same_argv, check_new_start_time_rescans, check_turn_start_and_end,
               check_own_start_and_stop, check_reparent, check_concurrent_polls_agree,
               check_slow_scan_holds_no_lock, check_listing_fails, check_actions_scan_fresh)
     failures = []
