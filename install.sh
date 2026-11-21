@@ -263,15 +263,42 @@ for pid in sorted((p for p in os.listdir("/proc") if p.isdigit()), key=int):
 
 # True when BIND is 0.0.0.0 and the port is held on another address (say
 # 127.0.0.2) by something other than this install's server: probe asks only
-# 127.0.0.1, so bind the wildcard as the server does (#150).
+# 127.0.0.1, so bind the wildcard as the server does (#150). The port counts
+# as free only when every socket listening on it is this install's server, so
+# its server on 127.0.0.1:PORT does not hide another program on
+# 127.0.0.2:PORT (#142).
 wild_busy() {
+  local own="" b p
   [[ "$BIND" == 0.0.0.0 ]] || return 1
   "$PYTHON" -I -c '
 import socket, sys
 s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(("0.0.0.0", int(sys.argv[1])))' "$PORT" 2>/dev/null </dev/null && return 1
-  ! find_own | awk -v p="$PORT" '$2 == p { f = 1 } END { exit !f }'
+  read -r b p own <<<"$(find_own)"
+  [[ -n "$own" && "$p" == "$PORT" ]] || return 0
+  "$PYTHON" -I -c '
+import os, sys
+port, pid = int(sys.argv[1]), sys.argv[2]
+held = set()
+for t in ("/proc/net/tcp", "/proc/net/tcp6"):
+    try:
+        rows = open(t).read().splitlines()[1:]
+    except OSError:
+        continue
+    for row in rows:
+        c = row.split()
+        if len(c) > 9 and c[3] == "0A" and int(c[1].rsplit(":", 1)[1], 16) == port:
+            held.add(c[9])
+mine = set()
+try:
+    for fd in os.listdir("/proc/%s/fd" % pid):
+        link = os.readlink("/proc/%s/fd/%s" % (pid, fd))
+        if link.startswith("socket:["):
+            mine.add(link[8:-1])
+except OSError:
+    sys.exit(0)
+sys.exit(0 if held - mine or not held & mine else 1)' "$PORT" "$own" 2>/dev/null </dev/null
 }
 
 # True when BIND:PORT answers and is not this install's server. Sets HELD_BY.
@@ -586,7 +613,7 @@ load_config() {
 
 # Checks that depend on the chosen settings. Still before any download.
 check_target() {
-  local cfg=$CFG_FILE up old=0
+  local cfg=$CFG_FILE up old=0 old_pid=""
   printf 'Checking install target:\n'
   if [[ -e "$DEST" && ! -d "$DEST" ]]; then
     row invalid dir "$DEST exists and is not a directory"
@@ -638,23 +665,28 @@ socket.socket().bind((sys.argv[1], 0))' "$BIND" 2>/dev/null; then
     probe "$OLD_BIND" "$OLD_PORT"
     if [[ "$PROBE" == match || "$PROBE" == moved ]]; then
       same_install
-      old=1
+      old=1 old_pid=$PROBE_PID
       row ok server "Ergosphere from this dir running on ${PROBE_AT}, pid $PROBE_PID; it moves to ${BIND}:${PORT}"
     fi
   fi
-  if [[ "$old" -eq 0 || "$OLD_PORT" != "$PORT" ]]; then
-    probe "$BIND" "$PORT"
-    # With old=1 this install's server was already found and reported above.
-    if [[ "$PROBE" == down && "$old" -eq 0 ]]; then probe_own; fi
-    if [[ "$PROBE" == match || "$PROBE" == moved ]]; then same_install; fi
-    if [[ "$PROBE" == down || "$PROBE" == moved ]] && wild_busy; then PROBE=other; fi
-    case "$PROBE" in
-      match) row ok server "Ergosphere from this dir already running on ${BIND}:${PORT}, pid $PROBE_PID" ;;
-      moved) row ok server "Ergosphere from this dir running on ${PROBE_AT}, pid $PROBE_PID; it moves to ${BIND}:${PORT}" ;;
-      down) row ok server "port $PORT is free" ;;
-      *) row invalid server "port $PORT is in use by something that is not this Ergosphere at ${BIND}; it was not touched" ;;
-    esac
+  # The new address is probed even when only the bind changed (#142): another
+  # program may already listen there on the same port.
+  probe "$BIND" "$PORT"
+  # With old=1 this install's server was already found and reported above; it
+  # may answer on the new address too (a move from or to 0.0.0.0): self.
+  if [[ "$old" -eq 1 && ( "$PROBE" == match || "$PROBE" == moved ) && "$PROBE_PID" == "$old_pid" ]]; then
+    PROBE=self
   fi
+  if [[ "$PROBE" == down && "$old" -eq 0 ]]; then probe_own; fi
+  if [[ "$PROBE" == match || "$PROBE" == moved ]]; then same_install; fi
+  if [[ "$PROBE" == down || "$PROBE" == moved || "$PROBE" == self ]] && wild_busy; then PROBE=other; fi
+  case "$PROBE" in
+    self) ;;
+    match) row ok server "Ergosphere from this dir already running on ${BIND}:${PORT}, pid $PROBE_PID" ;;
+    moved) row ok server "Ergosphere from this dir running on ${PROBE_AT}, pid $PROBE_PID; it moves to ${BIND}:${PORT}" ;;
+    down) row ok server "port $PORT is free" ;;
+    *) row invalid server "port $PORT is in use by something that is not this Ergosphere at ${BIND}; it was not touched" ;;
+  esac
   if is_loopback "$BIND"; then
     row ok bind "$BIND (loopback)"
   else
