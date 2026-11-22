@@ -3,19 +3,25 @@
 # stops, and say what the real run does with the server?  Runs the B tree's
 # tests/install_check_plan_test.sh once with each side's install.sh (A on
 # AB_PORT_A, B on AB_PORT_B) and lines up its checks.  Prints the section for
-# summary.txt; exit 1 when any check fails on B.
+# summary.txt; exit 1 when any check fails on B or the B-side test exits nonzero.
 # Needs AB_A_DIR, AB_B_DIR, AB_PORT_A, AB_PORT_B, AB_OUT (see run.sh).
+# B's exit status counts too: a timeout or crash after the last ok line leaves
+# no FAIL line, so the name check alone would pass it.
 set -u
 w="$AB_OUT/check-plan"
 rm -rf "$w"; mkdir -p "$w" || exit 2
 log() { printf '%s install_check_plan.sh: %s\n' "$(date +%T)" "$*" >&2; }
 test="$AB_B_DIR/tests/install_check_plan_test.sh"
+b_rc=0
 
 for side in A B; do
   dir=AB_${side}_DIR port=AB_PORT_${side}
   log "$side: $test with ${!dir}/install.sh on ${!port}"
+  rc=0
   ERGOSPHERE_TEST_PORT=${!port} ERGOSPHERE_TEST_INSTALLER="${!dir}/install.sh" timeout 300 \
-    bash "$test" >"$w/$side.log" 2>&1
+    bash "$test" >"$w/$side.log" 2>&1 || rc=$?
+  log "$side: exit $rc"
+  [ "$side" = B ] && b_rc=$rc
 done
 
 # Check names are the test's ok/FAIL lines up to the first ':' after the
@@ -37,6 +43,7 @@ while IFS= read -r c; do
   if [[ "$b" != PASS ]]; then bfail+=("$c"); fi
 done < <(names "$w/B.log"; names "$w/A.log")
 if [ "$n" -eq 0 ]; then echo "RUN BROKE: the test printed no checks (see $w)"; exit 1; fi
+if [ "$b_rc" -ne 0 ]; then bfail+=("test exited $b_rc on B (see $w/B.log)"); fi
 if [ ${#regress[@]} -gt 0 ]; then echo "REGRESSION: passes on A, fails on B: ${regress[*]}"; fi
 if [ ${#bfail[@]} -gt 0 ]; then echo "CHECK FAILURE on B: ${bfail[*]}"; exit 1; fi
 exit 0
