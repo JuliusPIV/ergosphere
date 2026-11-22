@@ -24,18 +24,19 @@ names() { sed -n 's/^\(ok\|FAIL\): *//p' "$1" | sed -E 's/: .*//; s/[0-9]{3,}/N/
 echo
 echo "Issue #140: install.sh --check against the real run (same test, each side's install.sh)"
 printf '%-58s %-5s %-5s\n' check A B
-regress=() bfail=() seen=()
+regress=() bfail=() n=0
+declare -A seen
 while IFS= read -r c; do
-  [[ " ${seen[*]-} " == *" $c "* ]] && continue
-  seen+=("$c")
+  [[ -n "${seen[$c]:-}" ]] && continue
+  seen[$c]=1 n=$((n + 1))
   a=FAIL b=FAIL
-  sed -n 's/^ok: *//p' "$w/A.log" | sed -E 's/: .*//; s/[0-9]{3,}/N/g' | grep -qxF "$c" && a=PASS
-  sed -n 's/^ok: *//p' "$w/B.log" | sed -E 's/: .*//; s/[0-9]{3,}/N/g' | grep -qxF "$c" && b=PASS
+  sed -n 's/^ok: *//p' "$w/A.log" | sed -E 's/: .*//; s/[0-9]{3,}/N/g' | grep -qxF -- "$c" && a=PASS
+  sed -n 's/^ok: *//p' "$w/B.log" | sed -E 's/: .*//; s/[0-9]{3,}/N/g' | grep -qxF -- "$c" && b=PASS
   printf '%-58s %-5s %-5s\n' "${c:0:58}" "$a" "$b"
   if [[ "$a" == PASS && "$b" != PASS ]]; then regress+=("$c"); fi
   if [[ "$b" != PASS ]]; then bfail+=("$c"); fi
 done < <(names "$w/B.log"; names "$w/A.log")
-if [ ${#seen[@]} -eq 0 ]; then echo "RUN BROKE: the test printed no checks (see $w)"; exit 1; fi
+if [ "$n" -eq 0 ]; then echo "RUN BROKE: the test printed no checks (see $w)"; exit 1; fi
 if [ ${#regress[@]} -gt 0 ]; then echo "REGRESSION: passes on A, fails on B: ${regress[*]}"; fi
 if [ ${#bfail[@]} -gt 0 ]; then echo "CHECK FAILURE on B: ${bfail[*]}"; exit 1; fi
 exit 0
