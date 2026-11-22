@@ -300,6 +300,9 @@ async function run() {
     checks.keyboard_android = await keyboardCheck(b, 'Pixel 7', 320, false);
     checks.keyboard_ios = await keyboardCheck(b, 'iPhone 14', 300, true);
     // Every browser.d/ module (#243): a new page check is a new file there.
+    // resume_box and ended_view are set below, so they are named here too.
+    const clash = browserD.clashes(browserD.list(), [...Object.keys(checks), 'resume_box', 'ended_view']);
+    if (clash.length) throw new Error(`browser.d/ name(s) clash with built-in checks: ${clash.join(', ')}`);
     Object.assign(checks, await browserD.runAll(browserD.list(),
       {b, port, sid, url, WAIT, wait, check, status, until, fitted, caughtUp, seen, openPage, screen, devices}));
     // Last: these quit and resume the session the other checks share.

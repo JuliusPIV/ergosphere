@@ -161,6 +161,21 @@ def test_ab_py(tmp):
            "ab.py: a browser.d module deleted from B but in the base tree fails the A/B (rc %s)" % rc)
 
 
+def test_browser_d_clash(tmp):
+    if not shutil.which("node"):
+        print("SKIP browser_d clash: node not found")
+        return
+    # A browser.d module named like a built-in check would overwrite that
+    # check's result in browser.js (Object.assign), hiding a regression.
+    clash_dir = tmp / "clash"
+    write(clash_dir / "browser_d.js", (AB / "browser_d.js").read_text())
+    write(clash_dir / "clash_check.js", "const m = require('./browser_d.js');\n"
+          "console.log(JSON.stringify(m.clashes([{name: 'terminal'}, {name: 'new_check'}], ['terminal', 'resume_box'])));\n")
+    r = subprocess.run(["node", "clash_check.js"], cwd=str(clash_dir), capture_output=True, text=True, timeout=30)
+    expect(r.returncode == 0 and r.stdout.strip() == '["terminal"]',
+           "browser_d: a module named like a built-in check is reported as a clash (rc %s, %r)" % (r.returncode, r.stdout.strip() or r.stderr.strip()[:120]))
+
+
 def test_agents_md():
     try:
         text = (ROOT / "AGENTS.md").read_text()
@@ -175,6 +190,7 @@ def main():
     try:
         test_run_checks(tmp)
         test_browser_d(tmp)
+        test_browser_d_clash(tmp)
         test_ab_py(tmp)
         test_agents_md()
     finally:

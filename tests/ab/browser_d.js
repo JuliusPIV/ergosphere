@@ -21,6 +21,12 @@ function list() {
   return added.slice().sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0));
 }
 
+// browser.js merges these results into its own checks by name, so a module
+// that reuses a built-in name would replace that check's result (#243 r2-1).
+function clashes(mods, taken) {
+  return mods.map(m => m.name).filter(n => taken.includes(n));
+}
+
 async function runAll(mods, t) {
   const out = {};
   for (const m of mods) {
@@ -35,4 +41,4 @@ async function runAll(mods, t) {
   return out;
 }
 
-module.exports = {add, list, runAll};
+module.exports = {add, list, clashes, runAll};
