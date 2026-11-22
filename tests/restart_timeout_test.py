@@ -48,6 +48,19 @@ def run_slow_restart(erg, delay):
     return (replies[0] if replies else None), shut
 
 
+def run_stalled_log(erg, delay):
+    """Run one fast restart whose 'restart requested' log write takes `delay` seconds."""
+    def stalled_print(*a, **k):
+        if a and str(a[0]).startswith("restart requested"):
+            time.sleep(delay)
+
+    erg.print = stalled_print
+    try:
+        return run_slow_restart(erg, 0)
+    finally:
+        erg.print = lambda *a, **k: None
+
+
 def main():
     spec = importlib.util.spec_from_file_location("ergosphere", ROOT / "ergosphere.py")
     erg = importlib.util.module_from_spec(spec)
@@ -67,6 +80,12 @@ def main():
             failures.append("a restart past the budget replied 200 after the client may have given up")
         if erg.RESTART.is_set():
             failures.append("a restart past the budget left RESTART set, so launches stay refused")
+        code, shut = run_stalled_log(erg, 1.0)
+        erg.RESTART.clear()
+        if shut:
+            failures.append("a restart whose log write stalled past the budget still shut the server down")
+        if code == 200:
+            failures.append("a restart whose log write stalled past the budget replied 200")
         code, shut = run_slow_restart(erg, 0)
         erg.RESTART.clear()
         if code != 200 or not shut:

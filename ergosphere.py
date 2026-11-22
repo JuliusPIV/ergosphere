@@ -5381,13 +5381,16 @@ class Handler(BaseHTTPRequestHandler):
             RESTART.clear()
             self._json(409, {"ok": False, "error": problem + "; not restarting"})
             return
+        # The log write can block on a stalled disk, so it goes before the
+        # budget check: its time counts against the budget, and nothing that
+        # can block sits between the check and the restart commit.
+        print("restart requested; next %s:%s" % (nxt.bind, nxt.port), flush=True)
         # The client may have given up while the checks ran. Past the budget,
         # refuse rather than restart behind the installer's back.
         if time.monotonic() - started > RESTART_BUDGET:
             RESTART.clear()
             self._json(503, {"ok": False, "error": "restart checks took too long; not restarting"})
             return
-        print("restart requested; next %s:%s" % (nxt.bind, nxt.port), flush=True)
         # RESTART is set: the restart must go ahead even if the client is
         # gone and the reply raises, or the server serves on refusing launches.
         try:
