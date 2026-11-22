@@ -800,14 +800,6 @@ ac0752c3bd9baa66515814b556c37ba752883519d6774192ca33b0c7071d42b0 docs/images/cha
 5abee068f303e3d2c280d9529946a28ac5ad849f64cfafb01eb809d4d12fb7e0 .ghflow.conf
 1f20f473aaa065da077385bbf5720c895b58dd467a3a721ba01f1cc792f0d2d7 .gitattributes
 2b37aa6016d302851b7caeac134aca546464dd46033c404cf97daab13ad75c51 .gitignore
-0231c79d7ebed06d16812205a66ea6a71dcc1d990b554858d7adafbf6bf2be4d install.sh
-3c5cc8f0a18962126640d317378ba7e9114102eed3122e6c3af2c422cc801782 install.sh
-4f4f9c7cfce2bba3e9d73c91ff3183578de435f6e6b16e7147708556b6afe6e7 install.sh
-6a73e9775019053a39ff22a8a6766461d3eb4573d7c9899c0f33a4c2b66acbe9 install.sh
-81290508eb5b50f88018b2bd0293559420d11f2de1173973c41be0926b52ba58 install.sh
-d462d2cf5a7cb2287ec50eab0216ad9e9de5039ebab4c824f91bcc3dcaed3b6d install.sh
-d9280df817d1b51f683fb6d9c8367390b6830773edfd2205bcd45b46efa91176 install.sh
-dd82044bbcee67c34635c43eb694155295e1b3a3b34108b6d731d13e07860c16 install.sh
 0c5c4f58cee98c93343176edbd3c2f5911fa15d1bb0ee88b39990c743e9f143b tests/ab/ab.py
 442811ad6768f354564266425ff125e9ae6a4bedbe7ae936bec459e0c30457f7 tests/ab/ab.py
 5876da9f6e6cae33e1d24dd202a9e7f707c9eedcf76b0cdb40ab4a1542645a50 tests/ab/ab.py
@@ -897,6 +889,9 @@ abb51b59526abe314044d0ad43c5d442962df0b2065208a86fd600e8b9f5f7bf tests/writing_h
 # archive. A user's own file or an edited copy at that path is kept. Then the
 # folders that leaves empty. A DEST holding .git is a checkout, which no
 # installer wrote: it is left alone.
+# install.sh is never removed: a user who copies the release's install.sh into
+# DEST makes a file the bytes of which cannot be told from an old installer's.
+# A stale install.sh is harmless, since the server never reads it.
 remove_dev_files() {
   local rel dir real sha known n=0 dirs=()
   if [[ -e "$DEST/.git" || -L "$DEST/.git" ]]; then
@@ -907,10 +902,10 @@ remove_dev_files() {
   known=$OLD_DEV_FILES
   while IFS= read -r -d '' rel; do
     rel=${rel#./}
-    case "$rel" in tests/*|docs/*|.git*|.ghflow*|install.sh) known+="$(sha_of "$SRC/$rel") $rel"$'\n' ;; esac
+    case "$rel" in tests/*|docs/*|.git*|.ghflow*) known+="$(sha_of "$SRC/$rel") $rel"$'\n' ;; esac
   done < <(cd "$SRC" && find . -type f -print0)
   while IFS= read -r rel; do
-    case "$rel" in tests/*|docs/*|.git*|.ghflow*|install.sh) ;; *) continue ;; esac
+    case "$rel" in tests/*|docs/*|.git*|.ghflow*) ;; *) continue ;; esac
     dir=$(dirname -- "$rel")
     [[ -f "$DEST/$rel" && ! -L "$DEST/$rel" ]] || continue
     # An installer copy has the bytes of some release. Anything else at that
