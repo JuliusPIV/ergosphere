@@ -881,12 +881,20 @@ cb2147bc7baa8a914ec759f3124a07f9d1ac641980e1e30b1937b53bedd6df0f tests/touch_scr
 d25f73bf53c6efca47966bde2a4578f15253966f22319ceba5b6049c77805367 tests/watchdog_test.py
 abb51b59526abe314044d0ad43c5d442962df0b2065208a86fd600e8b9f5f7bf tests/writing_hints_test.py
 '
+# An old installer copies every developer file of its release in one run, and
+# no release dropped one, so every pre-#97 install holds all of the first
+# release's. A DEST missing one of these was not written by an old installer:
+# a byte-identical file there is the user's own copy, and is kept.
+OLD_INSTALL_SET='.ghflow-allow .ghflow.conf .gitignore docs/images/chat.png
+docs/images/ergosphere-banner.svg docs/images/new-session.png
+docs/images/session-list.png docs/images/settings.png'
 
 # Installers before #97 copied the archive's developer files into DEST, and
 # install_files never removes anything (#199). Removes only those: a regular
 # file in DEST, reached through no link, at a path install_files skips, whose
 # bytes match that path in a pre-#97 release (OLD_DEV_FILES) or in this
-# archive. A user's own file or an edited copy at that path is kept. Then the
+# archive, and only in a DEST that holds OLD_INSTALL_SET (an old installer's
+# evidence). A user's own file or an edited copy at that path is kept. Then the
 # folders that leaves empty. A DEST holding .git is a checkout, which no
 # installer wrote: it is left alone.
 # install.sh is never removed: a user who copies the release's install.sh into
@@ -898,6 +906,9 @@ remove_dev_files() {
     printf 'install: %s holds .git (a checkout), old developer files not checked\n' "$DEST"
     return 0
   fi
+  for rel in $OLD_INSTALL_SET; do
+    [[ -f "$DEST/$rel" ]] || return 0
+  done
   real=$(realpath -- "$DEST") || fail install "could not resolve $DEST"
   known=$OLD_DEV_FILES
   while IFS= read -r -d '' rel; do

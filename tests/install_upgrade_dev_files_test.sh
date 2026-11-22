@@ -13,7 +13,9 @@
 #      is never removed: a byte-identical copy is what the user would copy in
 #      themselves, and bytes cannot tell it from an old installer's (#199 r2-1);
 #   4. a second rerun changes nothing;
-#   5. with .git in the install dir (a checkout) nothing is removed.
+#   5. with .git in the install dir (a checkout) nothing is removed;
+#   6. in an install an old installer did not fill, a byte-identical copy the
+#      user put at a developer path is kept.
 #
 # Run: ERGOSPHERE_TEST_PORT=<spare port> bash tests/install_upgrade_dev_files_test.sh
 # No network, no git: the package is served from 127.0.0.1 and grok is a stub
@@ -142,4 +144,11 @@ mkdir "$app/.git" && cp -p "$pkg/tests/run_all.sh" "$app/tests/run_all.sh"
 out=$(run_install "$repo/install.sh")
 if [[ -f "$app/tests/run_all.sh" && "$out" == *"holds .git"* && "$out" != *"install: removed"* ]]; then ok "checkout (.git present): nothing removed"
 else bad "checkout (.git present): files removed or no note"; fi
+
+# 6. Without an old installer's full set (it was cleaned up in step 3), a
+# byte-identical copy the user put at a developer path is the user's: kept.
+rmdir -- "$app/.git"
+out=$(run_install "$repo/install.sh")
+if [[ -f "$app/tests/run_all.sh" && "$out" != *"install: removed"* ]]; then ok "user's copy of tests/run_all.sh kept in a cleaned install"
+else bad "user's copy of tests/run_all.sh removed from a cleaned install"; fi
 exit "$fail"
