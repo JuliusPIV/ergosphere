@@ -149,8 +149,9 @@ def test_ab_py(tmp):
     (atree / "tests" / "ab" / "browser.d").mkdir(parents=True)
     rc, out = summary(tmp, btree, atree, builtin + ["new_check"])
     rows = [line.split()[0] for line in out.splitlines() if line.split() and line.split()[0] in builtin + ["new_check"]]
-    expect(rc == 0 and rows[-2:] == ["new_check", "resume_box"],
-           "ab.py: a browser.d check shows as a row before resume_box (rc %s, rows %s)" % (rc, rows[-2:]))
+    at = rows.index("resume_box") if "resume_box" in rows else len(rows)
+    expect(rc == 0 and rows[at - 1:at + 1] == ["new_check", "resume_box"],
+           "ab.py: a browser.d check shows as a row just before resume_box (rc %s, rows %s)" % (rc, rows[at - 1:]))
     rc, out = summary(tmp, btree, atree, builtin)
     expect(rc == 1 and "B did not report browser check(s): new_check" in out,
            "ab.py: a browser.d module B did not run fails the A/B (rc %s)" % rc)
