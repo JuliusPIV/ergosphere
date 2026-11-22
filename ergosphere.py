@@ -89,6 +89,10 @@ STARTING = set()
 STOP = threading.Event()
 # Set once a restart is accepted. No new grok starts after that.
 RESTART = threading.Event()
+# A Settings restart must commit within this many seconds. The installer's
+# curl waits 10 s, then reports the server as left running; a restart that
+# committed later would still restart the server after that report (#63).
+RESTART_BUDGET = 8.0
 SCREEN_CAP = 2 * 1024 * 1024
 FRAME_CHUNK = 64 * 1024
 # Output queued for one /term client that is not reading. Past this the client
@@ -5351,6 +5355,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _settings_restart(self):
         # Only with zero grok sessions. RESTART stops new launches until exec.
+        started = time.monotonic()
         with LIVE_LOCK:
             busy = len(STARTING) + sum(1 for live in LIVE.values() if live_state(live))
             if not busy:
@@ -5375,6 +5380,12 @@ class Handler(BaseHTTPRequestHandler):
         if problem:
             RESTART.clear()
             self._json(409, {"ok": False, "error": problem + "; not restarting"})
+            return
+        # The client may have given up while the checks ran. Past the budget,
+        # refuse rather than restart behind the installer's back.
+        if time.monotonic() - started > RESTART_BUDGET:
+            RESTART.clear()
+            self._json(503, {"ok": False, "error": "restart checks took too long; not restarting"})
             return
         print("restart requested; next %s:%s" % (nxt.bind, nxt.port), flush=True)
         # RESTART is set: the restart must go ahead even if the client is
