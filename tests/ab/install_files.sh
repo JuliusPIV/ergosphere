@@ -72,6 +72,8 @@ install_side() { # side code-dir port
 # Issue #199: an upgrade over a pre-#97 install. The old installer is this
 # side's install.sh without the #97 skip line and the #199 removal step; then
 # this side's install.sh reruns over it and must leave no developer file.
+# install.sh is not counted: the upgrade keeps it (#199 r2-1, a copy the user
+# made cannot be told from an old installer's).
 upgrade_side() { # side code-dir port
   local side=$1 code=$2 port=$3 h="$w/$1-up" out pid before left cfg
   mkdir -p "$h"
@@ -82,7 +84,7 @@ upgrade_side() { # side code-dir port
     env -u ERGOSPHERE_PORT -u ERGOSPHERE_CONFIG HOME="$h" PATH="$w/bin:$PATH" TMPDIR="$w" \
       ERGOSPHERE_INSTALL_SOURCE_URL="$url" setsid -w bash "$1" --auto --dir "$h/app" --port "$port" </dev/null 2>&1
   }
-  devcount() { (cd "$h/app" && find . -type f | sed 's|^\./||' | grep -cE '^(tests/|docs/|\.git|\.ghflow|install\.sh$)'); }
+  devcount() { (cd "$h/app" && find . -type f | sed 's|^\./||' | grep -cE '^(tests/|docs/|\.git|\.ghflow)'); }
   log "$side: upgrade over a pre-#97 install on port $port"
   out=$(run "$h/old-install.sh"); printf '%s\n' "$out" >"$h/old.log"
   pid=$(field pid "$out")

@@ -5,10 +5,12 @@
 # #97. The package is the checkout packed as a release archive.
 #   1. the old installer leaves tests/, docs/, .ghflow*, .git*, install.sh;
 #   2. the user adds files, also inside tests/, edits tests/run_all.sh, and
-#      links docs/ and install.sh to files outside the install dir;
+#      links docs/ to a folder outside the install dir;
 #   3. the current installer removes the archive's developer files, names each
 #      one, and leaves the config, the log, the runtime, the server, the
-#      user's files, the edited copy, the links and their targets alone;
+#      user's files, the edited copy, the link and its target alone. install.sh
+#      is never removed: a byte-identical copy is what the user would copy in
+#      themselves, and bytes cannot tell it from an old installer's (#199 r2-1);
 #   4. a second rerun changes nothing;
 #   5. with .git in the install dir (a checkout) nothing is removed.
 #
@@ -92,8 +94,6 @@ else bad "old installer did not copy the developer files; the test cannot run"; 
 printf 'mine\n' >"$app/notes.txt"
 printf 'mine\n' >"$app/tests/my-notes.txt"
 printf '# my edit\n' >>"$app/tests/run_all.sh"
-printf 'outside\n' >"$work/outside/install.sh"
-rm -- "$app/install.sh" && ln -s "$work/outside/install.sh" "$app/install.sh"
 mv -- "$app/docs" "$work/outside/docs" && ln -s "$work/outside/docs" "$app/docs"
 outside_before=$(cd "$work/outside" && find . -type f -print0 | sort -z | xargs -0 sha256sum)
 cfg_sha=$(sha "$app/ergosphere.json")
@@ -108,8 +108,8 @@ if ! grep -q '^Ergosphere is running' <<<"$out"; then
   bad "upgrade did not finish"; printf '%s\n' "$out" | tail -n 15; exit 1
 fi
 left=$(devfiles)
-want_left=$(printf '%s\n' tests/my-notes.txt tests/run_all.sh | sort)
-if [[ "$left" == "$want_left" ]]; then ok "upgrade removed the developer files; the user's tests/my-notes.txt and the edited tests/run_all.sh stay"
+want_left=$(printf '%s\n' install.sh tests/my-notes.txt tests/run_all.sh | sort)
+if [[ "$left" == "$want_left" ]]; then ok "upgrade removed the developer files; install.sh, the user's tests/my-notes.txt and the edited tests/run_all.sh stay"
 else bad "developer files left after the upgrade: $(tr '\n' ' ' <<<"$left")"; fi
 named=$(sed -n 's/^install: removed old developer file //p' <<<"$out" | sort)
 want_named=$(grep -vE '^(docs/|install\.sh$|tests/run_all\.sh$)' <<<"$devlist")
@@ -118,9 +118,9 @@ else bad "output names '$(head -c 300 <<<"$named")', want each removed file"; fi
 if [[ "$(field changed "$out")" == *"old developer files removed"* ]]; then ok "summary lists the removal"
 else bad "summary changed: '$(field changed "$out")'"; fi
 if [[ ! -e "$app/tests/ab" ]]; then ok "emptied folder tests/ab removed"; else bad "tests/ab is still there"; fi
-if [[ -L "$app/install.sh" && -L "$app/docs" && "$(cd "$work/outside" && find . -type f -print0 | sort -z | xargs -0 sha256sum)" == "$outside_before" ]]; then
-  ok "links and their targets outside the install dir are untouched"
-else bad "a link or a file outside the install dir changed"; fi
+if [[ -L "$app/docs" && "$(cd "$work/outside" && find . -type f -print0 | sort -z | xargs -0 sha256sum)" == "$outside_before" ]]; then
+  ok "link and its target outside the install dir are untouched"
+else bad "the docs link or a file outside the install dir changed"; fi
 if [[ -f "$app/notes.txt" ]]; then ok "user file notes.txt stays"; else bad "notes.txt was removed"; fi
 if [[ "$(sha "$app/ergosphere.json")" == "$cfg_sha" ]]; then ok "config unchanged"; else bad "config changed"; fi
 if [[ "$(sha "$app/ergosphere.py")" == "$py_sha" && -f "$app/vendor/xterm.js" ]]; then ok "runtime unchanged"; else bad "runtime changed"; fi

@@ -792,6 +792,9 @@ install_files() {
 # link, with the same bytes as the archive (a user's own file or edited copy
 # at that path is kept), then the folders that leaves empty. A DEST holding
 # .git is a checkout, which no installer wrote: it is left alone.
+# install.sh is never removed: a user who copies the release's install.sh into
+# DEST makes a file the bytes of which cannot be told from an old installer's.
+# A stale install.sh is harmless, since the server never reads it.
 remove_dev_files() {
   local rel dir real n=0 dirs=()
   if [[ -e "$DEST/.git" || -L "$DEST/.git" ]]; then
@@ -801,7 +804,7 @@ remove_dev_files() {
   real=$(realpath -- "$DEST") || fail install "could not resolve $DEST"
   while IFS= read -r -d '' rel; do
     rel=${rel#./}
-    case "$rel" in tests/*|docs/*|.git*|.ghflow*|install.sh) ;; *) continue ;; esac
+    case "$rel" in tests/*|docs/*|.git*|.ghflow*) ;; *) continue ;; esac
     dir=$(dirname -- "$rel")
     [[ -f "$DEST/$rel" && ! -L "$DEST/$rel" ]] || continue
     # An installer copy is byte-identical to the archive. Anything else at that
