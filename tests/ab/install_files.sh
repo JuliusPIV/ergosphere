@@ -71,9 +71,13 @@ install_side() { # side code-dir port
 
 # Issue #199: an upgrade over a pre-#97 install. The old installer is this
 # side's install.sh without the #97 skip line and the #199 removal step; then
-# this side's install.sh reruns over it and must leave no developer file.
+# this side's install.sh reruns over it and must leave none of the developer
+# files a pre-#97 release shipped. Counted: files whose sha256 and path are in
+# B's OLD_DEV_FILES (the package is the B tree, so the rest of its developer
+# files were never shipped by an old installer and stay, #199 r3-1).
 # install.sh is not counted: the upgrade keeps it (#199 r2-1, a copy the user
 # made cannot be told from an old installer's).
+oldset=$(sed -n "/^OLD_DEV_FILES='/,/^'\$/p" "$AB_B_DIR/install.sh" | sed '1d;$d')
 upgrade_side() { # side code-dir port
   local side=$1 code=$2 port=$3 h="$w/$1-up" out pid before left cfg
   mkdir -p "$h"
@@ -84,7 +88,11 @@ upgrade_side() { # side code-dir port
     env -u ERGOSPHERE_PORT -u ERGOSPHERE_CONFIG HOME="$h" PATH="$w/bin:$PATH" TMPDIR="$w" \
       ERGOSPHERE_INSTALL_SOURCE_URL="$url" setsid -w bash "$1" --auto --dir "$h/app" --port "$port" </dev/null 2>&1
   }
-  devcount() { (cd "$h/app" && find . -type f | sed 's|^\./||' | grep -cE '^(tests/|docs/|\.git|\.ghflow)'); }
+  devcount() {
+    (cd "$h/app" && find . -type f | sed 's|^\./||' | grep -E '^(tests/|docs/|\.git|\.ghflow)' |
+      while IFS= read -r f; do printf '%s %s\n' "$(sha256sum <"$f" | cut -d' ' -f1)" "$f"; done) |
+      grep -cxF -f <(printf '%s\n' "$oldset")
+  }
   log "$side: upgrade over a pre-#97 install on port $port"
   out=$(run "$h/old-install.sh"); printf '%s\n' "$out" >"$h/old.log"
   pid=$(field pid "$out")
