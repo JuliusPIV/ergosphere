@@ -4,10 +4,11 @@
   python3 -B ab.py vendor <code-dir>          -> JSON vendor-manifest check on stdout
   python3 -B ab.py summary <A-dir> <B-dir>    -> summary text on stdout;
                                                  exit 1 when a check passes on A and fails on B,
-                                                 or B's browser checks break or miss a check in ORDER
+                                                 or B's browser checks break or miss a check in ORDER or browser.d/
 Stdlib only.
 """
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -18,6 +19,23 @@ TITLE = "AB seeded session"
 ORDER = ["vendor_listed", "health", "session_list", "open_session", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios", "resume_box"]
 # Checks that do not come from browser.js (HTTP and the vendor manifest).
 HTTP_CHECKS = ("vendor_listed", "health", "session_list", "open_session")
+
+
+def module_names():
+    """Page checks from browser.d/ modules (#243): one per <name>.js, in this
+    tree and, when AB_A_DIR is set, the base tree.  Both sides run this tree's
+    browser.js, so a module deleted here is missing on both; the base tree
+    still names it, so it is still required."""
+    dirs = [Path(__file__).resolve().parent / "browser.d"]
+    if os.environ.get("AB_A_DIR"):
+        dirs.append(Path(os.environ["AB_A_DIR"]) / "tests" / "ab" / "browser.d")
+    return sorted({p.stem for d in dirs for p in d.glob("*.js")} - set(ORDER))
+
+
+def all_checks():
+    """ORDER with the browser.d/ checks before resume_box, which stays last."""
+    i = ORDER.index("resume_box") if "resume_box" in ORDER else len(ORDER)
+    return ORDER[:i] + module_names() + ORDER[i:]
 
 
 def get(base, path):
@@ -116,15 +134,16 @@ def summary(adir, bdir):
     broken = []
     if not bbrowser.get("browser") and not bbrowser.get("unavailable"):
         broken.append("browser checks broke on B: %s" % str(bbrowser.get("error") or "no result")[:300])
+    names = all_checks()
     if bbrowser.get("browser"):
-        missing = [n for n in ORDER if n not in HTTP_CHECKS and n not in (bbrowser.get("checks") or {})]
+        missing = [n for n in names if n not in HTTP_CHECKS and n not in (bbrowser.get("checks") or {})]
         if missing:
             broken.append("B did not report browser check(s): %s" % ", ".join(missing))
     width = 36
     lines.append("")
     lines.append("%-14s %-*s %-*s %s" % ("check", width, "A", width, "B", "same"))
     differ, regress = [], []
-    for name in ORDER:
+    for name in names:
         if name not in a and name not in b:
             continue
         ca = a.get(name) or {"ok": False, "value": "not run"}

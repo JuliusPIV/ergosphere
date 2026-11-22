@@ -7,6 +7,7 @@
 // when the stand-in has handled every wheel report the page sent.  The
 // deadline only bounds a broken side, so it is long.
 const {chromium, devices} = require('playwright');
+const browserD = require('./browser_d.js');
 const [port, sid] = process.argv.slice(2);
 const url = `http://127.0.0.1:${port}/chat?resume=${sid}`;
 const WAIT = 30000;
@@ -242,6 +243,9 @@ async function run() {
     await ctx.close();
     checks.keyboard_android = await keyboardCheck(b, 'Pixel 7', 320, false);
     checks.keyboard_ios = await keyboardCheck(b, 'iPhone 14', 300, true);
+    // Every browser.d/ module (#243): a new page check is a new file there.
+    Object.assign(checks, await browserD.runAll(browserD.list(),
+      {b, port, sid, url, WAIT, wait, check, status, until, fitted, caughtUp, seen, openPage, screen, devices}));
     // Last: it quits and resumes the session the other checks share.
     checks.resume_box = await resumeBoxCheck(b);
     return {browser: b.version(), checks};
