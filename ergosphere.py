@@ -89,6 +89,9 @@ STARTING = set()
 STOP = threading.Event()
 # Set once a restart is accepted. No new grok starts after that.
 RESTART = threading.Event()
+# One Settings restart at a time. Its owner sets and clears RESTART, so a
+# timed-out restart cannot reopen the launch gate under a later one (#63).
+RESTART_LOCK = threading.Lock()
 # A Settings restart must commit within this many seconds. The installer's
 # curl waits 10 s, then reports the server as left running; a restart that
 # committed later would still restart the server after that report (#63).
@@ -5355,49 +5358,52 @@ class Handler(BaseHTTPRequestHandler):
 
     def _settings_restart(self):
         # Only with zero grok sessions. RESTART stops new launches until exec.
+        # The budget starts before the wait for RESTART_LOCK, so a request
+        # that queued behind another restart gets no extra time.
         started = time.monotonic()
-        with LIVE_LOCK:
-            busy = len(STARTING) + sum(1 for live in LIVE.values() if live_state(live))
-            if not busy:
-                RESTART.set()
-        if busy:
-            self._json(409, {
-                "ok": False,
-                "sessions": busy,
-                "error": "%d grok %s running; restart needs zero" % (busy, "session" if busy == 1 else "sessions"),
-            })
-            return
-        # The restarted server reads the file, so the reply must too.
-        try:
-            with CONFIG_LOCK:
-                saved = self._saved_config()
-        except ValueError as exc:
-            RESTART.clear()
-            self._json(409, {"ok": False, "error": ("bad config: %s" % exc)[:300] + "; not restarting"})
-            return
-        nxt = resolve_endpoint(argparse.Namespace(**vars(self.server.args)), saved)
-        problem = self._endpoint_problem(nxt.bind, nxt.port)
-        if problem:
-            RESTART.clear()
-            self._json(409, {"ok": False, "error": problem + "; not restarting"})
-            return
-        # The log write can block on a stalled disk, so it goes before the
-        # budget check: its time counts against the budget, and nothing that
-        # can block sits between the check and the restart commit.
-        print("restart requested; next %s:%s" % (nxt.bind, nxt.port), flush=True)
-        # The client may have given up while the checks ran. Past the budget,
-        # refuse rather than restart behind the installer's back.
-        if time.monotonic() - started > RESTART_BUDGET:
-            RESTART.clear()
-            self._json(503, {"ok": False, "error": "restart checks took too long; not restarting"})
-            return
-        # RESTART is set: the restart must go ahead even if the client is
-        # gone and the reply raises, or the server serves on refusing launches.
-        try:
-            self._json(200, {"ok": True, "bind": nxt.bind, "port": nxt.port})
-        finally:
-            self.close_connection = True
-            threading.Thread(target=self.server.shutdown, daemon=True).start()
+        with RESTART_LOCK:
+            with LIVE_LOCK:
+                busy = len(STARTING) + sum(1 for live in LIVE.values() if live_state(live))
+                if not busy:
+                    RESTART.set()
+            if busy:
+                self._json(409, {
+                    "ok": False,
+                    "sessions": busy,
+                    "error": "%d grok %s running; restart needs zero" % (busy, "session" if busy == 1 else "sessions"),
+                })
+                return
+            # The restarted server reads the file, so the reply must too.
+            try:
+                with CONFIG_LOCK:
+                    saved = self._saved_config()
+            except ValueError as exc:
+                RESTART.clear()
+                self._json(409, {"ok": False, "error": ("bad config: %s" % exc)[:300] + "; not restarting"})
+                return
+            nxt = resolve_endpoint(argparse.Namespace(**vars(self.server.args)), saved)
+            problem = self._endpoint_problem(nxt.bind, nxt.port)
+            if problem:
+                RESTART.clear()
+                self._json(409, {"ok": False, "error": problem + "; not restarting"})
+                return
+            # The log write can block on a stalled disk, so it goes before the
+            # budget check: its time counts against the budget, and nothing that
+            # can block sits between the check and the restart commit.
+            print("restart requested; next %s:%s" % (nxt.bind, nxt.port), flush=True)
+            # The client may have given up while the checks ran. Past the budget,
+            # refuse rather than restart behind the installer's back.
+            if time.monotonic() - started > RESTART_BUDGET:
+                RESTART.clear()
+                self._json(503, {"ok": False, "error": "restart checks took too long; not restarting"})
+                return
+            # RESTART is set: the restart must go ahead even if the client is
+            # gone and the reply raises, or the server serves on refusing launches.
+            try:
+                self._json(200, {"ok": True, "bind": nxt.bind, "port": nxt.port})
+            finally:
+                self.close_connection = True
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
 
     def _drain_body(self):
         raw = self.headers.get("Content-Length")
