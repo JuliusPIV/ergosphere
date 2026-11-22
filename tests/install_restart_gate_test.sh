@@ -8,7 +8,9 @@
 #      keeps running;
 #   2. end:    the only session ends there -> the server is restarted;
 #   3. restart: a Settings restart re-execs the server there (same pid) ->
-#      the server is restarted.
+#      the server is restarted;
+#   4. stall:  the server is stopped (SIGSTOP) as the restart request goes
+#      out -> the installer stops nothing and says it may restart itself.
 # A Quit in progress is not a case here: the server counts a stopping
 # session as busy, the same as a running one.
 #
@@ -32,6 +34,7 @@ fail=0
 cleanup() {
   local p
   if [[ -s "$work/grok.pid" ]]; then kill "$(cat "$work/grok.pid")" 2>/dev/null; fi
+  if [[ -s "$work/stopped.pid" ]]; then kill -CONT "$(cat "$work/stopped.pid")" 2>/dev/null; fi
   for p in ${pids[@]+"${pids[@]}"}; do kill "$p" 2>/dev/null; done
   for _ in $(seq 100); do
     for p in ${pids[@]+"${pids[@]}"}; do kill -0 "$p" 2>/dev/null && break; p=""; done
@@ -104,8 +107,14 @@ hook() {
   esac
   echo "$action done after $i polls" >>"$work/hook.log"
 }
-if [[ -s "$work/hook" && " $* " == *"/health "* ]]; then
-  read -r action sha <"$work/hook"
+read -r action sha <"$work/hook" 2>/dev/null || action=""
+# stall: SIGSTOP the server as the restart request goes out, so it queues.
+if [[ "$action" == stall && " $* " == *"/settings "* ]]; then
+  rm -f "$work/hook"
+  health pid >"$work/stopped.pid"
+  kill -STOP "$(cat "$work/stopped.pid")"
+  echo "stall done" >>"$work/hook.log"
+elif [[ -n "$action" && "$action" != stall && " $* " == *"/health "* ]]; then
   if [[ "$(sha256sum <"$dest/ergosphere.py" | cut -d' ' -f1)" == "$sha" ]]; then
     n=$(( $(cat "$work/hook.n" 2>/dev/null || echo 0) + 1 ))
     echo "$n" >"$work/hook.n"
@@ -213,6 +222,31 @@ if hooked restart && [[ "$rc" -eq 0 && -n "$pid3" && "$pid3" != "$pid_before" &&
 else
   bad "restart: rc $rc, pid '$pid3' (was $pid_before), hook: $(cat "$work/hook.out" 2>/dev/null)"
   printf '%s\n' "$out" | tail -n 15
+fi
+
+# 4. The restart request gets no answer in 10 s (server stopped, request
+# queued): the installer stops nothing and says the server may still restart
+# itself; resumed, the idle server does a Settings restart on its own.
+pid_before=$(pid_now)
+track "$pid_before"
+started=$("$real_curl" --noproxy '*' -s --max-time 3 "http://127.0.0.1:$port/health" |
+  python3 -I -c 'import json,sys; print(json.load(sys.stdin)["started"])' 2>/dev/null)
+out=$(inst v1 stall); rc=$?
+track "$(field pid "$out")"
+if [[ -s "$work/stopped.pid" ]]; then kill -CONT "$(cat "$work/stopped.pid")"; fi
+now=""
+for _ in $(seq 150); do
+  now=$("$real_curl" --noproxy '*' -s --max-time 3 "http://127.0.0.1:$port/health" |
+    python3 -I -c 'import json,sys; d=json.load(sys.stdin); print(d["pid"], d["started"])' 2>/dev/null)
+  [[ -n "$now" && "$now" != "$pid_before $started" ]] && break
+  sleep 0.1
+done
+if hooked stall && [[ "$rc" -ne 0 && "$out" == *"did not answer the restart request"*"may still restart itself"* &&
+      "$now" == "$pid_before "* && "$now" != "$pid_before $started" ]]; then
+  ok "stall: no answer reported, pid $pid_before restarted itself once resumed"
+else
+  bad "stall: rc $rc, hook $(hooked stall && echo ran || echo 'never ran'), /health '$now' (was '$pid_before $started')"
+  printf '%s\n' "$out" | grep -m3 -E 'failed|start:'
 fi
 
 exit "$fail"

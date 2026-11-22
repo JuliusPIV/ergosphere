@@ -15,7 +15,7 @@ for side in A B; do
   log "$side: ${!dir}/install.sh on port ${!port}"
   ERGOSPHERE_TEST_PORT=${!port} ERGOSPHERE_TEST_INSTALLER="${!dir}/install.sh" TMPDIR="$w" \
     bash "$AB_B_DIR/tests/install_restart_gate_test.sh" >"$w/$side.log" 2>&1
-  for c in launch end restart; do
+  for c in launch end restart stall; do
     line=$(grep -m1 -E "^(ok|FAIL): +$c:" "$w/$side.log")
     case "$line" in
       ok*) res[$side.$c]="PASS" ;;
@@ -29,7 +29,7 @@ echo
 echo "Issue #63: session check vs restart (same packages, each side's install.sh; logs in restart-gate/)"
 printf '%-8s %-44s %-44s\n' case A B
 bfail=()
-for c in launch end restart; do
+for c in launch end restart stall; do
   a=${res[A.$c]} b=${res[B.$c]}
   printf '%-8s %-44s %-44s\n' "$c" "${a:0:44}" "${b:0:44}"
   [[ "$b" == PASS* ]] || bfail+=("$c")

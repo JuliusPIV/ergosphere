@@ -882,6 +882,12 @@ start_server() {
       printf 'start: already running, pid %s, not restarted (%s %s open): %s\n' "$PID" "$GATE_SESSIONS" "$noun" "$why"
       return 0
     fi
+    # No answer in 10 s: the request may still be queued there. If the server
+    # handles it later it still counts its sessions first, so the only thing
+    # that can happen is a Settings restart of an idle server.
+    if [[ "$GATE" == "no answer" ]]; then
+      fail start "pid $PID on $at did not answer the restart request in 10 s; nothing was stopped, but it may still restart itself on the new code if it has no grok sessions when it gets to the request (rerun this installer after that)"
+    fi
     [[ "$GATE" == ok ]] || fail start "pid $PID on $at did not agree to stop ($GATE); it was left running"
     # SIGTERM right after the reply: it wins over the pending restart, so the
     # server exits instead of starting itself again.
