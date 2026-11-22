@@ -892,11 +892,13 @@ docs/images/session-list.png docs/images/settings.png'
 # Installers before #97 copied the archive's developer files into DEST, and
 # install_files never removes anything (#199). Removes only those: a regular
 # file in DEST, reached through no link, at a path install_files skips, whose
-# bytes match that path in a pre-#97 release (OLD_DEV_FILES) or in this
-# archive, and only in a DEST that holds OLD_INSTALL_SET (an old installer's
-# evidence). A user's own file or an edited copy at that path is kept. Then the
-# folders that leaves empty. A DEST holding .git is a checkout, which no
-# installer wrote: it is left alone.
+# bytes match that path in a pre-#97 release (OLD_DEV_FILES), and only in a DEST
+# that holds OLD_INSTALL_SET (an old installer's evidence). Matching this
+# archive is not enough: a file that only the current release has was never
+# written by an old installer, so a user's copy of it is kept. A user's own
+# file or an edited copy at that path is kept. Then the folders that leaves
+# empty. A DEST holding .git is a checkout, which no installer wrote: it is
+# left alone.
 # install.sh is never removed: a user who copies the release's install.sh into
 # DEST makes a file the bytes of which cannot be told from an old installer's.
 # A stale install.sh is harmless, since the server never reads it.
@@ -911,10 +913,6 @@ remove_dev_files() {
   done
   real=$(realpath -- "$DEST") || fail install "could not resolve $DEST"
   known=$OLD_DEV_FILES
-  while IFS= read -r -d '' rel; do
-    rel=${rel#./}
-    case "$rel" in tests/*|docs/*|.git*|.ghflow*) known+="$(sha_of "$SRC/$rel") $rel"$'\n' ;; esac
-  done < <(cd "$SRC" && find . -type f -print0)
   while IFS= read -r rel; do
     case "$rel" in tests/*|docs/*|.git*|.ghflow*) ;; *) continue ;; esac
     dir=$(dirname -- "$rel")

@@ -7,9 +7,11 @@
 #   2. the user adds files, also inside tests/, edits tests/run_all.sh, and
 #      links docs/ to a folder outside the install dir;
 #      .ghflow.conf is swapped for v0.1.0's copy (an older release's file);
-#   3. the current installer removes the archive's developer files, names each
-#      one, and leaves the config, the log, the runtime, the server, the
-#      user's files, the edited copy, the link and its target alone. install.sh
+#   3. the current installer removes the developer files whose bytes are a
+#      pre-#97 release's (OLD_DEV_FILES), names each one, and leaves the config,
+#      the log, the runtime, the server, the user's files, the edited copy, the
+#      link and its target alone. A developer file only the current archive has
+#      was never written by an old installer, so it stays (#199 r3-1). install.sh
 #      is never removed: a byte-identical copy is what the user would copy in
 #      themselves, and bytes cannot tell it from an old installer's (#199 r2-1);
 #   4. a second rerun changes nothing;
@@ -114,17 +116,24 @@ if [[ -n "$p" && "$p" != "$pid" ]]; then pids+=("$p"); fi
 if ! grep -q '^Ergosphere is running' <<<"$out"; then
   bad "upgrade did not finish"; printf '%s\n' "$out" | tail -n 15; exit 1
 fi
+# A file is removable only if its bytes are a pre-#97 release's (OLD_DEV_FILES).
+# The rest of the archive (new or changed since then) is what no old installer
+# wrote, so it stays with install.sh and the user's files.
+oldset=$(sed -n "/^OLD_DEV_FILES='/,/^'\$/p" "$repo/install.sh" | sed '1d;$d')
+removable=""; kept=""
+while IFS= read -r rel; do
+  if grep -qxF -- "$(sha "$pkg/$rel") $rel" <<<"$oldset"; then removable+="$rel"$'\n'; else kept+="$rel"$'\n'; fi
+done <<<"$devlist"
 left=$(devfiles)
-want_left=$(printf '%s\n' install.sh tests/my-notes.txt tests/run_all.sh | sort)
-if [[ "$left" == "$want_left" ]]; then ok "upgrade removed the developer files; install.sh, the user's tests/my-notes.txt and the edited tests/run_all.sh stay"
-else bad "developer files left after the upgrade: $(tr '\n' ' ' <<<"$left")"; fi
+want_left=$({ printf '%s\n' install.sh tests/my-notes.txt tests/run_all.sh; printf '%s' "$kept"; } | sort -u)
+if [[ "$left" == "$want_left" ]]; then ok "upgrade removed only the pre-#97 developer files; the archive files no old installer wrote, install.sh, the user's files and the edited tests/run_all.sh stay"
+else bad "files left after the upgrade differ: $(tr '\n' ' ' <<<"$left")"; fi
 named=$(sed -n 's/^install: removed old developer file //p' <<<"$out" | sort)
-want_named=$(grep -vE '^(docs/|install\.sh$|tests/run_all\.sh$)' <<<"$devlist")
+want_named=$(grep -vE '^(docs/|install\.sh$|tests/run_all\.sh$)' <<<"$removable" | sed '/^$/d' | sort)
 if [[ "$named" == "$want_named" ]]; then ok "output names each of the $(wc -l <<<"$named") removed files"
 else bad "output names '$(head -c 300 <<<"$named")', want each removed file"; fi
 if [[ "$(field changed "$out")" == *"old developer files removed"* ]]; then ok "summary lists the removal"
 else bad "summary changed: '$(field changed "$out")'"; fi
-if [[ ! -e "$app/tests/ab" ]]; then ok "emptied folder tests/ab removed"; else bad "tests/ab is still there"; fi
 if [[ -L "$app/docs" && "$(cd "$work/outside" && find . -type f -print0 | sort -z | xargs -0 sha256sum)" == "$outside_before" ]]; then
   ok "link and its target outside the install dir are untouched"
 else bad "the docs link or a file outside the install dir changed"; fi
