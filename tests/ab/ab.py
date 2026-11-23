@@ -18,7 +18,7 @@ import urllib.request
 from pathlib import Path
 
 TITLE = "AB seeded session"
-ORDER = ["vendor_listed", "health", "session_list", "open_session", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios", "resume_box", "ended_view"]
+ORDER = ["vendor_listed", "health", "session_list", "open_session", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios", "pinch_zoom", "resume_box", "ended_view"]
 # Checks that do not come from browser.js (HTTP and the vendor manifest).
 HTTP_CHECKS = ("vendor_listed", "health", "session_list", "open_session")
 

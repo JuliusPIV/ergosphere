@@ -4314,9 +4314,13 @@ function onPinchEnd(ev) {
 // A phone keyboard shrinks only the visual viewport (Chrome on Android
 // since 108, Safari on iOS), and iOS pans it to show the focused field. The
 // page follows it and refits, so grok redraws its input line above the
-// keyboard and again at full height when the keyboard closes.
+// keyboard and again at full height when the keyboard closes. A pinch zoom
+// of the page (outside the terminal) also shrinks the visual viewport, but
+// sets its scale: the page stays as it was, so grok's terminal, shared by
+// every viewer, keeps its size (#158). Back at scale 1 it follows again.
 function followViewport() {
   var vv = window.visualViewport;
+  if (vv && Math.abs(vv.scale - 1) > 0.001) return;
   if (vv) {
     var root = document.documentElement.style;
     root.setProperty("--vvh", vv.height + "px");

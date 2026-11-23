@@ -26,13 +26,14 @@ lacks "$readme" '<b>Active</b>'           'README names no Active group'
 lacks "$readme" 'Active, Idle and Older'  'screenshot caption names no Active group'
 has   "$readme" '<b>Working now</b>'      'README names the Working now group'
 # Phones (#121): touch scroll with fling (#66), pinch text size 8-28 px (#86),
-# keyboard refit (#137); the scroll bar drag (#136) is mouse only; #158 is open.
+# keyboard refit (#137); the scroll bar drag (#136) is mouse only; a page zoom
+# no longer resizes grok (#158), so Known limits does not list it.
 has   "$readme" '<b>Works on phones</b>'  'Features has a Works on phones row'
 has   "$readme" 'Drag one finger on the terminal to scroll grok' 'README says a one-finger drag scrolls grok'
 has   "$readme" 'from 8 to 28 px'         'README gives the pinch text size range'
 has   "$readme" "so grok's input line stays in view" 'README says the keyboard does not hide the input line'
 has   "$readme" "Dragging grok's scroll bar takes a mouse" 'README says the scroll bar drag is mouse only'
-has   "$readme" 'issues/158'              'Known limits lists the page pinch resize (#158)'
+lacks "$readme" 'issues/158'              'Known limits no longer lists the page pinch resize (#158)'
 # The button on the session list is "+ New Agent".
 has   "$readme" '**+ New Agent**'         'README names the + New Agent button'
 lacks "$readme" '| New session |'         'keyboard table names no New session action'
