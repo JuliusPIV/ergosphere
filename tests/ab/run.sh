@@ -7,8 +7,8 @@
 # $AB_OUT/summary.txt.  Exit 1 when a check passes on A and fails on B, when the
 # browser checks break on B or leave out a check named in ab.py ORDER, or the
 # run itself breaks (a server never reports ready, or no check passes on A).
-# No browser or playwright on the host is only a warning.
-# Optional: AB_CHROME (browser binary), NODE_PATH (playwright).
+# No browser (or node, playwright) for B fails too, unless AB_NO_BROWSER=1.
+# Optional: AB_CHROME (browser binary), NODE_PATH (playwright), AB_NO_BROWSER.
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # A fresh id per run: Ergosphere finds a session's holder machine-wide via
@@ -92,6 +92,20 @@ sys.exit(0 if any(c.get("ok") for c in ab.side(sys.argv[2])[0].values()) else 1)
   echo "RUN BROKE: no check passed on A" >>"$AB_OUT/summary.txt"
   rc=1
 fi
+# Issue #129: no browser on B means no page check ran there, so a page
+# regression would pass.  ghflow's A/B host has one; AB_NO_BROWSER=1 allows a
+# local run without it (ghflow clears the environment, so it must be in --ab).
+b_why="$(python3 -B -c 'import json, sys
+d = json.load(open(sys.argv[1]))
+print("" if d.get("browser") else str(d.get("unavailable") or d.get("error") or "no result")[:200])' "$AB_OUT/B/browser.json" 2>/dev/null)" || b_why="no readable B/browser.json"
+if [ -n "$b_why" ]; then
+  if [ "${AB_NO_BROWSER:-}" = 1 ]; then
+    echo "WARNING: browser checks did not run on B ($b_why); allowed by AB_NO_BROWSER=1" >>"$AB_OUT/summary.txt"
+  else
+    echo "RUN BROKE: browser checks did not run on B ($b_why); set AB_NO_BROWSER=1 to allow that" >>"$AB_OUT/summary.txt"
+    rc=1
+  fi
+fi
 # Issue #45: one session's hung start, on each side's port again (its server has stopped).
 for side in A B; do
   dir=AB_${side}_DIR port=AB_PORT_${side}
@@ -104,6 +118,8 @@ python3 -B "$HERE/slow_start.py" summary "$AB_OUT/slow-A.json" "$AB_OUT/slow-B.j
 bash "$HERE/install_files.sh" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #140: --check stops where the real run stops and says what it does with the server.
 bash "$HERE/install_check_plan.sh" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #194: a release that renamed a vendor file, checked by each side's install.sh.
+bash "$HERE/vendor_rename.sh" >>"$AB_OUT/summary.txt" || rc=1
 cat "$AB_OUT/summary.txt"
 [ -s "$AB_OUT/summary.txt" ] || exit 1
 exit "$rc"
