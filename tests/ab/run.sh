@@ -41,6 +41,9 @@ log "playwright path: ${pw_path:-none}; browser: ${AB_CHROME:-playwright default
 # Page check modules (#243): node preloads each browser.d/*.js, which adds its
 # check to browser_d.js; browser.js runs them before resume_box.
 page_mods=()
+# Names a module may not reuse, from ab.py (the one list).
+AB_BUILTIN_CHECKS="$(python3 -B "$HERE/ab.py" builtin)" || exit 2
+export AB_BUILTIN_CHECKS
 for f in "$HERE"/browser.d/*.js; do [ -f "$f" ] && page_mods+=(-r "$f"); done
 
 run_side() { # label code-dir port

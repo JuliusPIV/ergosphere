@@ -27,6 +27,14 @@ function clashes(mods, taken) {
   return mods.map(m => m.name).filter(n => taken.includes(n));
 }
 
+// Built-in check names, from ab.py via run.sh (AB_BUILTIN_CHECKS, a JSON
+// list).  Missing or unreadable throws, so the browser run fails closed.
+function reserved(env = process.env) {
+  const names = JSON.parse(env.AB_BUILTIN_CHECKS || 'null');
+  if (!Array.isArray(names) || !names.length) throw new Error('AB_BUILTIN_CHECKS is not set (run.sh sets it from ab.py builtin)');
+  return names;
+}
+
 async function runAll(mods, t) {
   const out = {};
   for (const m of mods) {
@@ -41,4 +49,4 @@ async function runAll(mods, t) {
   return out;
 }
 
-module.exports = {add, list, clashes, runAll};
+module.exports = {add, list, clashes, reserved, runAll};

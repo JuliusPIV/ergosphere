@@ -2,6 +2,8 @@
 
   python3 -B ab.py http <port> <session-id>   -> JSON checks on stdout
   python3 -B ab.py vendor <code-dir>          -> JSON vendor-manifest check on stdout
+  python3 -B ab.py builtin                    -> JSON list of built-in check names (ORDER and HTTP_CHECKS),
+                                                 which browser.d/ modules may not reuse
   python3 -B ab.py summary <A-dir> <B-dir>    -> summary text on stdout;
                                                  exit 1 when a check passes on A and fails on B,
                                                  or B's browser checks break or miss a check in ORDER or browser.d/
@@ -113,7 +115,15 @@ def side(dirname):
     browser = load(dirname + "/browser.json")
     checks = dict(server.get("checks") or {})
     checks.update(load(dirname + "/vendor.json").get("checks") or {})
-    checks.update(browser.get("checks") or {})
+    bchecks = dict(browser.get("checks") or {})
+    # A browser result under an HTTP check's name would replace the real one
+    # and hide a regression (#243): drop it and mark the side broken.
+    reused = sorted(n for n in bchecks if n in HTTP_CHECKS)
+    for n in reused:
+        del bchecks[n]
+    checks.update(bchecks)
+    if reused:
+        browser = dict(browser, reused=reused)
     return checks, server.get("info") or {}, browser
 
 
@@ -134,6 +144,9 @@ def summary(adir, bdir):
     broken = []
     if not bbrowser.get("browser") and not bbrowser.get("unavailable"):
         broken.append("browser checks broke on B: %s" % str(bbrowser.get("error") or "no result")[:300])
+    for label, br in (("A", abrowser), ("B", bbrowser)):
+        if br.get("reused"):
+            broken.append("browser checks on %s reused HTTP check name(s): %s" % (label, ", ".join(br["reused"])))
     names = all_checks()
     if bbrowser.get("browser"):
         missing = [n for n in names if n not in HTTP_CHECKS and n not in (bbrowser.get("checks") or {})]
@@ -174,6 +187,9 @@ def main(argv):
         return 0
     if len(argv) == 3 and argv[1] == "vendor":
         print(json.dumps(vendor_checks(argv[2])))
+        return 0
+    if len(argv) == 2 and argv[1] == "builtin":
+        print(json.dumps(sorted(set(ORDER) | set(HTTP_CHECKS))))
         return 0
     if len(argv) == 4 and argv[1] == "summary":
         return summary(argv[2], argv[3])

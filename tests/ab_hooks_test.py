@@ -176,6 +176,57 @@ def test_browser_d_clash(tmp):
            "browser_d: a module named like a built-in check is reported as a clash (rc %s, %r)" % (r.returncode, r.stdout.strip() or r.stderr.strip()[:120]))
 
 
+def test_http_name_clash(tmp):
+    """A browser.d/health.js must not replace the real HTTP health result."""
+    r = subprocess.run([sys.executable, "-B", str(AB / "ab.py"), "builtin"],
+                       capture_output=True, text=True, timeout=30)
+    try:
+        builtin = json.loads(r.stdout)
+    except ValueError:
+        builtin = []
+    expect("health" in builtin and "vendor_listed" in builtin and "resume_box" in builtin,
+           "ab.py builtin lists ORDER and HTTP_CHECKS (rc %s, %s)" % (r.returncode, builtin))
+    if shutil.which("node"):
+        # run.sh's layout and flags: health.js preloaded, the list from ab.py builtin.
+        ab = tmp / "clash-http"
+        write(ab / "browser_d.js", (AB / "browser_d.js").read_text())
+        write(ab / "browser.d" / "health.js",
+              "require('../browser_d.js').add(__filename, async t => t.check(true, 'from a module'));\n")
+        js = ("const m = require('./browser_d.js');"
+              "let r; try { r = m.clashes(m.list(), m.reserved()); } catch (e) { r = 'threw: ' + e.message; }"
+              "console.log(JSON.stringify(r));")
+        env = dict(os.environ, AB_BUILTIN_CHECKS=r.stdout.strip())
+        n = subprocess.run(["node", "-r", str(ab / "browser.d" / "health.js"), "-e", js], cwd=str(ab),
+                           capture_output=True, text=True, timeout=30, env=env)
+        expect(n.stdout.strip() == '["health"]',
+               "browser_d: a browser.d/health.js module counts as a clash (%r)" % (n.stdout.strip() or n.stderr.strip()[:120]))
+        env.pop("AB_BUILTIN_CHECKS")
+        n = subprocess.run(["node", "-e", js], cwd=str(ab), capture_output=True, text=True, timeout=30, env=env)
+        expect("threw: AB_BUILTIN_CHECKS" in n.stdout,
+               "browser_d: no built-in list from run.sh fails closed (%r)" % n.stdout.strip())
+    else:
+        print("SKIP browser_d http clash: node not found")
+    # ab.py: a browser result named health cannot hide B's failing HTTP health.
+    sys.path.insert(0, str(AB))
+    import ab
+    sides = tmp / "http-clash"
+    for label in ("A", "B"):
+        side(sides / label, [n for n in ab.ORDER if n not in ab.HTTP_CHECKS])
+    write(sides / "B" / "http.json", json.dumps({"checks": {
+        "health": {"ok": False, "value": "500"}, "session_list": {"ok": True, "value": "ok"},
+        "open_session": {"ok": True, "value": "ok"}}}))
+    br = json.loads((sides / "B" / "browser.json").read_text())
+    br["checks"]["health"] = {"ok": True, "value": "from browser.d/health.js"}
+    write(sides / "B" / "browser.json", json.dumps(br))
+    env = dict(os.environ)
+    env.pop("AB_A_DIR", None)
+    r = subprocess.run([sys.executable, "-B", str(AB / "ab.py"), "summary", str(sides / "A"), str(sides / "B")],
+                       capture_output=True, text=True, timeout=60, env=env)
+    expect(r.returncode == 1 and "REGRESSION: passes on A, fails on B: health" in r.stdout
+           and "reused HTTP check name(s): health" in r.stdout,
+           "ab.py: a browser result named health does not hide B's HTTP health failure (rc %s)" % r.returncode)
+
+
 def test_agents_md():
     try:
         text = (ROOT / "AGENTS.md").read_text()
@@ -191,6 +242,7 @@ def main():
         test_run_checks(tmp)
         test_browser_d(tmp)
         test_browser_d_clash(tmp)
+        test_http_name_clash(tmp)
         test_ab_py(tmp)
         test_agents_md()
     finally:
