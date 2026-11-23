@@ -114,10 +114,19 @@ for side in A B; do
   python3 -B "$HERE/slow_start.py" run "${!dir}" "${!port}" "$AB_OUT/slow-$side" >"$AB_OUT/slow-$side.json" 2>"$AB_OUT/slow-$side.err"
 done
 python3 -B "$HERE/slow_start.py" summary "$AB_OUT/slow-A.json" "$AB_OUT/slow-B.json" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #64: a running server keeps the vendor files it started with.
+echo $'\nIssue #64: vendor files replaced on disk under a running server, then a Settings restart' >>"$AB_OUT/summary.txt"
+for side in A B; do
+  dir=AB_${side}_DIR port=AB_PORT_${side}
+  out="$(ERGOSPHERE_TEST_PORT="${!port}" python3 -B "$HERE/../vendor_snapshot_test.py" "${!dir}" 2>&1)" || { [ "$side" = B ] && rc=1; }
+  printf '%s: %s\n' "$side" "$(printf '%s\n' "$out" | grep -E '^(PASS|FAIL)' | grep -v 'server output' | tr '\n' ' ')" >>"$AB_OUT/summary.txt"
+done
 # Issue #97: what each side's install.sh copies into the install dir.
 bash "$HERE/install_files.sh" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #140: --check stops where the real run stops and says what it does with the server.
 bash "$HERE/install_check_plan.sh" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #63: sessions between the installer's session check and its restart.
+bash "$HERE/install_restart_gate.sh" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #194: a release that renamed a vendor file, checked by each side's install.sh.
 bash "$HERE/vendor_rename.sh" >>"$AB_OUT/summary.txt" || rc=1
 cat "$AB_OUT/summary.txt"
