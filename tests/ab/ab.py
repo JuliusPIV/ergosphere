@@ -1,20 +1,43 @@
 """HTTP-level A/B checks and the side-by-side summary.
 
   python3 -B ab.py http <port> <session-id>   -> JSON checks on stdout
+  python3 -B ab.py vendor <code-dir>          -> JSON vendor-manifest check on stdout
+  python3 -B ab.py builtin                    -> JSON list of built-in check names (ORDER and HTTP_CHECKS),
+                                                 which browser.d/ modules may not reuse
   python3 -B ab.py summary <A-dir> <B-dir>    -> summary text on stdout;
                                                  exit 1 when a check passes on A and fails on B,
-                                                 or B's browser checks break or miss a check in ORDER
+                                                 or B's browser checks break or miss a check in ORDER or browser.d/
 Stdlib only.
 """
 import json
+import os
 import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 TITLE = "AB seeded session"
-ORDER = ["health", "session_list", "open_session", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios", "resume_box", "held_exit_fit"]
-HTTP_CHECKS = ("health", "session_list", "open_session")
+ORDER = ["vendor_listed", "health", "session_list", "open_session", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios", "held_exit_fit", "resume_box", "ended_view"]
+# Checks that do not come from browser.js (HTTP and the vendor manifest).
+HTTP_CHECKS = ("vendor_listed", "health", "session_list", "open_session")
+
+
+def module_names():
+    """Page checks from browser.d/ modules (#243): one per <name>.js, in this
+    tree and, when AB_A_DIR is set, the base tree.  Both sides run this tree's
+    browser.js, so a module deleted here is missing on both; the base tree
+    still names it, so it is still required."""
+    dirs = [Path(__file__).resolve().parent / "browser.d"]
+    if os.environ.get("AB_A_DIR"):
+        dirs.append(Path(os.environ["AB_A_DIR"]) / "tests" / "ab" / "browser.d")
+    return sorted({p.stem for d in dirs for p in d.glob("*.js")} - set(ORDER))
+
+
+def all_checks():
+    """ORDER with the browser.d/ checks before resume_box, which stays last."""
+    i = ORDER.index("resume_box") if "resume_box" in ORDER else len(ORDER)
+    return ORDER[:i] + module_names() + ORDER[i:]
 
 
 def get(base, path):
@@ -70,6 +93,15 @@ def http_checks(port, sid):
     return {"checks": checks, "info": info}
 
 
+def vendor_checks(code_dir):
+    """vendor/ files match the versions package-lock.json lists, so scanners see them (#7)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    import vendor_manifest_test
+    results = list(vendor_manifest_test.check(Path(code_dir)))
+    bad = [msg for ok, msg in results if not ok]
+    return {"checks": {"vendor_listed": check(not bad, bad[0] if bad else "%d checks" % len(results))}}
+
+
 def load(path):
     try:
         with open(path, encoding="utf-8") as handle:
@@ -82,7 +114,16 @@ def side(dirname):
     server = load(dirname + "/http.json")
     browser = load(dirname + "/browser.json")
     checks = dict(server.get("checks") or {})
-    checks.update(browser.get("checks") or {})
+    checks.update(load(dirname + "/vendor.json").get("checks") or {})
+    bchecks = dict(browser.get("checks") or {})
+    # A browser result under an HTTP check's name would replace the real one
+    # and hide a regression (#243): drop it and mark the side broken.
+    reused = sorted(n for n in bchecks if n in HTTP_CHECKS)
+    for n in reused:
+        del bchecks[n]
+    checks.update(bchecks)
+    if reused:
+        browser = dict(browser, reused=reused)
     return checks, server.get("info") or {}, browser
 
 
@@ -103,15 +144,19 @@ def summary(adir, bdir):
     broken = []
     if not bbrowser.get("browser") and not bbrowser.get("unavailable"):
         broken.append("browser checks broke on B: %s" % str(bbrowser.get("error") or "no result")[:300])
+    for label, br in (("A", abrowser), ("B", bbrowser)):
+        if br.get("reused"):
+            broken.append("browser checks on %s reused HTTP check name(s): %s" % (label, ", ".join(br["reused"])))
+    names = all_checks()
     if bbrowser.get("browser"):
-        missing = [n for n in ORDER if n not in HTTP_CHECKS and n not in (bbrowser.get("checks") or {})]
+        missing = [n for n in names if n not in HTTP_CHECKS and n not in (bbrowser.get("checks") or {})]
         if missing:
             broken.append("B did not report browser check(s): %s" % ", ".join(missing))
     width = 36
     lines.append("")
     lines.append("%-14s %-*s %-*s %s" % ("check", width, "A", width, "B", "same"))
     differ, regress = [], []
-    for name in ORDER:
+    for name in names:
         if name not in a and name not in b:
             continue
         ca = a.get(name) or {"ok": False, "value": "not run"}
@@ -139,6 +184,12 @@ def summary(adir, bdir):
 def main(argv):
     if len(argv) == 4 and argv[1] == "http":
         print(json.dumps(http_checks(argv[2], argv[3])))
+        return 0
+    if len(argv) == 3 and argv[1] == "vendor":
+        print(json.dumps(vendor_checks(argv[2])))
+        return 0
+    if len(argv) == 2 and argv[1] == "builtin":
+        print(json.dumps(sorted(set(ORDER) | set(HTTP_CHECKS))))
         return 0
     if len(argv) == 4 and argv[1] == "summary":
         return summary(argv[2], argv[3])
