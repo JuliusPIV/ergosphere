@@ -235,4 +235,24 @@ else
   printf '%s\n' "$out" | tail -n 8
 fi
 
+# A read-only tests/ folder in an existing install is no blocker: install.sh
+# never copies developer files (tests/, docs/, ...), so the gate must not check
+# their folders either. The archive here holds tests/, which the installer skips.
+h="$work/devdir"
+mkdir -p "$h/app/tests" "$h/state" "$work/pkgdev/ergosphere-test/tests"
+cp -p "$d/ergosphere.py" "$d/LICENSE" "$h/app/"
+cp -rp "$d/vendor" "$h/app/"
+echo 'echo x' >"$work/pkgdev/ergosphere-test/tests/run_all.sh"
+cp -rp "$d/ergosphere.py" "$d/LICENSE" "$d/vendor" "$work/pkgdev/ergosphere-test/"
+tar -czf "$work/www/dev.tar.gz" -C "$work/pkgdev" ergosphere-test
+chmod 555 "$h/app/tests"
+out=$(env -u ERGOSPHERE_PORT HOME="$h" PATH="$work/bin:$PATH" TMPDIR="$work" ERGOSPHERE_CONFIG="$h/state/ergosphere.json" \
+  ERGOSPHERE_INSTALL_SOURCE_URL="$www/dev.tar.gz" setsid -w bash "$repo/install.sh" --check --dir "$h/app" --port "$port" </dev/null 2>&1); rc=$?
+if [[ "$rc" -eq 0 && "$out" == *"ready: checks passed"* ]]; then
+  ok "read-only tests/ folder, developer files skipped: --check passes"
+else
+  bad "read-only tests/ folder: rc $rc, want --check to pass (install_files skips tests/)"
+  printf '%s\n' "$out" | tail -n 8
+fi
+
 exit "$fail"

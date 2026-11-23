@@ -802,6 +802,15 @@ blocks_kib() {
   echo $((4 * (($(stat -c %s -- "$1") + 4095) / 4096)))
 }
 
+# Developer files in the release archive; the server never reads them (#97).
+# Not export-ignore: ghflow's reviewers read a git archive of the repo.
+# install_files and check_writes both use this, so the gate never checks a
+# folder the install will not write in.
+is_dev_file() {
+  case "$1" in tests/*|docs/*|.git*|.ghflow*|install.sh) return 0 ;; esac
+  return 1
+}
+
 # check_writes CFG_RESULT CANDIDATE. Every folder install_files and
 # write_config will write in must be writable now (-w/-x, no probe writes),
 # and each filesystem must hold what is copied there, so a read-only folder or
@@ -815,6 +824,7 @@ check_writes() {
   while IFS= read -r -d '' rel; do
     rel=${rel#./}
     if [[ "$rel" == cwd-defaults.json || "$rel" == ergosphere.json || "$rel" == ergosphere.log ]]; then continue; fi
+    if is_dev_file "$rel"; then continue; fi
     [[ "$(sha_of "$SRC/$rel")" != "$(sha_of "$DEST/$rel")" ]] || continue
     # install_files copies each file beside the old one, then moves it over,
     # which frees the old one. So the peak is the top of the running total in
@@ -878,9 +888,7 @@ install_files() {
   while IFS= read -r -d '' rel; do
     rel=${rel#./}
     if [[ "$rel" == cwd-defaults.json || "$rel" == ergosphere.json || "$rel" == ergosphere.log ]]; then continue; fi
-    # Developer files in the release archive; the server never reads them (#97).
-    # Not export-ignore: ghflow's reviewers read a git archive of the repo.
-    case "$rel" in tests/*|docs/*|.git*|.ghflow*|install.sh) continue ;; esac
+    if is_dev_file "$rel"; then continue; fi
     if [[ "$(sha_of "$SRC/$rel")" != "$(sha_of "$DEST/$rel")" ]]; then
       { mkdir -p -- "$DEST/$(dirname -- "$rel")" &&
         cp -p -- "$SRC/$rel" "$DEST/$rel.part" &&
