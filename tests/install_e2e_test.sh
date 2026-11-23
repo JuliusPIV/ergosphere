@@ -4,7 +4,9 @@
 #   2. a rerun of the same package changes nothing (same pid, same files);
 #   3. an upgrade to a newer package: /health shows the new fingerprint;
 #   4. a failed upgrade (damaged archive, a release whose --check fails):
-#      the old server still runs and the old code is still in place.
+#      the old server still runs and the old code is still in place;
+#   5. an upgrade to a release that renamed vendor/xterm.js (and whose code
+#      names the new file, #194): it installs and /health shows its code.
 # Not covered: a release that passes --check but fails to start. Today that
 # leaves the old server stopped and the new code in place (#29, rollback not
 # implemented yet); add the case here when #29 lands.
@@ -56,22 +58,30 @@ pack v2 "# install_e2e_test: version 2"
 pack nocheck
 sed -i '1i raise SystemExit("broken release")' "$work/pkg-nocheck/ergosphere-test/ergosphere.py"
 tar -czf "$work/www/nocheck.tar.gz" -C "$work/pkg-nocheck" ergosphere-test
+# A release that renamed vendor/xterm.js to vendor/xterm.min.js, code included.
+pack renamed
+mv "$work/pkg-renamed/ergosphere-test/vendor/xterm.js" "$work/pkg-renamed/ergosphere-test/vendor/xterm.min.js"
+sed -i 's/xterm\.js"/xterm.min.js"/g' "$work/pkg-renamed/ergosphere-test/ergosphere.py"
+grep -q '("xterm.min.js", ' "$work/pkg-renamed/ergosphere-test/ergosphere.py" || { echo "FAIL: renamed fixture not made"; exit 1; }
+tar -czf "$work/www/renamed.tar.gz" -C "$work/pkg-renamed" ergosphere-test
 head -c 2000 "$work/www/v2.tar.gz" >"$work/www/truncated.tar.gz"
 printf '#!/bin/sh\necho "grok 0.0.0-test"\n' >"$work/bin/grok"
 chmod +x "$work/bin/grok"
 
 # The server's runtime fingerprint, computed here from the package files
 # (sha256 of each file's sha256, in this order), not by the code under test.
+# fingerprint DIR [XTERM]: XTERM is the xterm file's name (default xterm.js).
 fingerprint() {
   python3 -I -c '
 import hashlib, sys
 d = hashlib.sha256()
-for n in ("ergosphere.py", "vendor/addon-fit.js", "vendor/xterm.css", "vendor/xterm.js"):
+for n in ("ergosphere.py", "vendor/addon-fit.js", "vendor/xterm.css", "vendor/" + sys.argv[2]):
     d.update(hashlib.sha256(open(sys.argv[1] + "/" + n, "rb").read()).digest())
-print(d.hexdigest())' "$1"
+print(d.hexdigest())' "$1" "${2:-xterm.js}"
 }
 fp1=$(fingerprint "$work/pkg-v1/ergosphere-test")
 fp2=$(fingerprint "$work/pkg-v2/ergosphere-test")
+fp3=$(fingerprint "$work/pkg-renamed/ergosphere-test" xterm.min.js)
 sha_py() { sha256sum <"$1/ergosphere.py" | cut -d' ' -f1; }
 py2=$(sha_py "$work/pkg-v2/ergosphere-test")
 
@@ -169,5 +179,16 @@ for pkg in truncated nocheck; do
     bad "failed upgrade ($pkg): install dir changed"
   fi
 done
+
+# 5. Upgrade to the release with the renamed vendor file.
+out=$(inst renamed); rc=$?
+pid3=$(field pid "$out")
+track "$pid3"
+if [[ "$rc" -eq 0 && -n "$pid3" && "$(health)" == "$pid3 $fp3" && -f "$dest/vendor/xterm.min.js" ]]; then
+  ok "renamed vendor file: installs, pid $pid3 answers /health with its fingerprint"
+else
+  bad "renamed vendor file: rc $rc, pid '${pid3:-none}', /health '$(health)', want '$pid3 $fp3'"
+  printf '%s\n' "$out" | tail -n 15
+fi
 
 exit "$fail"

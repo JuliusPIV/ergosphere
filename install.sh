@@ -425,15 +425,28 @@ print(runpy.run_path(sys.argv[1])["runtime_fingerprint"]())
   [[ "$PROBE_DIGEST" != "$digest" ]]
 }
 
-# Number of processes whose parent is $1 (the server's grok sessions).
-child_count() {
-  local f line ppid n=0
-  for f in /proc/[0-9]*/stat; do
-    IFS= read -r line 2>/dev/null <"$f" || continue
-    read -r _ ppid _ <<<"${line##*) }"
-    if [[ "$ppid" == "$1" ]]; then n=$((n + 1)); fi
-  done
-  printf '%s\n' "$n"
+# restart_gate BIND:PORT. Asks the server there for a Settings restart, the
+# server's own zero-sessions gate: it counts its sessions under its launch
+# lock and, when there are none, refuses every launch from then on. Sets GATE
+# to ok, busy (GATE_SESSIONS is the server's count) or the error to show.
+restart_gate() {
+  local host=${1%:*} port=${1##*:} out code
+  if [[ "$host" == 0.0.0.0 ]]; then host=127.0.0.1; fi
+  GATE="no answer" GATE_SESSIONS=""
+  out=$("$CURL" --noproxy '*' -s --max-time 10 -w '\n%{http_code}' -H "Origin: http://${host}:${port}" \
+    -H 'Content-Type: application/json' --data '{"action":"restart"}' "http://${host}:${port}/settings") || return 0
+  code=${out##*$'\n'}
+  if [[ "$code" == 200 ]]; then GATE=ok; return 0; fi
+  out=$(printf '%s' "${out%$'\n'*}" | "$PYTHON" -I -c '
+import json, sys
+d = json.load(sys.stdin)
+n = d.get("sessions")
+if type(n) is int and n > 0:
+    print("busy", n)
+else:
+    print("error", str(d.get("error") or "no reason given")[:200])
+' 2>/dev/null) || out="error no JSON reply"
+  if [[ "$out" == busy* ]]; then GATE=busy GATE_SESSIONS=${out#busy }; else GATE="HTTP $code: ${out#error }"; fi
 }
 
 # cfg_py read AGENT AGENT_DIR | write BIND PORT SET_BIND SET_PORT AGENT AGENT_DIR
@@ -712,22 +725,48 @@ download() {
   SRC=${hits[0]%/ergosphere.py}
 }
 
+# vendor_names FILE: the vendor file names the release's ergosphere.py serves
+# (its VENDOR_FILES literal), one per line. ast only parses the file; nothing
+# from it runs. This installer comes from main, so the list must come from the
+# release, not from here (#194).
+vendor_names() {
+  "$PYTHON" -I -B -c '
+import ast, sys
+try:
+    with open(sys.argv[1], "rb") as f:
+        tree = ast.parse(f.read())
+    node = [n for n in tree.body if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "VENDOR_FILES" for t in n.targets)][-1]
+    names = [v[0] for v in ast.literal_eval(node.value).values()]
+except (OSError, SyntaxError, ValueError, TypeError, AttributeError, IndexError,
+        KeyError, RecursionError, MemoryError):
+    sys.exit(1)
+if not names or not all(isinstance(n, str) and n not in ("", ".", "..") and "/" not in n
+                        and "\0" not in n and "\n" not in n for n in names):
+    sys.exit(1)
+print("\n".join(names))' "$1" </dev/null 2>/dev/null
+}
+
 # Before anything changes. --check only looks at the downloaded files and runs
 # nothing from them. A real run also runs the release's own --check (vendor
 # files, grok, the server's config validators) against the config this run
 # would write, built in STAGE from copies; that --check never writes config.
 verify_release() {
-  local out sb=0 sp=0 cand legacy f missing=()
+  local out sb=0 sp=0 cand legacy f names missing=()
   download
-  for f in vendor/xterm.js vendor/xterm.css vendor/addon-fit.js; do
-    if [[ ! -f "$SRC/$f" ]]; then missing+=("$f"); fi
-  done
+  if ! names=$(vendor_names "$SRC/ergosphere.py"); then
+    row invalid release "cannot read the vendor file list (VENDOR_FILES) from its ergosphere.py"
+    return 0
+  fi
+  while IFS= read -r f; do
+    if [[ ! -f "$SRC/vendor/$f" ]]; then missing+=("vendor/$f"); fi
+  done <<<"$names"
   if [[ ${#missing[@]} -gt 0 ]]; then
     row invalid release "archive is missing ${missing[*]}"
     return 0
   fi
   if [[ "$WANT_CHECK" -eq 1 ]]; then
-    row ok release "archive holds ergosphere.py and its vendor files (--check runs nothing from it)"
+    row ok release "archive holds ergosphere.py and the vendor files it names (--check runs nothing from it)"
     return 0
   fi
   cand="$STAGE/cfg/ergosphere.json" legacy="$STAGE/cfg/cwd-defaults.json"
@@ -826,7 +865,7 @@ has_addr_args() {
 # The server reads bind and port from ergosphere.json, so it runs with no
 # address arguments and without ERGOSPHERE_PORT, which would override the file.
 start_server() {
-  local out deadline kids at why=""
+  local out deadline at why=""
   out=$(cd -- "$DEST" && unset ERGOSPHERE_PORT && "$PYTHON" ergosphere.py --check </dev/null 2>&1) ||
     fail install "ergosphere.py --check failed: ${out//$'\n'/; }"
   SRV_BIND=$BIND SRV_PORT=$PORT
@@ -850,23 +889,34 @@ start_server() {
       printf 'start: already running, pid %s (read back from /health)\n' "$PID"
       return 0
     fi
-    # A restart kills its grok sessions, so only restart a server that has none.
-    kids=$(child_count "$PID")
-    if [[ "$kids" -gt 0 ]]; then
-      local noun="grok sessions"
-      if [[ "$kids" -eq 1 ]]; then noun="grok session"; fi
-      SRV_BIND=${PROBE_AT%:*} SRV_PORT=${PROBE_AT##*:}
-      SERVER_NOTE="Ergosphere pid $PID keeps running as before ($why) because it has $kids $noun open; when they are done run: kill $PID, then rerun this installer"
-      printf 'start: already running, pid %s, not restarted (%s %s open): %s\n' "$PID" "$kids" "$noun" "$why"
-      return 0
-    fi
     # check_target saw the new address free, but the download took time.
-    # Probe it again right before the kill, so a taken port stops nothing.
+    # Probe it again right before the restart, so a taken port stops nothing.
     at=$PROBE_AT
     probe "$BIND" "$PORT"
     if [[ "$PROBE" != down && "$PROBE_PID" != "$PID" ]]; then
       fail start "port $PORT is in use by something that is not this Ergosphere; it was not touched, and pid $PID keeps running on $at (rerun once $PORT is free)"
     fi
+    # A restart kills its grok sessions, so only restart a server that has
+    # none. The server decides and then takes no new session (#63); a count
+    # taken here could miss a session started before the kill.
+    restart_gate "$at"
+    if [[ "$GATE" == busy ]]; then
+      local noun="grok sessions"
+      if [[ "$GATE_SESSIONS" -eq 1 ]]; then noun="grok session"; fi
+      SRV_BIND=${at%:*} SRV_PORT=${at##*:}
+      SERVER_NOTE="Ergosphere pid $PID keeps running as before ($why) because it has $GATE_SESSIONS $noun open; when they are done run: kill $PID, then rerun this installer"
+      printf 'start: already running, pid %s, not restarted (%s %s open): %s\n' "$PID" "$GATE_SESSIONS" "$noun" "$why"
+      return 0
+    fi
+    # No answer in 10 s: the request may still be queued there. If the server
+    # handles it later it still counts its sessions first, so the only thing
+    # that can happen is a Settings restart of an idle server.
+    if [[ "$GATE" == "no answer" ]]; then
+      fail start "pid $PID on $at did not answer the restart request in 10 s; nothing was stopped, but it may still restart itself on the new code if it has no grok sessions when it gets to the request (rerun this installer after that)"
+    fi
+    [[ "$GATE" == ok ]] || fail start "pid $PID on $at did not agree to stop ($GATE); it was left running"
+    # SIGTERM right after the reply: it wins over the pending restart, so the
+    # server exits instead of starting itself again.
     printf 'start: restarting pid %s (no grok sessions): %s\n' "$PID" "$why"
     kill "$PID" 2>/dev/null || true
     deadline=$((SECONDS + 10))
