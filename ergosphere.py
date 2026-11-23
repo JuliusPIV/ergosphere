@@ -2311,12 +2311,13 @@ def dashboard_owners(scan=None):
     return owned
 
 
-def list_states():
+def list_states(scan=None):
     """Session id -> session_state for each session with a live grok here or on this host.
 
     One /proc pass (ProcScan) serves every session in the list.
     """
-    scan = ProcScan()
+    if scan is None:
+        scan = ProcScan()
     sids = set(dashboard_owners(scan))
     with LIVE_LOCK:
         sids.update(LIVE)
@@ -2326,6 +2327,96 @@ def list_states():
         if state["state"] != "stopped":
             out[sid] = state
     return out
+
+
+POLL_SCAN_MAX_AGE = 15.0
+_POLL_SCAN_LOCK = threading.Lock()
+_POLL_SCAN = {}
+
+
+def _turn_marked(raw):
+    return bool(raw) and _TURN_MARK in raw.replace(b"\0", b" ")
+
+
+def _proc_ident(pid):
+    """(ppid, start time) from one read of /proc/<pid>/stat, or None.
+
+    The start time (field 22) tells a reused pid from the process the
+    snapshot saw, even when the new process has the same argv.
+    """
+    try:
+        raw = open("/proc/%d/stat" % int(pid), "rb").read()
+    except (OSError, ValueError):
+        return None
+    fields = raw[raw.rfind(b")") + 2:].split()
+    if len(fields) < 20:
+        return None
+    return fields[1], fields[19]
+
+
+def _poll_snapshot(scan):
+    # Watched: every grok, every turn-mark process, and their ancestors, by
+    # argv, ppid and start time. A grok quitting, a turn ending, a pid taken
+    # by another process (even with the same argv), or a reparent changes one.
+    watch = {}
+    for pid in list(scan.groks) + [p for p, raw in scan.cmd.items() if _turn_marked(raw)]:
+        for _ in range(64):
+            if pid in watch or pid not in scan.ppids:
+                break
+            ident = _proc_ident(pid)
+            if ident is not None and ident[0] != str(scan.ppids[pid]).encode():
+                ident = None  # changed since the scan read it: the next check rescans
+            watch[pid] = (scan.cmd.get(pid, b""), ident)
+            pid = scan.ppids[pid]
+    return {"scan": scan, "at": time.monotonic(), "watch": watch}
+
+
+def _poll_snapshot_valid(snap):
+    # Every argv is read again (a process can exec into grok at any time);
+    # stat is read only for watched pids, not for every pid as ProcScan does.
+    if time.monotonic() - snap["at"] > POLL_SCAN_MAX_AGE:
+        return False
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return False
+    watch = snap["watch"]
+    me = os.getpid()
+    seen = 0
+    for name in names:
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        raw = read_proc_cmdline(pid)
+        if pid in watch:
+            argv, ident = watch[pid]
+            if raw != argv or ident is None or _proc_ident(pid) != ident:
+                return False
+            seen += 1
+        elif pid != me and (grok_cmdline(raw) or _turn_marked(raw)):
+            return False
+    return seen == len(watch)
+
+
+def poll_scan():
+    """ProcScan for the two polls (/session-info?id=, /list-rows) only (#42).
+
+    Reuses the last full /proc pass while nothing it depends on changed
+    (_poll_snapshot_valid), so an unchanged poll reads each argv but no
+    stat. own() and open files are read again per call.
+    Every action and page load keeps its own fresh ProcScan. No lock is
+    held while scanning.
+    """
+    with _POLL_SCAN_LOCK:
+        snap = _POLL_SCAN.get("snap")
+    if snap is None or not _poll_snapshot_valid(snap):
+        snap = _poll_snapshot(ProcScan())
+        with _POLL_SCAN_LOCK:
+            _POLL_SCAN["snap"] = snap
+    view = copy.copy(snap["scan"])
+    view._own = None
+    view._fds = {}
+    return view
 
 
 # summary.json updated_at is ISO-8601, for example
@@ -5058,7 +5149,7 @@ class Handler(BaseHTTPRequestHandler):
     def _list_rows(self):
         # The list page polls this. Unchanged rows cost one short reply.
         _total, sessions = load_sessions(None)
-        owners = list_states()
+        owners = list_states(poll_scan())
         tag = list_rows_tag(sessions, owners)
         if self.headers.get("X-Rows-Tag", "") == tag:
             self.send_response(204)
@@ -5565,7 +5656,7 @@ class Handler(BaseHTTPRequestHandler):
         if saved is None and live_row is None:
             self._json(404, {"error": "not found"})
             return
-        state = session_state(want)
+        state = session_state(want, scan=poll_scan())
         if saved is None:
             body = dict(live_row)
             body["title"] = ""
