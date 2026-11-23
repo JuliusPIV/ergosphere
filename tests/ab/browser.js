@@ -7,6 +7,7 @@
 // when the stand-in has handled every wheel report the page sent.  The
 // deadline only bounds a broken side, so it is long.
 const {chromium, devices} = require('playwright');
+const browserD = require('./browser_d.js');
 const [port, sid] = process.argv.slice(2);
 const url = `http://127.0.0.1:${port}/chat?resume=${sid}`;
 const WAIT = 30000;
@@ -207,6 +208,62 @@ async function rowSeamCheck(b) {
   return check(ok, out.join(' '));
 }
 
+// Quit, then Resume: the ended page shows a blank terminal, as one loaded
+// ended does, and Resume shows no frame of the old screen before the new grok
+// draws (#55).
+async function endedViewCheck(b) {
+  const ctx = await b.newContext({viewport: {width: 1280, height: 800}});
+  try {
+    const {p, s, met} = await openPage(ctx);
+    if (!met) return check(false, `no grok view at page size: ${seen(s)}`);
+    const page = () => p.evaluate(() => {
+      const buf = term.buffer.active;
+      let text = 0;
+      for (let y = 0; y < term.rows; y++) {
+        const line = buf.getLine(buf.viewportY + y);
+        if (line && line.translateToString(true).trim()) text += 1;
+      }
+      return {bar: document.getElementById('stop').textContent,
+        status: document.getElementById('status').textContent, text};
+    });
+    const pageUntil = async pred => {
+      const end = Date.now() + WAIT;
+      let r = await page();
+      while (!pred(r) && Date.now() < end) { await wait(50); r = await page(); }
+      return {r, met: pred(r)};
+    };
+    await p.click('#stop');
+    let q = await pageUntil(r => r.bar === 'Resume' && r.status === 'Ended');
+    if (!q.met) return check(false, `Quit did not end it: ${q.r.status}`);
+    const endedRows = q.r.text;
+    // Each frame from the Resume press until grok's first output (Running).
+    await p.evaluate(() => {
+      window.abFrames = [];
+      const tick = () => {
+        if (document.getElementById('status').textContent === 'Running') return;
+        const buf = term.buffer.active;
+        let text = 0;
+        for (let y = 0; y < term.rows; y++) {
+          const line = buf.getLine(buf.viewportY + y);
+          if (line && line.translateToString(true).trim()) text += 1;
+        }
+        window.abFrames.push(text);
+        requestAnimationFrame(tick);
+      };
+      document.getElementById('stop').addEventListener('click', () => requestAnimationFrame(tick), {once: true});
+    });
+    await p.click('#stop');
+    q = await pageUntil(r => r.bar === 'Quit' && r.status === 'Running');
+    if (!q.met) return check(false, `Resume not live: ${q.r.status}`);
+    const frames = await p.evaluate(() => window.abFrames);
+    const old = frames.filter(n => n > 0).length;
+    return check(endedRows === 0 && old === 0,
+      `ended ${endedRows} text rows; resume: old screen ${old}/${frames.length} frames`);
+  } finally {
+    await ctx.close();
+  }
+}
+
 async function run() {
   const exe = process.env.AB_CHROME || undefined;
   let b;
@@ -288,8 +345,15 @@ async function run() {
     checks.keyboard_android = await keyboardCheck(b, 'Pixel 7', 320, false);
     checks.keyboard_ios = await keyboardCheck(b, 'iPhone 14', 300, true);
     checks.row_seams = await rowSeamCheck(b);
-    // Last: it quits and resumes the session the other checks share.
+    // Every browser.d/ module (#243): a new page check is a new file there.
+    // Every built-in name (ab.py ORDER and HTTP_CHECKS), set here or not.
+    const clash = browserD.clashes(browserD.list(), browserD.reserved());
+    if (clash.length) throw new Error(`browser.d/ name(s) clash with built-in checks: ${clash.join(', ')}`);
+    Object.assign(checks, await browserD.runAll(browserD.list(),
+      {b, port, sid, url, WAIT, wait, check, status, until, fitted, caughtUp, seen, openPage, screen, devices}));
+    // Last: these quit and resume the session the other checks share.
     checks.resume_box = await resumeBoxCheck(b);
+    checks.ended_view = await endedViewCheck(b);
     return {browser: b.version(), checks};
   } finally {
     await b.close();

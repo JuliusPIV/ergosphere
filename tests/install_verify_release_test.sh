@@ -5,6 +5,9 @@
 # ergosphere.py --check against the config it would write, so a config the
 # server rejects (last.effort) stops there too. --check runs nothing from the
 # download: a planted ergosphere.py that writes a marker never runs under it.
+# The vendor files checked are the ones the release's own ergosphere.py names
+# in VENDOR_FILES, read without running it (#194): a release that renames a
+# file and its code passes; one whose code names a file it lacks is refused.
 #
 # Run: ERGOSPHERE_TEST_PORT=<spare port> bash tests/install_verify_release_test.sh
 # No network: the packages are served from 127.0.0.1 and grok is a stub that
@@ -20,6 +23,9 @@ fail=0
 cleanup() {
   local p
   for p in ${pids[@]+"${pids[@]}"}; do kill "$p" 2>/dev/null; done
+  # A case that wrongly passes the gate in --auto starts a server from its
+  # install dir under $work; stop it so it does not keep the port.
+  pkill -f -- "$work/[^ ]*/app/ergosphere.py" 2>/dev/null
   rm -rf -- "$work"
 }
 trap cleanup EXIT
@@ -41,9 +47,25 @@ pack good
 pack novendor vendor/xterm.js
 mark="$work/planted-ran"
 pack planted
-printf 'open(%s, "w").close()\nraise SystemExit("planted release ran")\n' "'$mark'" \
-  >"$work/pkg-planted/ergosphere-test/ergosphere.py"
+# The planted lines run first; the rest is the real file, so its vendor list
+# still reads.
+{ printf 'open(%s, "w").close()\nraise SystemExit("planted release ran")\n' "'$mark'"
+  cat "$repo/ergosphere.py"; } >"$work/pkg-planted/ergosphere-test/ergosphere.py"
 tar -czf "$work/www/planted.tar.gz" -C "$work/pkg-planted" ergosphere-test
+# renamed: vendor/xterm.js is now vendor/xterm.min.js, and its code says so.
+# stale: the same file renamed, but its code still names vendor/xterm.js.
+# novlist: VENDOR_FILES is no plain literal (it still works when run).
+for p in renamed stale novlist; do pack "$p"; done
+for p in renamed stale; do
+  mv "$work/pkg-$p/ergosphere-test/vendor/xterm.js" "$work/pkg-$p/ergosphere-test/vendor/xterm.min.js"
+done
+sed -i 's/xterm\.js"/xterm.min.js"/g' "$work/pkg-renamed/ergosphere-test/ergosphere.py"
+sed -i 's/("xterm\.js", /("xterm" + ".js", /' "$work/pkg-novlist/ergosphere-test/ergosphere.py"
+if ! grep -q '("xterm.min.js", ' "$work/pkg-renamed/ergosphere-test/ergosphere.py" ||
+    ! grep -q '("xterm" + ".js", ' "$work/pkg-novlist/ergosphere-test/ergosphere.py"; then
+  echo "FAIL: renamed/novlist fixtures not made"; exit 1
+fi
+for p in renamed stale novlist; do tar -czf "$work/www/$p.tar.gz" -C "$work/pkg-$p" ergosphere-test; done
 printf '#!/bin/sh\necho "grok 0.0.0-test"\n' >"$work/bin/grok"
 chmod +x "$work/bin/grok"
 
@@ -92,6 +114,25 @@ for mode in --auto --check; do
   out=$(inst "$h" novendor "$h/state/ergosphere.json" "$mode"); rc=$?
   expect_blocked "missing vendor/xterm.js $mode" "$h" "$h/state/ergosphere.json" "archive is missing vendor/xterm.js" "$rc" "$out"
   if [[ -e "$h/state" ]]; then bad "missing vendor/xterm.js $mode: config folder was created"; else ok "missing vendor/xterm.js $mode: no config written"; fi
+done
+
+# A renamed vendor file passes --check when the release's own code names it.
+# install_e2e_test.sh installs that release for real.
+h="$work/renamed"
+out=$(inst "$h" renamed "$h/state/ergosphere.json" --check); rc=$?
+if [[ "$rc" -eq 0 && "$out" == *"ready: checks passed"* && ! -e "$h/app" && ! -e "$h/state" ]]; then
+  ok "renamed vendor file its code names: --check passes"
+else
+  bad "renamed vendor file its code names --check: rc $rc"
+  printf '%s\n' "$out" | tail -n 8
+fi
+for mode in --auto --check; do
+  h="$work/stale$mode"
+  out=$(inst "$h" stale "$h/state/ergosphere.json" "$mode"); rc=$?
+  expect_blocked "renamed file, code names the old one $mode" "$h" "$h/state/ergosphere.json" "archive is missing vendor/xterm.js" "$rc" "$out"
+  h="$work/novlist$mode"
+  out=$(inst "$h" novlist "$h/state/ergosphere.json" "$mode"); rc=$?
+  expect_blocked "VENDOR_FILES not a literal $mode" "$h" "$h/state/ergosphere.json" "cannot read the vendor file list" "$rc" "$out"
 done
 
 # The real run catches a config the server rejects before any copy.
