@@ -116,6 +116,8 @@ done
 python3 -B "$HERE/slow_start.py" summary "$AB_OUT/slow-A.json" "$AB_OUT/slow-B.json" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #97: what each side's install.sh copies into the install dir.
 bash "$HERE/install_files.sh" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #63: sessions between the installer's session check and its restart.
+bash "$HERE/install_restart_gate.sh" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #194: a release that renamed a vendor file, checked by each side's install.sh.
 bash "$HERE/vendor_rename.sh" >>"$AB_OUT/summary.txt" || rc=1
 cat "$AB_OUT/summary.txt"
