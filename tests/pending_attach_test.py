@@ -98,6 +98,10 @@ def main():
             live = erg.LIVE.pop(sid, None)
         if live is not None:
             live.proc.kill()
+            # Wait for grok and for the reader: a daemon thread still printing
+            # `term end` while the interpreter shuts down aborts it (#230).
+            live.proc.wait()
+            live.reader.join()
     return report(failures)
 
 
