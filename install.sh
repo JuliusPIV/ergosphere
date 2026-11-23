@@ -764,22 +764,48 @@ download() {
   SRC=${hits[0]%/ergosphere.py}
 }
 
+# vendor_names FILE: the vendor file names the release's ergosphere.py serves
+# (its VENDOR_FILES literal), one per line. ast only parses the file; nothing
+# from it runs. This installer comes from main, so the list must come from the
+# release, not from here (#194).
+vendor_names() {
+  "$PYTHON" -I -B -c '
+import ast, sys
+try:
+    with open(sys.argv[1], "rb") as f:
+        tree = ast.parse(f.read())
+    node = [n for n in tree.body if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "VENDOR_FILES" for t in n.targets)][-1]
+    names = [v[0] for v in ast.literal_eval(node.value).values()]
+except (OSError, SyntaxError, ValueError, TypeError, AttributeError, IndexError,
+        KeyError, RecursionError, MemoryError):
+    sys.exit(1)
+if not names or not all(isinstance(n, str) and n not in ("", ".", "..") and "/" not in n
+                        and "\0" not in n and "\n" not in n for n in names):
+    sys.exit(1)
+print("\n".join(names))' "$1" </dev/null 2>/dev/null
+}
+
 # Before anything changes. --check only looks at the downloaded files and runs
 # nothing from them. A real run also runs the release's own --check (vendor
 # files, grok, the server's config validators) against the config this run
 # would write, built in STAGE from copies; that --check never writes config.
 verify_release() {
-  local out sb=0 sp=0 cand legacy f missing=()
+  local out sb=0 sp=0 cand legacy f names missing=()
   download
-  for f in vendor/xterm.js vendor/xterm.css vendor/addon-fit.js; do
-    if [[ ! -f "$SRC/$f" ]]; then missing+=("$f"); fi
-  done
+  if ! names=$(vendor_names "$SRC/ergosphere.py"); then
+    row invalid release "cannot read the vendor file list (VENDOR_FILES) from its ergosphere.py"
+    return 0
+  fi
+  while IFS= read -r f; do
+    if [[ ! -f "$SRC/vendor/$f" ]]; then missing+=("vendor/$f"); fi
+  done <<<"$names"
   if [[ ${#missing[@]} -gt 0 ]]; then
     row invalid release "archive is missing ${missing[*]}"
     return 0
   fi
   if [[ "$WANT_CHECK" -eq 1 ]]; then
-    row ok release "archive holds ergosphere.py and its vendor files (--check runs nothing from it)"
+    row ok release "archive holds ergosphere.py and the vendor files it names (--check runs nothing from it)"
     return 0
   fi
   cand="$STAGE/cfg/ergosphere.json" legacy="$STAGE/cfg/cwd-defaults.json"
