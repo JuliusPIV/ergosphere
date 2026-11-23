@@ -7,8 +7,8 @@
 # $AB_OUT/summary.txt.  Exit 1 when a check passes on A and fails on B, when the
 # browser checks break on B or leave out a check named in ab.py ORDER, or the
 # run itself breaks (a server never reports ready, or no check passes on A).
-# No browser or playwright on the host is only a warning.
-# Optional: AB_CHROME (browser binary), NODE_PATH (playwright).
+# No browser (or node, playwright) for B fails too, unless AB_NO_BROWSER=1.
+# Optional: AB_CHROME (browser binary), NODE_PATH (playwright), AB_NO_BROWSER.
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # A fresh id per run: Ergosphere finds a session's holder machine-wide via
@@ -99,8 +99,33 @@ sys.exit(0 if any(c.get("ok") for c in ab.side(sys.argv[2])[0].values()) else 1)
   echo "RUN BROKE: no check passed on A" >>"$AB_OUT/summary.txt"
   rc=1
 fi
+# Issue #129: no browser on B means no page check ran there, so a page
+# regression would pass.  ghflow's A/B host has one; AB_NO_BROWSER=1 allows a
+# local run without it (ghflow clears the environment, so it must be in --ab).
+b_why="$(python3 -B -c 'import json, sys
+d = json.load(open(sys.argv[1]))
+print("" if d.get("browser") else str(d.get("unavailable") or d.get("error") or "no result")[:200])' "$AB_OUT/B/browser.json" 2>/dev/null)" || b_why="no readable B/browser.json"
+if [ -n "$b_why" ]; then
+  if [ "${AB_NO_BROWSER:-}" = 1 ]; then
+    echo "WARNING: browser checks did not run on B ($b_why); allowed by AB_NO_BROWSER=1" >>"$AB_OUT/summary.txt"
+  else
+    echo "RUN BROKE: browser checks did not run on B ($b_why); set AB_NO_BROWSER=1 to allow that" >>"$AB_OUT/summary.txt"
+    rc=1
+  fi
+fi
+# Issue #64: a running server keeps the vendor files it started with.
+echo $'\nIssue #64: vendor files replaced on disk under a running server, then a Settings restart' >>"$AB_OUT/summary.txt"
+for side in A B; do
+  dir=AB_${side}_DIR port=AB_PORT_${side}
+  out="$(ERGOSPHERE_TEST_PORT="${!port}" python3 -B "$HERE/../vendor_snapshot_test.py" "${!dir}" 2>&1)" || { [ "$side" = B ] && rc=1; }
+  printf '%s: %s\n' "$side" "$(printf '%s\n' "$out" | grep -E '^(PASS|FAIL)' | grep -v 'server output' | tr '\n' ' ')" >>"$AB_OUT/summary.txt"
+done
 # Issue #97: what each side's install.sh copies into the install dir.
 bash "$HERE/install_files.sh" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #63: sessions between the installer's session check and its restart.
+bash "$HERE/install_restart_gate.sh" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #194: a release that renamed a vendor file, checked by each side's install.sh.
+bash "$HERE/vendor_rename.sh" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #243: every checks/*.sh, after the sections above.  A new A/B check is a
 # new file in checks/ (or browser.d/ for a page check); never add a block here.
 export AB_A_DIR AB_B_DIR AB_PORT_A AB_PORT_B AB_OUT
