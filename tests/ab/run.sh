@@ -38,6 +38,13 @@ elif ! NODE_PATH="$pw_path" node -e 'require.resolve("playwright")' >/dev/null 2
   browser_off="playwright module not found (set NODE_PATH)"
 fi
 log "playwright path: ${pw_path:-none}; browser: ${AB_CHROME:-playwright default}"
+# Page check modules (#243): node preloads each browser.d/*.js, which adds its
+# check to browser_d.js; browser.js runs them before resume_box.
+page_mods=()
+# Names a module may not reuse, from ab.py (the one list).
+AB_BUILTIN_CHECKS="$(python3 -B "$HERE/ab.py" builtin)" || exit 2
+export AB_BUILTIN_CHECKS
+for f in "$HERE"/browser.d/*.js; do [ -f "$f" ] && page_mods+=(-r "$f"); done
 
 run_side() { # label code-dir port
   local label="$1" code="$2" port="$3" w="$AB_OUT/$1" pid brc
@@ -63,7 +70,7 @@ run_side() { # label code-dir port
   python3 -B "$HERE/ab.py" vendor "$code" >"$w/vendor.json" 2>"$w/vendor.err"
   if [ -z "$browser_off" ]; then
     brc=0
-    NODE_PATH="$pw_path" timeout 300 node "$HERE/browser.js" "$port" "$SID" >"$w/browser.json" 2>"$w/browser.err" || brc=$?
+    NODE_PATH="$pw_path" timeout 300 node ${page_mods[@]+"${page_mods[@]}"} "$HERE/browser.js" "$port" "$SID" >"$w/browser.json" 2>"$w/browser.err" || brc=$?
     [ -s "$w/browser.json" ] || printf '{"error":"browser.js exited %s with no result"}\n' "$brc" >"$w/browser.json"
   else
     printf '{"unavailable":"%s"}\n' "$browser_off" >"$w/browser.json"
@@ -106,14 +113,6 @@ if [ -n "$b_why" ]; then
     rc=1
   fi
 fi
-# Issue #45: one session's hung start, on each side's port again (its server has stopped).
-for side in A B; do
-  dir=AB_${side}_DIR port=AB_PORT_${side}
-  rm -rf "$AB_OUT/slow-$side"; mkdir -p "$AB_OUT/slow-$side"
-  log "$side: slow start check on ${!port}"
-  python3 -B "$HERE/slow_start.py" run "${!dir}" "${!port}" "$AB_OUT/slow-$side" >"$AB_OUT/slow-$side.json" 2>"$AB_OUT/slow-$side.err"
-done
-python3 -B "$HERE/slow_start.py" summary "$AB_OUT/slow-A.json" "$AB_OUT/slow-B.json" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #64: a running server keeps the vendor files it started with.
 echo $'\nIssue #64: vendor files replaced on disk under a running server, then a Settings restart' >>"$AB_OUT/summary.txt"
 for side in A B; do
@@ -137,10 +136,16 @@ for side in A B; do
   python3 -B "$HERE/master_use.py" run "${!dir}" >"$AB_OUT/muse-$side.json" 2>"$AB_OUT/muse-$side.err"
 done
 python3 -B "$HERE/master_use.py" summary "$AB_OUT/muse-A.json" "$AB_OUT/muse-B.json" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #140: --check stops where the real run stops and says what it does with the server.
+bash "$HERE/install_check_plan.sh" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #63: sessions between the installer's session check and its restart.
 bash "$HERE/install_restart_gate.sh" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #194: a release that renamed a vendor file, checked by each side's install.sh.
 bash "$HERE/vendor_rename.sh" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #243: every checks/*.sh, after the sections above.  A new A/B check is a
+# new file in checks/ (or browser.d/ for a page check); never add a block here.
+export AB_A_DIR AB_B_DIR AB_PORT_A AB_PORT_B AB_OUT
+NODE_PATH="$pw_path" bash "$HERE/run_checks.sh" "$HERE/checks" "$AB_A_DIR/tests/ab/checks" >>"$AB_OUT/summary.txt" || rc=1
 cat "$AB_OUT/summary.txt"
 [ -s "$AB_OUT/summary.txt" ] || exit 1
 exit "$rc"

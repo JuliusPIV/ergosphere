@@ -28,8 +28,9 @@ ergosphere.json next to ergosphere.py. A rerun keeps them;
 --bind and --port change only those two keys.
   --yes        approve a non-loopback bind without asking
   --version vA.B.C  install this release instead of the latest (pin or roll back)
-  --check      run the checks only: download the release to a temp dir and check
-               its files are all there; run nothing from it, change nothing
+  --check      run the checks only: ask what a real run asks, download the release
+               to a temp dir and check its files are all there, say what would
+               happen to the server; run nothing from it, change nothing
   --help       this help
 EOF
 }
@@ -862,6 +863,60 @@ has_addr_args() {
   return 1
 }
 
+# --check only: says what start_server would do with the server, from the
+# same facts, and changes nothing. The archive's runtime fingerprint is
+# computed here from its bytes, the way ergosphere.py's runtime_fingerprint
+# does, so nothing from the download runs (#168). If a release changes that
+# formula, the plan says restart where the real run may keep the server.
+plan_server() {
+  local why="" kids noun digest host
+  probe "$OLD_BIND" "$OLD_PORT"
+  if [[ "$PROBE" != match && "$PROBE" != moved ]] && ! same_addr "$OLD_BIND:$OLD_PORT" "$BIND:$PORT"; then probe "$BIND" "$PORT"; fi
+  if [[ "$PROBE" == down ]]; then probe_own; fi
+  if [[ "$PROBE" != match && "$PROBE" != moved ]]; then
+    row ok plan "start a server on ${BIND}:${PORT}"
+    return 0
+  fi
+  digest=$("$PYTHON" -I -c '
+import hashlib, os, sys
+d = hashlib.sha256()
+for name in ("ergosphere.py", "vendor/addon-fit.js", "vendor/xterm.css", "vendor/xterm.js"):
+    d.update(hashlib.sha256(open(os.path.join(sys.argv[1], name), "rb").read()).digest())
+print(d.hexdigest())' "$SRC" </dev/null 2>/dev/null) || digest=""
+  if [[ "$PROBE" == moved ]] || ! same_addr "$PROBE_AT" "$BIND:$PORT"; then
+    why="settings move it from $PROBE_AT to ${BIND}:${PORT}"
+  elif [[ -z "$PROBE_DIGEST" || "$PROBE_DIGEST" != "$digest" ]]; then
+    why="runtime differs"
+  elif has_addr_args "$PROBE_PID"; then
+    why="it was started with --bind/--port; it would then read ergosphere.json"
+  elif [[ -n "$AGENT" && "$AGENT_STATE" == new && "$CFG_SOURCE" == json ]]; then
+    why="agent $AGENT would be added"
+  fi
+  if [[ -z "$why" ]]; then
+    row ok plan "keep pid $PROBE_PID running (already up to date)"
+    return 0
+  fi
+  # The server's own session count (the one its restart gate uses), read with
+  # a GET: nothing is asked to stop. The real run decides again right before
+  # a restart; a session can start or end in between.
+  host=${PROBE_AT%:*}
+  if [[ "$host" == 0.0.0.0 ]]; then host=127.0.0.1; fi
+  kids=$("$CURL" --noproxy '*' -s --max-time 3 "http://${host}:${PROBE_AT##*:}/session-info" 2>/dev/null |
+    "$PYTHON" -I -c '
+import json, sys
+n = json.load(sys.stdin).get("running")
+print(n if type(n) is int and n >= 0 else "")' 2>/dev/null) || kids=""
+  if [[ -z "$kids" ]]; then
+    row ok plan "restart pid $PROBE_PID if it has no grok sessions then (it did not report a count): $why"
+  elif [[ "$kids" -gt 0 ]]; then
+    noun="grok sessions"
+    if [[ "$kids" -eq 1 ]]; then noun="grok session"; fi
+    row ok plan "keep pid $PROBE_PID running ($kids $noun open): $why"
+  else
+    row ok plan "restart pid $PROBE_PID (no grok sessions now): $why"
+  fi
+}
+
 # The server reads bind and port from ergosphere.json, so it runs with no
 # address arguments and without ERGOSPHERE_PORT, which would override the file.
 start_server() {
@@ -1038,18 +1093,19 @@ main() {
   # ERGOSPHERE_PORT counts as a given port, as it does for the server.
   if [[ -z "$ARG_PORT" && -n "${ERGOSPHERE_PORT:-}" ]]; then set_port "$ERGOSPHERE_PORT"; ARG_PORT=$PORT; fi
   check_host
-  if [[ "$WANT_CHECK" -eq 0 ]]; then
-    choose_mode
-    if [[ "$MODE" == manual ]]; then ask_dir; fi
-  fi
+  # --check asks no mode question (automatic unless --manual), but it asks
+  # what the real run asks, so it stops where the real run would (#140).
+  if [[ "$WANT_CHECK" -eq 0 ]]; then choose_mode; fi
+  if [[ "$MODE" == manual ]]; then ask_dir; fi
   [[ -n "${HOME:-}" || "$DEST" != "$DEFAULT_DEST" ]] || fail check "HOME is not set; pass --dir"
   load_config
-  if [[ "$WANT_CHECK" -eq 0 && "$MODE" == manual ]]; then ask_manual; fi
+  if [[ "$MODE" == manual ]]; then ask_manual; fi
   # Every question comes before check_target, whose release check runs the
   # downloaded ergosphere.py in a real run.
-  if [[ "$WANT_CHECK" -eq 0 ]]; then approve_bind; fi
+  approve_bind
   check_target
   if [[ "$WANT_CHECK" -eq 1 ]]; then
+    plan_server
     printf 'ready: checks passed, nothing changed\n'
     return 0
   fi
