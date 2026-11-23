@@ -1153,11 +1153,19 @@ def vendor_dir():
     return Path(__file__).resolve().parent / "vendor"
 
 
+# The vendor files as read at startup, by URL path. A running server serves
+# these, not newer files an installer wrote while it kept running (#64): the
+# page script it serves is the one it loaded too. A restart reads both again.
+VENDOR_DATA = {}
+
+
 def require_vendor():
     missing = []
     root = vendor_dir()
-    for name, _ctype in VENDOR_FILES.values():
-        if not (root / name).is_file():
+    for path, (name, _ctype) in VENDOR_FILES.items():
+        try:
+            VENDOR_DATA[path] = (root / name).read_bytes()
+        except OSError:
             missing.append(name)
     if missing:
         raise SystemExit("missing vendor file: %s" % ", ".join(missing))
@@ -5661,13 +5669,11 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _vendor(self, path):
-        name, ctype = VENDOR_FILES[path]
-        file_path = vendor_dir() / name
-        try:
-            data = file_path.read_bytes()
-        except OSError:
+        data = VENDOR_DATA.get(path)
+        if data is None:
             self._json(404, {"error": "not found"})
             return
+        ctype = VENDOR_FILES[path][1]
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
