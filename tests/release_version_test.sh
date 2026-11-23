@@ -27,13 +27,18 @@ if grep -q 'badge/version-v' README.md; then bad "README version badge is hard-c
 ver_of() { python3 -I -c 'import runpy,sys; print(runpy.run_path(sys.argv[1])["VERSION"])' "$1"; }
 v=$(ver_of ergosphere.py)
 if [ "$v" = dev ]; then ok "checkout reports dev"; else bad "checkout reports '$v', expected dev"; fi
-mkdir "$tmp/arc"
-git archive --format=tar HEAD ergosphere.py | tar -x -C "$tmp/arc"
-want=$(git describe --tags --match 'v[0-9]*' HEAD 2>/dev/null)
-v=$(ver_of "$tmp/arc/ergosphere.py")
-if [ -z "$want" ]; then echo "skip: no release tags in this clone; archive reports '$v'"
-elif [ "$v" = "${want#v}" ]; then ok "archive reports $v (git describe $want)"
-else bad "archive reports '$v', expected '${want#v}'"; fi
+# Tag a commit in a throwaway repo rather than reading this clone's tags: a review
+# checkout can be a worktree whose git dir is out of reach (every git command fails
+# there), and a clone may have no tags at all.  Either way the check must still run.
+g() { env -u GIT_DIR -u GIT_WORK_TREE GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  git -C "$tmp/rel" -c user.name=t -c user.email= -c commit.gpgsign=false -c tag.gpgsign=false "$@"; }
+mkdir "$tmp/rel" "$tmp/arc"
+cp ergosphere.py .gitattributes "$tmp/rel/"
+if g init -q && g add ergosphere.py .gitattributes && g commit -q -m release && g tag v9.8.7 &&
+   g archive --format=tar HEAD ergosphere.py | tar -x -C "$tmp/arc"; then
+  v=$(ver_of "$tmp/arc/ergosphere.py")
+  if [ "$v" = 9.8.7 ]; then ok "archive of tag v9.8.7 reports $v"; else bad "archive of tag v9.8.7 reports '$v', expected 9.8.7"; fi
+else bad "could not build a tagged test archive with git"; fi
 # An archive where describe found no tag expands the placeholder to "".
 v=$(sed 's/^_ARCHIVE_DESCRIBE = .*/_ARCHIVE_DESCRIBE = ""/' ergosphere.py |
   python3 -I -c 'import sys; ns = {"__name__": "t"}; exec(sys.stdin.read(), ns); print(ns["VERSION"])')
