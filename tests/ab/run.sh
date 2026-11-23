@@ -6,8 +6,9 @@
 # TUI (fakegrok.py), then the shared checks from this folder.  Writes
 # $AB_OUT/summary.txt.  Exit 1 when a check passes on A and fails on B, when the
 # browser checks break on B or leave out a check named in ab.py ORDER, or the
-# run itself breaks.  No browser or playwright on the host is only a warning.
-# Optional: AB_CHROME (browser binary), NODE_PATH (playwright).
+# run itself breaks (a server never reports ready, or no check passes on A).
+# No browser (or node, playwright) for B fails too, unless AB_NO_BROWSER=1.
+# Optional: AB_CHROME (browser binary), NODE_PATH (playwright), AB_NO_BROWSER.
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # A fresh id per run: Ergosphere finds a session's holder machine-wide via
@@ -37,6 +38,13 @@ elif ! NODE_PATH="$pw_path" node -e 'require.resolve("playwright")' >/dev/null 2
   browser_off="playwright module not found (set NODE_PATH)"
 fi
 log "playwright path: ${pw_path:-none}; browser: ${AB_CHROME:-playwright default}"
+# Page check modules (#243): node preloads each browser.d/*.js, which adds its
+# check to browser_d.js; browser.js runs them before resume_box.
+page_mods=()
+# Names a module may not reuse, from ab.py (the one list).
+AB_BUILTIN_CHECKS="$(python3 -B "$HERE/ab.py" builtin)" || exit 2
+export AB_BUILTIN_CHECKS
+for f in "$HERE"/browser.d/*.js; do [ -f "$f" ] && page_mods+=(-r "$f"); done
 
 run_side() { # label code-dir port
   local label="$1" code="$2" port="$3" w="$AB_OUT/$1" pid brc
@@ -62,9 +70,10 @@ run_side() { # label code-dir port
   done
   grep -q ERGOSPHERE_READY "$w/server.log" || log "$label: server not ready: $(tail -n 3 "$w/server.log")"
   python3 -B "$HERE/ab.py" http "$port" "$SID" >"$w/http.json" 2>"$w/http.err"
+  python3 -B "$HERE/ab.py" vendor "$code" >"$w/vendor.json" 2>"$w/vendor.err"
   if [ -z "$browser_off" ]; then
     brc=0
-    NODE_PATH="$pw_path" timeout 300 node "$HERE/browser.js" "$port" "$SID" "$w/starts.log" >"$w/browser.json" 2>"$w/browser.err" || brc=$?
+    NODE_PATH="$pw_path" timeout 300 node ${page_mods[@]+"${page_mods[@]}"} "$HERE/browser.js" "$port" "$SID" "$w/starts.log" >"$w/browser.json" 2>"$w/browser.err" || brc=$?
     [ -s "$w/browser.json" ] || printf '{"error":"browser.js exited %s with no result"}\n' "$brc" >"$w/browser.json"
   else
     printf '{"unavailable":"%s"}\n' "$browser_off" >"$w/browser.json"
@@ -81,14 +90,51 @@ run_side A "$AB_A_DIR" "$AB_PORT_A"
 run_side B "$AB_B_DIR" "$AB_PORT_B"
 rc=0
 python3 -B "$HERE/ab.py" summary "$AB_OUT/A" "$AB_OUT/B" >"$AB_OUT/summary.txt" || rc=$?
-# Issue #45: one session's hung start, on each side's port again (its server has stopped).
+# Issue #113: a side that never started, or an A that passed nothing, means
+# the run tested nothing; equal failures on both sides are not a pass.
+for side in A B; do
+  grep -q ERGOSPHERE_READY "$AB_OUT/$side/server.log" && continue
+  echo "RUN BROKE: $side server never reported ready (see $side/server.log)" >>"$AB_OUT/summary.txt"
+  rc=1
+done
+if ! python3 -B -c 'import sys; sys.path.insert(0, sys.argv[1]); import ab
+sys.exit(0 if any(c.get("ok") for c in ab.side(sys.argv[2])[0].values()) else 1)' "$HERE" "$AB_OUT/A"; then
+  echo "RUN BROKE: no check passed on A" >>"$AB_OUT/summary.txt"
+  rc=1
+fi
+# Issue #129: no browser on B means no page check ran there, so a page
+# regression would pass.  ghflow's A/B host has one; AB_NO_BROWSER=1 allows a
+# local run without it (ghflow clears the environment, so it must be in --ab).
+b_why="$(python3 -B -c 'import json, sys
+d = json.load(open(sys.argv[1]))
+print("" if d.get("browser") else str(d.get("unavailable") or d.get("error") or "no result")[:200])' "$AB_OUT/B/browser.json" 2>/dev/null)" || b_why="no readable B/browser.json"
+if [ -n "$b_why" ]; then
+  if [ "${AB_NO_BROWSER:-}" = 1 ]; then
+    echo "WARNING: browser checks did not run on B ($b_why); allowed by AB_NO_BROWSER=1" >>"$AB_OUT/summary.txt"
+  else
+    echo "RUN BROKE: browser checks did not run on B ($b_why); set AB_NO_BROWSER=1 to allow that" >>"$AB_OUT/summary.txt"
+    rc=1
+  fi
+fi
+# Issue #64: a running server keeps the vendor files it started with.
+echo $'\nIssue #64: vendor files replaced on disk under a running server, then a Settings restart' >>"$AB_OUT/summary.txt"
 for side in A B; do
   dir=AB_${side}_DIR port=AB_PORT_${side}
-  rm -rf "$AB_OUT/slow-$side"; mkdir -p "$AB_OUT/slow-$side"
-  log "$side: slow start check on ${!port}"
-  python3 -B "$HERE/slow_start.py" run "${!dir}" "${!port}" "$AB_OUT/slow-$side" >"$AB_OUT/slow-$side.json" 2>"$AB_OUT/slow-$side.err"
+  out="$(ERGOSPHERE_TEST_PORT="${!port}" python3 -B "$HERE/../vendor_snapshot_test.py" "${!dir}" 2>&1)" || { [ "$side" = B ] && rc=1; }
+  printf '%s: %s\n' "$side" "$(printf '%s\n' "$out" | grep -E '^(PASS|FAIL)' | grep -v 'server output' | tr '\n' ' ')" >>"$AB_OUT/summary.txt"
 done
-python3 -B "$HERE/slow_start.py" summary "$AB_OUT/slow-A.json" "$AB_OUT/slow-B.json" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #97: what each side's install.sh copies into the install dir.
+bash "$HERE/install_files.sh" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #140: --check stops where the real run stops and says what it does with the server.
+bash "$HERE/install_check_plan.sh" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #63: sessions between the installer's session check and its restart.
+bash "$HERE/install_restart_gate.sh" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #194: a release that renamed a vendor file, checked by each side's install.sh.
+bash "$HERE/vendor_rename.sh" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #243: every checks/*.sh, after the sections above.  A new A/B check is a
+# new file in checks/ (or browser.d/ for a page check); never add a block here.
+export AB_A_DIR AB_B_DIR AB_PORT_A AB_PORT_B AB_OUT
+NODE_PATH="$pw_path" bash "$HERE/run_checks.sh" "$HERE/checks" "$AB_A_DIR/tests/ab/checks" >>"$AB_OUT/summary.txt" || rc=1
 cat "$AB_OUT/summary.txt"
 [ -s "$AB_OUT/summary.txt" ] || exit 1
 exit "$rc"
