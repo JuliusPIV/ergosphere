@@ -313,34 +313,32 @@ Plans, not promises. Items are ordered roughly by priority, and each one is tagg
 
 ### 🔜 Next up
 
-| Item | Type | What changes |
-| --- | --- | --- |
-| **Smaller "Resume this session" prompt** | 🧭 Usability | The prompt shown for a stopped session takes less of the screen. |
-| **Resume prompt opens by itself** | 🧭 Usability | Opening a stopped session shows the resume prompt straight away instead of an empty terminal. |
-| **Resume on click, as a setting** | ✨ Enhancement | An option in Settings resumes a stopped session as soon as you open it. |
-| **Sessions whose folder was deleted** | 🐛 Bug fix | The list marks them and explains why they cannot resume, and offers another folder, instead of failing with an error. |
+| Item | Type | What changes | Issue |
+| --- | --- | --- | --- |
+| **Smaller "Resume this session" prompt** | 🧭 Usability | The prompt shown for a stopped session takes less of the screen. | [#53](https://github.com/JuliusPIV/ergosphere/issues/53) |
+| **Resume prompt opens by itself** | 🧭 Usability | Opening a stopped session shows the resume prompt straight away instead of an empty terminal. | [#52](https://github.com/JuliusPIV/ergosphere/issues/52) |
+| **Sessions whose folder was deleted** | 🐛 Bug fix | The list marks them and explains why they cannot resume, and offers another folder, instead of failing with an error. | [#43](https://github.com/JuliusPIV/ergosphere/issues/43) |
 
 ### 🗓️ Planned
 
-| Item | Type | What changes |
-| --- | --- | --- |
-| **Local models** | ✨ Enhancement | Run sessions on local models, starting with llama.cpp, with a Cloud / Local choice in the new-session dialog. |
-| **Browser login** | 🔐 Security | Sign in to Ergosphere, so it can be reached without an SSH tunnel. |
-| **Start on boot** | 🛋️ Quality of life | Ergosphere comes back by itself after a reboot. |
-| **Disconnect or Quit** | 🧭 Usability | Leave a session running and close the page, or stop grok, from one clear dialog. |
-| **Takeover prompt** | 🧭 Usability | When a session is open in a terminal or another browser, a prompt offers to move it here. |
-| **Consistent theming** | 🧭 Usability | One consistent look across the list, the session page and Settings. |
-| **Thinking and tools view** | ✨ Enhancement | A separate panel for grok's thinking, commands and skills. |
-| **More installer port presets** | 🛋️ Quality of life | Pick 8080 or 8081 in the installer as well as 9241. |
+| Item | Type | What changes | Issue |
+| --- | --- | --- | --- |
+| **Local models** | ✨ Enhancement | Run sessions on local models, starting with llama.cpp, with a Cloud / Local choice in the new-session dialog. | [#71](https://github.com/JuliusPIV/ergosphere/issues/71), [#72](https://github.com/JuliusPIV/ergosphere/issues/72), [#73](https://github.com/JuliusPIV/ergosphere/issues/73) |
+| **Browser login** | 🔐 Security | Sign in to Ergosphere, so it can be reached without an SSH tunnel. | [#74](https://github.com/JuliusPIV/ergosphere/issues/74), [#75](https://github.com/JuliusPIV/ergosphere/issues/75) |
+| **Start on boot** | 🛋️ Quality of life | Ergosphere comes back by itself after a reboot. | [#30](https://github.com/JuliusPIV/ergosphere/issues/30) |
+| **Disconnect or Quit** | 🧭 Usability | Leave a session running and close the page, or stop grok, from one clear dialog. | [#77](https://github.com/JuliusPIV/ergosphere/issues/77) |
+| **Takeover prompt** | 🧭 Usability | When a session is open in a terminal or another browser, a prompt offers to move it here. | [#78](https://github.com/JuliusPIV/ergosphere/issues/78) |
+| **Consistent theming** | 🧭 Usability | One consistent look across the list, the session page and Settings. | [#79](https://github.com/JuliusPIV/ergosphere/issues/79) |
+| **Thinking and tools view** | ✨ Enhancement | A separate panel for grok's thinking, commands and skills. | [#81](https://github.com/JuliusPIV/ergosphere/issues/81) |
 
 ### 🔭 Exploring
 
-| Item | Type | What changes |
-| --- | --- | --- |
-| **Sessions survive Ergosphere updates** | ✨ Enhancement | Update the web server without stopping the grok sessions it runs. |
-| **Turn notifications** | ✨ Enhancement | A browser notification when grok finishes a turn (needs HTTPS). |
-| **macOS support** | 💻 Platform | Ergosphere on macOS, replacing the Linux-only process checks. |
-| **More themes** | ✨ Enhancement | Pick from several looks once theming is consistent. |
+| Item | Type | What changes | Issue |
+| --- | --- | --- | --- |
+| **Sessions survive Ergosphere updates** | ✨ Enhancement | Update the web server without stopping the grok sessions it runs. | No issue yet |
+| **Turn notifications** | ✨ Enhancement | A browser notification when grok finishes a turn (needs HTTPS). | [#83](https://github.com/JuliusPIV/ergosphere/issues/83) |
+| **macOS support** | 💻 Platform | Ergosphere on macOS, replacing the Linux-only process checks. | [#84](https://github.com/JuliusPIV/ergosphere/issues/84) |
+| **More themes** | ✨ Enhancement | Pick from several looks once theming is consistent. | [#80](https://github.com/JuliusPIV/ergosphere/issues/80) |
 
 Have an idea or found a bug? [Open an issue](https://github.com/JuliusPIV/ergosphere/issues).
 
@@ -361,7 +359,7 @@ Pass options after `| bash -s --`.
 | `--bind ADDR` | Listen address: an IPv4 address of this machine, `0.0.0.0`, or `localhost`. Default: the address saved in `ergosphere.json`, else `127.0.0.1`. |
 | `--yes` | Approve a listen address other than loopback without asking. |
 | `--version vA.B.C` | Install that release instead of the latest one (pin or roll back). The rerun command it prints keeps it. |
-| `--check` | Run the checks only. Downloads the release to a temp dir and checks its files are all there. Runs nothing from it. Changes nothing. |
+| `--check` | Run the checks only. Asks what a real run asks (the `--manual` questions, a non-loopback bind without `--yes`). Downloads the release to a temp dir and checks its files are all there. Runs nothing from it. Says what would happen to the server (start, restart, or keep). Changes nothing. |
 | `--help` | Show the options. |
 
 Prerequisites are checked first and listed when missing. The installer never installs them, and it does not check grok sign-in.
@@ -458,4 +456,4 @@ Copyright (C) 2026 Julius Perkins
 
 Ergosphere is licensed under the GNU Affero General Public License version 3 only ([AGPL-3.0-only](https://www.gnu.org/licenses/agpl-3.0.html)). See [LICENSE](LICENSE).
 
-The terminal in the browser is [xterm.js](https://github.com/xtermjs/xterm.js) and its fit addon, vendored in `vendor/` under the MIT license, by the xterm.js authors.
+The terminal in the browser is [xterm.js](https://github.com/xtermjs/xterm.js) and its fit addon, vendored in `vendor/` under the MIT license, by the xterm.js authors.  `package.json` and `package-lock.json` name their exact npm versions so vulnerability scanners can check them; nothing installs them.

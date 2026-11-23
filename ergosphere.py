@@ -1152,11 +1152,19 @@ def vendor_dir():
     return Path(__file__).resolve().parent / "vendor"
 
 
+# The vendor files as read at startup, by URL path. A running server serves
+# these, not newer files an installer wrote while it kept running (#64): the
+# page script it serves is the one it loaded too. A restart reads both again.
+VENDOR_DATA = {}
+
+
 def require_vendor():
     missing = []
     root = vendor_dir()
-    for name, _ctype in VENDOR_FILES.values():
-        if not (root / name).is_file():
+    for path, (name, _ctype) in VENDOR_FILES.items():
+        try:
+            VENDOR_DATA[path] = (root / name).read_bytes()
+        except OSError:
             missing.append(name)
     if missing:
         raise SystemExit("missing vendor file: %s" % ", ".join(missing))
@@ -4535,6 +4543,12 @@ function showEnded() {
   document.getElementById("status").style.color = "#808080";
   document.getElementById("stop").textContent = "Resume";
   syncStop();
+  // grok's last screen would still look live, and a page loaded ended shows a
+  // blank terminal: clear it so both look the same (#55).  Text from a grok
+  // that never got going (sawOutput false) stays: it says why.
+  if (sawOutput && termOpened) {
+    try { term.reset(); } catch (err) {}
+  }
 }
 var retryTimer = null;
 function resumeSession(tries) {
@@ -4550,6 +4564,9 @@ function resumeSession(tries) {
   if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; }
   document.getElementById("stop").textContent = "Quit";
   setStatus("starting", false);
+  // Nothing of an earlier screen stays up until the new grok draws: the old
+  // frame, then grok's clear, then its first frame flashed black (#55).
+  try { if (termOpened) term.reset(); } catch (err) {}
   var old = sock;
   sock = null;
   if (old) {
@@ -5365,10 +5382,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def _settings_restart(self):
         # Only with zero grok sessions. RESTART stops new launches until exec.
+        # One owner: the request that sets RESTART is the only one that may
+        # clear it, or a second request that fails cancels a restart already
+        # shutting down (PR #172 r2-1).
         with LIVE_LOCK:
+            pending = RESTART.is_set()
             busy = len(STARTING) + sum(1 for live in LIVE.values() if live_state(live))
-            if not busy:
+            if not busy and not pending:
                 RESTART.set()
+        if pending:
+            self._json(409, {"ok": False, "error": "a restart is already under way"})
+            return
         if busy:
             self._json(409, {
                 "ok": False,
@@ -5376,21 +5400,27 @@ class Handler(BaseHTTPRequestHandler):
                 "error": "%d grok %s running; restart needs zero" % (busy, "session" if busy == 1 else "sessions"),
             })
             return
-        # The restarted server reads the file, so the reply must too.
+        # Until the shutdown thread starts, any failure (EMFILE in the probe)
+        # must clear RESTART, or the server serves on refusing every launch.
         try:
-            with CONFIG_LOCK:
-                saved = self._saved_config()
-        except ValueError as exc:
+            # The restarted server reads the file, so the reply must too.
+            try:
+                with CONFIG_LOCK:
+                    saved = self._saved_config()
+            except ValueError as exc:
+                problem = ("bad config: %s" % exc)[:300]
+            else:
+                nxt = resolve_endpoint(argparse.Namespace(**vars(self.server.args)), saved)
+                problem = self._endpoint_problem(nxt.bind, nxt.port)
+                if not problem:
+                    print("restart requested; next %s:%s" % (nxt.bind, nxt.port), flush=True)
+        except BaseException:
             RESTART.clear()
-            self._json(409, {"ok": False, "error": ("bad config: %s" % exc)[:300] + "; not restarting"})
-            return
-        nxt = resolve_endpoint(argparse.Namespace(**vars(self.server.args)), saved)
-        problem = self._endpoint_problem(nxt.bind, nxt.port)
+            raise
         if problem:
             RESTART.clear()
             self._json(409, {"ok": False, "error": problem + "; not restarting"})
             return
-        print("restart requested; next %s:%s" % (nxt.bind, nxt.port), flush=True)
         # RESTART is set: the restart must go ahead even if the client is
         # gone and the reply raises, or the server serves on refusing launches.
         try:
@@ -5605,13 +5635,11 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _vendor(self, path):
-        name, ctype = VENDOR_FILES[path]
-        file_path = vendor_dir() / name
-        try:
-            data = file_path.read_bytes()
-        except OSError:
+        data = VENDOR_DATA.get(path)
+        if data is None:
             self._json(404, {"error": "not found"})
             return
+        ctype = VENDOR_FILES[path][1]
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
