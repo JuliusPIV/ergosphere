@@ -2121,11 +2121,15 @@ def _turn_in_children(pid, ppids, cmd=None):
 
 
 # events.jsonl path -> (st_dev, st_ino, bytes read, unix time of the open
-# turn_started or None). Each read starts where the last one stopped.
+# turn_started or None, True while skipping the rest of an oversized line).
+# Each read starts where the last one stopped.
 _TURN_EVENTS = {}
 _TURN_EVENTS_LOCK = threading.Lock()
 # turn_started ts is cut to whole seconds and boot time is whole seconds.
 TURN_START_SLACK = 2.0
+# Turn events are a few dozen bytes. Longer lines are other events (tool output),
+# skipped in chunks so one huge line never sits in memory during a poll.
+TURN_LINE_MAX = 64 << 10
 
 
 def _open_turn_since(path):
@@ -2141,18 +2145,30 @@ def _open_turn_since(path):
     except OSError:
         return None
     with _TURN_EVENTS_LOCK:
-        dev, ino, offset, since = _TURN_EVENTS.get(path, (None, None, 0, None))
+        dev, ino, offset, since, skipping = _TURN_EVENTS.get(path, (None, None, 0, None, False))
     if (dev, ino) != (st.st_dev, st.st_ino) or st.st_size < offset:
-        offset, since = 0, None
+        offset, since, skipping = 0, None, False
     if st.st_size > offset:
-        # Line by line: a long history must not be loaded whole on the first poll.
+        # Line by line, each read capped: a long history or a huge line must not be loaded whole.
         try:
             with open(path, "rb") as handle:
                 handle.seek(offset)
                 while offset < st.st_size:
-                    raw = handle.readline()
-                    if not raw.endswith(b"\n"):
+                    raw = handle.readline(TURN_LINE_MAX)
+                    if not raw:
                         break
+                    if skipping:
+                        # Still inside an oversized line: discard until its newline.
+                        offset += len(raw)
+                        skipping = not raw.endswith(b"\n")
+                        continue
+                    if not raw.endswith(b"\n"):
+                        if len(raw) < TURN_LINE_MAX:
+                            break
+                        # Oversized: no turn event is this long, so skip it.
+                        offset += len(raw)
+                        skipping = True
+                        continue
                     offset += len(raw)
                     if b'"turn_' not in raw:
                         continue
@@ -2170,7 +2186,7 @@ def _open_turn_since(path):
             return None
     # Two polls may both read; each stored entry is consistent on its own.
     with _TURN_EVENTS_LOCK:
-        _TURN_EVENTS[path] = (st.st_dev, st.st_ino, offset, since)
+        _TURN_EVENTS[path] = (st.st_dev, st.st_ino, offset, since, skipping)
     return since
 
 
