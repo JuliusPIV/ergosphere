@@ -6,7 +6,9 @@
                                                  which browser.d/ modules may not reuse
   python3 -B ab.py summary <A-dir> <B-dir>    -> summary text on stdout;
                                                  exit 1 when a check passes on A and fails on B,
+                                                 or B misses an HTTP check in ORDER,
                                                  or B's browser checks break or miss a check in ORDER or browser.d/
+                                                 (a check reported as null or without "ok" is missing)
 Stdlib only.
 """
 import json
@@ -110,6 +112,11 @@ def load(path):
         return {}
 
 
+def reported(checks, name):
+    """A check counts as reported only as an object with an "ok" field (#234)."""
+    return isinstance(checks.get(name), dict) and "ok" in checks[name]
+
+
 def side(dirname):
     server = load(dirname + "/http.json")
     browser = load(dirname + "/browser.json")
@@ -149,7 +156,7 @@ def summary(adir, bdir):
             broken.append("browser checks on %s reused HTTP check name(s): %s" % (label, ", ".join(br["reused"])))
     names = all_checks()
     if bbrowser.get("browser"):
-        missing = [n for n in names if n not in HTTP_CHECKS and n not in (bbrowser.get("checks") or {})]
+        missing = [n for n in names if n not in HTTP_CHECKS and not reported(bbrowser.get("checks") or {}, n)]
         if missing:
             broken.append("B did not report browser check(s): %s" % ", ".join(missing))
     width = 36
@@ -159,8 +166,8 @@ def summary(adir, bdir):
     for name in names:
         if name not in a and name not in b:
             continue
-        ca = a.get(name) or {"ok": False, "value": "not run"}
-        cb = b.get(name) or {"ok": False, "value": "not run"}
+        ca = a[name] if reported(a, name) else {"ok": False, "value": "not run"}
+        cb = b[name] if reported(b, name) else {"ok": False, "value": "not run"}
         cell = lambda c: ("%s %s" % ("PASS" if c["ok"] else "FAIL", c["value"]))[:width]
         same = ca == cb
         if not same:
@@ -177,8 +184,14 @@ def summary(adir, bdir):
         lines.append("REGRESSION: passes on A, fails on B: %s" % ", ".join(regress))
     for why in broken:
         lines.append("BROWSER FAILURE: %s" % why)
+    # The HTTP checks always run, and both sides run B's ab.py: a check dropped
+    # from http_checks() vanishes from both columns, so require each name (#179).
+    # Read B's merged checks: vendor_listed comes from vendor.json, not http.json.
+    http_missing = [n for n in HTTP_CHECKS if not reported(b, n)]
+    if http_missing:
+        lines.append("HTTP FAILURE: B did not report HTTP check(s): %s" % ", ".join(http_missing))
     print("\n".join(lines))
-    return 1 if regress or broken else 0
+    return 1 if regress or broken or http_missing else 0
 
 
 def main(argv):
