@@ -806,9 +806,11 @@ existing_up() {
   while [[ ! -e "$UP" ]]; do UP=${UP%/*}; UP=${UP:-/}; done
 }
 
-# Prints the free KiB on the filesystem holding $1.
+# Prints the free KiB on the filesystem holding $1. --output=avail picks the
+# column by name: df -P puts the filesystem name in column 1, and a name with
+# a space shifts the numbers, so column 4 would be Used. GNU df only, like stat -c.
 free_kib() {
-  df -Pk -- "$1" 2>/dev/null | awk 'NR == 2 { print $4 }'
+  df -k --output=avail -- "$1" 2>/dev/null | awk 'NR == 2 { print $1 }'
 }
 
 # Prints the KiB a copy of file $1 takes: 4 KiB blocks, rounded up.

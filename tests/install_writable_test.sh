@@ -36,7 +36,7 @@ cp -rp "$repo/vendor" "$d/"
 tar -czf "$work/www/good.tar.gz" -C "$work/pkg" ergosphere-test
 printf '#!/bin/sh\necho "grok 0.0.0-test"\n' >"$work/bin/grok"
 # A full disk without root: df reports 1 KiB free on every filesystem.
-printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/full 100 99 1 99%% /"\n' >"$work/dfbin/df"
+printf '#!/bin/sh\nfor a in "$@"; do if [ "$a" = --output=avail ]; then echo Avail; echo 1; exit 0; fi; done\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/full 100 99 1 99%% /"\n' >"$work/dfbin/df"
 chmod +x "$work/bin/grok" "$work/dfbin/df"
 
 python3 -I -c '
@@ -159,7 +159,7 @@ while IFS= read -r f; do
   b=$(blocks "$d/$f"); total=$((total + b)); (( b > max )) && max=$b
 done < <(cd "$d" && find . -type f | sed 's|^\./||')
 if (( total <= max )); then bad "sequential fit: fixture needs no more than its largest file"; fi
-printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/seq 100 99 %d 99%% /"\n' "$max" >"$work/dfpeak/df"
+printf '#!/bin/sh\nfor a in "$@"; do if [ "$a" = --output=avail ]; then echo Avail; echo %d; exit 0; fi; done\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/seq 100 99 %d 99%% /"\n' "$max" "$max" >"$work/dfpeak/df"
 chmod +x "$work/dfpeak/df"
 out=$(inst "$h" "$h/state/ergosphere.json" "$work/dfpeak" --check); rc=$?
 if [[ "$rc" -eq 0 && "$out" == *"ready: checks passed"* ]]; then
@@ -169,7 +169,7 @@ else
   printf '%s\n' "$out" | tail -n 8
 fi
 # One block less than the largest file: the sequential replace cannot fit.
-printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/seq 100 99 %d 99%% /"\n' "$((max - 4))" >"$work/dfpeak/df"
+printf '#!/bin/sh\nfor a in "$@"; do if [ "$a" = --output=avail ]; then echo Avail; echo %d; exit 0; fi; done\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/seq 100 99 %d 99%% /"\n' "$((max - 4))" "$((max - 4))" >"$work/dfpeak/df"
 out=$(inst "$h" "$h/state/ergosphere.json" "$work/dfpeak" --check); rc=$?
 expect_blocked "upgrade in place, one block short" "has $((max - 4)) KiB free, the release needs $max KiB" "$rc" "$out"
 
@@ -185,7 +185,7 @@ echo "/* older release */" >>"$work/vendorfs/vendor/xterm.js"
 # Stub df reports the filesystem of the path it is given (symlinks resolved, as
 # real df does): the vendor filesystem has room, every other path has 4 KiB.
 # shellcheck disable=SC2016  # the stub's $p is expanded by the stub, not here
-printf '#!/bin/sh\nfor p; do :; done\nr=$(realpath -- "$p")\ncase "$r" in\n  %s/*) a=1000000 ;;\n  *) a=4 ;;\nesac\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/sym 1000000 1 $a 1%% /"\n' "$work/vendorfs" >"$work/dfsym/df"
+printf '#!/bin/sh\nfor p; do :; done\nr=$(realpath -- "$p")\ncase "$r" in\n  %s/*) a=1000000 ;;\n  *) a=4 ;;\nesac\nfor o; do if [ "$o" = --output=avail ]; then echo Avail; echo "$a"; exit 0; fi; done\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/sym 1000000 1 $a 1%% /"\n' "$work/vendorfs" >"$work/dfsym/df"
 chmod +x "$work/dfsym/df"
 out=$(inst "$h" "$h/state/ergosphere.json" "$work/dfsym" --check); rc=$?
 if [[ "$rc" -eq 0 && "$out" == *"ready: checks passed"* ]]; then
@@ -214,7 +214,7 @@ if [[ -d "$shm" && -w "$shm" && "$(stat -c %d "$shm")" != "$(stat -c %d "$work")
   # Stub df, as real df does, follows symlinks: the full filesystem has 1 KiB,
   # every other path has plenty.
   # shellcheck disable=SC2016  # the stub's $p and $r are expanded by the stub
-  printf '#!/bin/sh\nfor p; do :; done\nr=$(realpath -- "$p")\ncase "$r" in\n  %s|%s/*) a=1 ;;\n  *) a=99999999 ;;\nesac\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/x 100 99 $a 1%% /"\n' "$vt" "$vt" >"$work/dffull/df"
+  printf '#!/bin/sh\nfor p; do :; done\nr=$(realpath -- "$p")\ncase "$r" in\n  %s|%s/*) a=1 ;;\n  *) a=99999999 ;;\nesac\nfor o; do if [ "$o" = --output=avail ]; then echo Avail; echo "$a"; exit 0; fi; done\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/x 100 99 $a 1%% /"\n' "$vt" "$vt" >"$work/dffull/df"
   chmod +x "$work/dffull/df"
   out=$(inst "$h" "$h/state/ergosphere.json" "$work/dffull" --check); rc=$?
   expect_blocked "vendor/ on a full filesystem behind a symlink" "$h/app/vendor has 1 KiB free, the release needs" "$rc" "$out"
