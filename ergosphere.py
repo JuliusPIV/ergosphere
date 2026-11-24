@@ -10,6 +10,7 @@ Bytes both ways are a WebSocket. There is no grok agent serve child.
 """
 
 import argparse
+import atexit
 import base64
 import copy
 from datetime import datetime, timedelta, timezone
@@ -6212,6 +6213,90 @@ def start_watchdog(httpd):
     return thread
 
 
+# Log lines waiting for the writer thread. Past this a line is dropped and counted.
+LOG_QUEUE_MAX = 1000
+# How long a stop or restart waits for queued log lines to reach the log.
+LOG_DRAIN_WAIT = 2.0
+LOG_QUEUE = queue.Queue(LOG_QUEUE_MAX)
+
+
+class QueuedLog:
+    """Stands in for sys.stdout/sys.stderr: a stalled log never blocks the caller (#70).
+
+    Callers only put whole lines on LOG_QUEUE; one writer thread writes them.
+    print() writes text and "\\n" separately, so each thread keeps its partial
+    line until the newline and two threads' lines never interleave.
+    """
+
+    dropped = 0
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.partial = {}  # thread id -> text written after its last newline
+
+    def write(self, text):
+        me = threading.get_ident()
+        *lines, rest = (self.partial.pop(me, "") + text).split("\n")
+        if rest:
+            self.partial[me] = rest
+        for line in lines:
+            self._put(line + "\n")
+        return len(text)
+
+    def flush(self):
+        rest = self.partial.pop(threading.get_ident(), "")
+        if rest:
+            self._put(rest)
+
+    def _put(self, text):
+        try:
+            LOG_QUEUE.put_nowait((self.stream, text))
+        except queue.Full:
+            QueuedLog.dropped += 1
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+def _log_writer():
+    while True:
+        item = LOG_QUEUE.get()
+        if isinstance(item, threading.Event):
+            item.set()
+            continue
+        stream, text = item
+        try:
+            if QueuedLog.dropped:
+                count, QueuedLog.dropped = QueuedLog.dropped, 0
+                stream.write("log: dropped %d lines while the log was blocked\n" % count)
+            stream.write(text)
+            stream.flush()
+        except (OSError, ValueError):
+            QueuedLog.dropped += 1
+
+
+def start_log_writer():
+    if isinstance(sys.stdout, QueuedLog):
+        return
+    sys.stdout, sys.stderr = QueuedLog(sys.stdout), QueuedLog(sys.stderr)
+    threading.Thread(target=_log_writer, name="log", daemon=True).start()
+    atexit.register(drain_log)
+
+
+def drain_log(timeout=LOG_DRAIN_WAIT):
+    """Wait, at most timeout seconds, until the lines queued so far are written."""
+    if not isinstance(sys.stdout, QueuedLog):
+        return True
+    sys.stdout.flush()
+    sys.stderr.flush()
+    done = threading.Event()
+    try:
+        LOG_QUEUE.put(done, timeout=timeout)
+    except queue.Full:
+        return False
+    return done.wait(timeout)
+
+
 def serve(args, config):
     tls = bool(args.tls_cert)
     # Unset ERGOSPHERE_TOKEN means no bearer check, including --bind 0.0.0.0.
@@ -6250,6 +6335,7 @@ def serve(args, config):
         return 0
     if httpd is None:
         return 1
+    start_log_writer()
     httpd.token = token
     httpd.tls = tls
     httpd.args = args
@@ -6304,6 +6390,7 @@ def restart_self(old_bind, old_port):
     env[RESTART_FALLBACK_ENV] = "%s:%s" % (old_bind, old_port)
     print("restarting: %s (fallback %s:%s)" % (" ".join(argv), old_bind, old_port), flush=True)
     sys.stderr.flush()
+    drain_log()
     # A fresh watchdog interval for the new process to come up in.
     if watchdog_interval() is not None:
         sd_notify("WATCHDOG=1")
