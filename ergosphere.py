@@ -1643,6 +1643,8 @@ class Live:
         self.watcher = None
         self.closed = False
         self.ended_sent = False
+        # grok exited before it wrote summary.json: nothing to resume (#44).
+        self.unsaved = False
         self.sub_state = {"rows": {}, "order": []}
         self.sub_lock = threading.Lock()
 
@@ -1751,17 +1753,27 @@ class Live:
     def _publish_ended(self):
         # Every attached client, once: the reader (grok exited) and
         # shutdown (Quit from one tab) both call this.
-        frame = self._ended_frame()
         with self.lock:
             if self.ended_sent:
                 return
+        # A scan of the sessions folder: no lock held. grok has exited, so a
+        # missing summary will never appear: say so instead of offering Resume.
+        unsaved = find_session(self.sid) is None
+        with self.lock:
+            if self.ended_sent:
+                return
+            self.unsaved = unsaved
             self.ended_sent = True
             clients = list(self.clients)
+        frame = self._ended_frame()
         for client in clients:
             self._enqueue(client, frame, 1)
 
     def _ended_frame(self):
-        return json.dumps({"type": "ended"}).encode("utf-8")
+        msg = {"type": "ended"}
+        if self.unsaved:
+            msg["unsaved"] = True
+        return json.dumps(msg).encode("utf-8")
 
     def attach(self, handler):
         client = _Client(handler)
@@ -2214,6 +2226,12 @@ def settled_state(sid, with_turn=True):
             return state
 
 
+UNSAVED_TEXT = "This session was never saved, so it cannot be resumed."
+# No summary.json: grok exited before it saved this session (#44), or the id
+# was never a session. Resume can never work for it.
+UNSAVED_REPLY = {"ok": False, "unsaved": True, "state": "unsaved", "error": UNSAVED_TEXT}
+
+
 def resume_reply(sid):
     # /resume reply (code, body), or None when a start of sid began after this
     # request looked (open_live: SessionBusy "starting"): look again once done.
@@ -2228,7 +2246,7 @@ def resume_reply(sid):
                       "error": "session is already running"})
     row = find_session(sid)
     if row is None:
-        return (404, {"ok": False, "error": "unknown session"})
+        return (404, UNSAVED_REPLY)
     cwd = row.get("cwd")
     if not existing_dir(cwd):
         return (400, {"ok": False, "error": "session cwd is not an existing absolute directory"})
@@ -3813,7 +3831,7 @@ document.getElementById("pick").hidden = false;
 """.replace("@@VERSION@@", html.escape(VERSION))
 
 
-def chat_page(resume="", holder=None, running=False, title="", ask=False):
+def chat_page(resume="", holder=None, running=False, title="", ask=False, unsaved=False):
     # Full-height xterm. Leaving this page drops the socket and does not
     # ask the server to kill grok. A reload or a second window reattaches.
     # running: this server already has the grok process. Only then does the
@@ -3903,7 +3921,7 @@ body { position: fixed; left: 0; right: 0; top: var(--vv-top, 0px); }
 </style>
 </head>
 <body>
-<div id="bar"><a href="/">← Session List</a> | <button id="stop" type="button">Quit</button> | <span id="status">@@STATUS@@</span> | <span id="title"@@TITLE_ATTR@@>@@TITLE@@</span><span id="title-gap"@@GAP_ATTR@@> | </span><span id="sid">Session ID: @@SID_TEXT@@</span></div>
+<div id="bar"><a href="/">← Session List</a> | <button id="stop" type="button">Quit</button> | <span id="status">@@STATUS@@</span> <a id="fresh" href="/" hidden>Start a new session</a> | <span id="title"@@TITLE_ATTR@@>@@TITLE@@</span><span id="title-gap"@@GAP_ATTR@@> | </span><span id="sid">Session ID: @@SID_TEXT@@</span></div>
 <div id="version">v@@VERSION@@</div>
 <div id="wrap"><div id="stage"><div id="resume-ask" hidden><div>Resume this session?</div><button type="button" id="resume-yes">Resume</button><button type="button" id="resume-no">Cancel</button></div><div id="busy"><div id="busy-text">@@NOTICE@@</div><a id="open-there" hidden>Open it there</a><button id="take" type="button"@@BUTTON_ATTR@@>@@BUTTON_LABEL@@</button> <a id="busy-back" href="/" hidden>Back</a></div><div id="term"></div></div></div>
 <script src="/vendor/xterm.js"></script>
@@ -4020,6 +4038,8 @@ var running = @@RUN_JS@@;
 // Stopped and its folder exists: ask to resume on load (#52). A missing
 // folder makes every Resume fail (#43), so that page does not ask.
 var askOnLoad = @@ASK_JS@@;
+// grok exited before it saved this session (#44): no Resume, ever.
+var unsaved = @@UNSAVED_JS@@;
 var termOpened = false;
 var sawOutput = false;
 var sessionReady = false;
@@ -4334,6 +4354,7 @@ function resumeAskOpen() {
   return !document.getElementById("resume-ask").hidden;
 }
 function openResumeAsk() {
+  if (unsaved) return;
   var box = document.getElementById("resume-ask");
   if (!box.hidden) return;
   box.hidden = false;
@@ -4541,6 +4562,16 @@ function showEnded() {
   if (sawOutput && termOpened) {
     try { term.reset(); } catch (err) {}
   }
+  // A later showEnded (the socket's close) keeps the unsaved notice.
+  if (!unsaved) return;
+  closeResumeAsk();
+  setStatus(@@UNSAVED_TEXT@@, false);
+  document.getElementById("stop").hidden = true;
+  document.getElementById("fresh").hidden = false;
+}
+function showUnsaved() {
+  unsaved = true;
+  showEnded();
 }
 var retryTimer = null;
 function resumeSession(tries) {
@@ -4591,6 +4622,10 @@ function resumeSession(tries) {
     if (data.stopping === true && tries < 40 && !stopping) {
       setStatus("waiting for the last grok to exit", false);
       retryTimer = setTimeout(function () { retryTimer = null; resumeSession(tries + 1); }, 250);
+      return;
+    }
+    if (data.unsaved === true) {
+      showUnsaved();
       return;
     }
     showEnded();
@@ -4678,7 +4713,8 @@ function connect() {
       try {
         var msg = JSON.parse(ev.data);
         if (msg && msg.type === "ended") {
-          showEnded();
+          if (msg.unsaved === true) showUnsaved();
+          else showEnded();
           return;
         }
         if (msg && msg.type === "session" && msg.id) {
@@ -4758,6 +4794,7 @@ function connect() {
   };
 }
 document.getElementById("stop").addEventListener("click", function () {
+  if (unsaved) return;
   if (ended) {
     resumeSession();
     return;
@@ -4864,8 +4901,11 @@ else if (!hold) {
   ensureTerm();
   try { fit.fit(); } catch (err) {}
   setSid(sid);
-  showEnded();
-  if (askOnLoad) openResumeAsk();
+  if (unsaved) showUnsaved();
+  else {
+    showEnded();
+    if (askOnLoad) openResumeAsk();
+  }
 }
 </script>
 </body>
@@ -4884,6 +4924,10 @@ else if (!hold) {
         "@@SID_JS@@", json.dumps(sid_js)
     ).replace("@@HOLD_JS@@", hold_js).replace("@@RUN_JS@@", run_js).replace(
         "@@ASK_JS@@", "true" if ask else "false"
+    ).replace(
+        "@@UNSAVED_JS@@", "true" if unsaved and not held and not running else "false"
+    ).replace(
+        "@@UNSAVED_TEXT@@", json.dumps(UNSAVED_TEXT)
     ).replace(
         "@@TITLE@@", html.escape(title)
     ).replace("@@DOC_TITLE@@", html.escape(doc_title)).replace(
@@ -5244,7 +5288,8 @@ class Handler(BaseHTTPRequestHandler):
             # The same folder check /resume makes: only a stopped session it
             # could start gets the resume prompt on load (#52, #43).
             ask = isinstance(saved, dict) and existing_dir(saved.get("cwd"))
-            self._html(chat_page(resume, holder, running, page_title, ask))
+            unsaved = saved is None and state["state"] == "stopped" and not running and not holder
+            self._html(chat_page(resume, holder, running, page_title, ask, unsaved))
             return
         if path in VENDOR_FILES:
             self._vendor(path)

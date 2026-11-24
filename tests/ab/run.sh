@@ -120,6 +120,15 @@ for side in A B; do
   out="$(ERGOSPHERE_TEST_PORT="${!port}" python3 -B "$HERE/../vendor_snapshot_test.py" "${!dir}" 2>&1)" || { [ "$side" = B ] && rc=1; }
   printf '%s: %s\n' "$side" "$(printf '%s\n' "$out" | grep -E '^(PASS|FAIL)' | grep -v 'server output' | tr '\n' ' ')" >>"$AB_OUT/summary.txt"
 done
+python3 -B "$HERE/slow_start.py" summary "$AB_OUT/slow-A.json" "$AB_OUT/slow-B.json" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #44: a new session whose grok exits before it saved (page checks in the browser).
+for side in A B; do
+  dir=AB_${side}_DIR port=AB_PORT_${side}
+  rm -rf "$AB_OUT/unsaved-$side"; mkdir -p "$AB_OUT/unsaved-$side"
+  log "$side: unsaved session check on ${!port}"
+  NODE_PATH="$pw_path" python3 -B "$HERE/unsaved.py" run "${!dir}" "${!port}" "$AB_OUT/unsaved-$side" >"$AB_OUT/unsaved-$side.json" 2>"$AB_OUT/unsaved-$side.err"
+done
+python3 -B "$HERE/unsaved.py" summary "$AB_OUT/unsaved-A.json" "$AB_OUT/unsaved-B.json" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #97: what each side's install.sh copies into the install dir.
 bash "$HERE/install_files.sh" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #140: --check stops where the real run stops and says what it does with the server.
