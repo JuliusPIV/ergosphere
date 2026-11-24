@@ -236,6 +236,14 @@ def test_agents_md():
            "AGENTS.md says to add an A/B check as a new file in tests/ab/checks/ or tests/ab/browser.d/")
 
 
+def test_slow_start_summary_once():
+    # run.sh summarized $AB_OUT/slow-*.json before checks/slow_start.sh wrote
+    # them, so a reused AB_OUT with an old A-pass/B-fail set rc=1 on a passing run.
+    text = (AB / "run.sh").read_text()
+    expect('slow_start.py" summary' not in text,
+           "run.sh: no slow-start summary outside checks/slow_start.sh (it writes the JSON it reads)")
+
+
 def main():
     tmp = Path(tempfile.mkdtemp(prefix="ab-hooks-"))
     try:
@@ -245,6 +253,7 @@ def main():
         test_http_name_clash(tmp)
         test_ab_py(tmp)
         test_agents_md()
+        test_slow_start_summary_once()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if failures:
