@@ -120,6 +120,14 @@ for side in A B; do
   out="$(ERGOSPHERE_TEST_PORT="${!port}" python3 -B "$HERE/../vendor_snapshot_test.py" "${!dir}" 2>&1)" || { [ "$side" = B ] && rc=1; }
   printf '%s: %s\n' "$side" "$(printf '%s\n' "$out" | grep -E '^(PASS|FAIL)' | grep -v 'server output' | tr '\n' ' ')" >>"$AB_OUT/summary.txt"
 done
+# Issue #70: log writes blocked (full stdout pipe), on each side's port again.
+for side in A B; do
+  dir=AB_${side}_DIR port=AB_PORT_${side}
+  rm -rf "$AB_OUT/log-$side"; mkdir -p "$AB_OUT/log-$side"
+  log "$side: blocked log check on ${!port}"
+  python3 -B "$HERE/blocked_log.py" run "${!dir}" "${!port}" "$AB_OUT/log-$side" >"$AB_OUT/log-$side.json" 2>"$AB_OUT/log-$side.err"
+done
+python3 -B "$HERE/blocked_log.py" summary "$AB_OUT/log-A.json" "$AB_OUT/log-B.json" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #97: what each side's install.sh copies into the install dir.
 bash "$HERE/install_files.sh" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #140: --check stops where the real run stops and says what it does with the server.
