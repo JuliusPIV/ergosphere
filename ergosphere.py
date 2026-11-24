@@ -10,6 +10,7 @@ Bytes both ways are a WebSocket. There is no grok agent serve child.
 """
 
 import argparse
+import atexit
 import base64
 import copy
 from datetime import datetime, timedelta, timezone
@@ -1195,6 +1196,79 @@ def existing_dir(path):
     return os.path.isdir(path)
 
 
+# A stat on a hung mount never returns. GET / and the 4 s /list-rows poll call
+# folder_missing, so wait only this long; a slow folder reads as present. One
+# check per folder is outstanding at a time, so polls do not pile up threads.
+# A hung check keeps its thread forever, so at most FOLDER_CHECK_THREADS run at
+# once. A folder with no slot in time reads as present (#43 review: a list of
+# hundreds of stalled folders must not exhaust the thread budget).
+FOLDER_CHECK_WAIT = 0.5
+FOLDER_CHECK_THREADS = 16
+folder_checks = {}
+folder_checks_lock = threading.Lock()
+folder_check_slots = threading.BoundedSemaphore(FOLDER_CHECK_THREADS)
+
+
+def folder_missing(cwd):
+    # A saved session whose folder was deleted: Resume can never start it (#43).
+    return cwd in missing_folders([cwd])
+
+
+def missing_folders(cwds):
+    # The given folders that do not exist. All share one FOLDER_CHECK_WAIT, so
+    # many stalled folders in one list do not add up.
+    deadline = time.monotonic() + FOLDER_CHECK_WAIT
+    started = []
+    for cwd in set(c for c in cwds if isinstance(c, str) and c):
+        check = start_folder_check(cwd, deadline)
+        if check is not None:
+            started.append((cwd, check))
+    out = set()
+    for cwd, check in started:
+        if check["done"].wait(max(0, deadline - time.monotonic())) and not check["exists"]:
+            out.add(cwd)
+    return out
+
+
+def start_folder_check(cwd, deadline):
+    # A check already outstanding is joined, not started again: 50 rows on one
+    # stuck folder cost one thread. None means no slot came free in time, so
+    # the folder reads as present for this render.
+    with folder_checks_lock:
+        check = folder_checks.get(cwd)
+    if check is not None:
+        return check
+    if not folder_check_slots.acquire(timeout=max(0, deadline - time.monotonic())):
+        return None
+    with folder_checks_lock:
+        check = folder_checks.get(cwd)
+        if check is not None:
+            folder_check_slots.release()
+            return check
+        check = {"done": threading.Event(), "exists": False}
+        folder_checks[cwd] = check
+    try:
+        threading.Thread(target=check_folder, args=(cwd, check), daemon=True).start()
+    except RuntimeError:
+        # The process is out of threads anyway. Forget this check, so the next
+        # render retries it, and read the folder as present rather than fail the list.
+        with folder_checks_lock:
+            folder_checks.pop(cwd, None)
+        folder_check_slots.release()
+        return None
+    return check
+
+
+def check_folder(cwd, check):
+    try:
+        check["exists"] = existing_dir(cwd)
+    finally:
+        check["done"].set()
+        with folder_checks_lock:
+            folder_checks.pop(cwd, None)
+        folder_check_slots.release()
+
+
 def one_query(qs, key):
     values = qs.get(key)
     if not values:
@@ -1800,7 +1874,9 @@ class Live:
                 self.clients.remove(client)
             except ValueError:
                 pass
-        client.alive = False
+        # alive stays true: the sender still sends what was queued before
+        # this None (the ended frame from Quit, #212). _term joins it, then
+        # marks the client dead and shuts the socket.
         client.queue.put(None)
 
     def write(self, data):
@@ -2158,8 +2234,9 @@ def live_state(live):
 def session_state(sid, with_turn=True, scan=None):
     """The one answer to "who runs this session", for every handler and page.
 
-    state: stopped, starting, running-idle, running-working, stopping,
-    held-by-cli or held-by-other-server. pid: the grok it names.
+    state: stopped, folder-missing (stopped, and its saved folder is gone),
+    starting, running-idle, running-working, stopping, held-by-cli or
+    held-by-other-server. pid: the grok it names.
     holder: another grok on this session (session_holder). Any holder makes
     the state held-by-*, also when this server runs a grok on it too. here:
     this server's own grok is starting or running. With here, pid and turn
@@ -2197,6 +2274,10 @@ def session_state(sid, with_turn=True, scan=None):
         out["pid"] = holder["pid"]
         if with_turn:
             out["turn"] = grok_turn(holder["pid"], scan)
+        return out
+    row = find_session(sid)
+    if row is not None and folder_missing(row.get("cwd")):
+        out["state"] = "folder-missing"
     return out
 
 
@@ -2242,6 +2323,10 @@ def resume_reply(sid, cols=80, rows=24):
     if row is None:
         return (404, {"ok": False, "error": "unknown session"})
     cwd = row.get("cwd")
+    # Also a folder deleted after session_state looked.
+    if folder_missing(cwd):
+        return (409, {"ok": False, "state": "folder-missing", "cwd": cwd,
+                      "error": folder_missing_text(cwd)})
     if not existing_dir(cwd):
         return (400, {"ok": False, "error": "session cwd is not an existing absolute directory"})
     try:
@@ -2255,6 +2340,12 @@ def resume_reply(sid, cols=80, rows=24):
     except (RuntimeError, OSError) as exc:
         return (400, {"ok": False, "error": str(exc)[:300]})
     return (200, {"ok": True, "id": sid})
+
+
+def folder_missing_text(cwd):
+    return ("The folder this session ran in no longer exists:\n%s\n\n"
+            "grok resumes a session in its own folder, so Resume cannot work "
+            "until that folder is back." % cwd)
 
 
 def running_here(state):
@@ -2335,7 +2426,7 @@ def list_states():
     out = {}
     for sid in sids:
         state = session_state(sid, scan=scan)
-        if state["state"] != "stopped":
+        if state["state"] not in ("stopped", "folder-missing"):
             out[sid] = state
     return out
 
@@ -2490,9 +2581,11 @@ def list_rows_tag(sessions, owners=None):
     """Change tag of the list rows, from the same inputs, without the HTML."""
     if owners is None:
         owners = list_states()
+    missing = missing_folders(row.get("cwd") for row in sessions)
     key = [
         sorted([sid, st["turn"] == "working", st["pid"], conflict_note(st)] for sid, st in owners.items()),
-        [[row.get(k) for k in ("id", "title", "cwd", "updated")] for row in sessions],
+        [[row.get(k) for k in ("id", "title", "cwd", "updated")] + [row.get("cwd") in missing]
+         for row in sessions],
     ]
     text = json.dumps(key, default=str, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
@@ -2556,9 +2649,11 @@ def dashboard_rows(sessions, owners=None):
     blocks.append(dashboard_head("older"))
     blocks.append('<div class="sec" id="sec-older">')
     blocks.append('<div class="empty"%s>- none -</div>' % ("" if not older else " hidden"))
+    missing = missing_folders(row.get("cwd") for row in older)
     for seq, row in enumerate(older):
         blocks.append(dashboard_session_row(
-            "older", seq, row, None, seq >= OLDER_WINDOW
+            "older", seq, row, None, seq >= OLDER_WINDOW,
+            note="folder missing" if row.get("cwd") in missing else "",
         ))
     if len(older) > OLDER_WINDOW:
         blocks.append(
@@ -3864,7 +3959,7 @@ document.getElementById("pick").hidden = false;
 """.replace("@@VERSION@@", html.escape(VERSION))
 
 
-def chat_page(resume="", holder=None, running=False, title="", ask=False):
+def chat_page(resume="", holder=None, running=False, title="", ask=False, gone=""):
     # Full-height xterm. Leaving this page drops the socket and does not
     # ask the server to kill grok. A reload or a second window reattaches.
     # running: this server already has the grok process. Only then does the
@@ -3887,7 +3982,7 @@ def chat_page(resume="", holder=None, running=False, title="", ask=False):
     else:
         busy_css = "#busy { display: none; padding: 0.8rem 1rem; white-space: pre-wrap; }"
         term_css = "#term { flex: 1; min-height: 0; }"
-        status = "connecting" if running else "Ended"
+        status = "connecting" if running else ("folder missing" if gone else "Ended")
         notice = ""
         visible_sid = "" if running else sid_js
     button_attr = "" if can_quit else " hidden"
@@ -4071,6 +4166,8 @@ var running = @@RUN_JS@@;
 // Stopped and its folder exists: ask to resume on load (#52). A missing
 // folder makes every Resume fail (#43), so that page does not ask.
 var askOnLoad = @@ASK_JS@@;
+// Stopped and its folder was deleted: why Resume cannot work, or "" (#43).
+var goneText = @@GONE_JS@@;
 var termOpened = false;
 var sawOutput = false;
 var sessionReady = false;
@@ -4386,7 +4483,7 @@ function resumeAskOpen() {
 }
 function openResumeAsk() {
   var box = document.getElementById("resume-ask");
-  if (!box.hidden) return;
+  if (!box.hidden || goneText) return;
   box.hidden = false;
   document.getElementById("resume-yes").focus();
 }
@@ -4539,7 +4636,7 @@ var stateGen = 0;
 function applyState(data) {
   if (!data || typeof data.state !== "string") return;
   if (hold || ended || stopping || !sawOutput) return;
-  if (data.state === "stopped") {
+  if (data.state === "stopped" || data.state === "folder-missing") {
     showEnded();
     return;
   }
@@ -4593,6 +4690,18 @@ function showEnded() {
     try { term.reset(); } catch (err) {}
   }
 }
+// The folder is gone: say so and offer no Resume, which would always fail.
+function showGone(text) {
+  goneText = text;
+  showEnded();
+  closeResumeAsk();
+  hideTerm();
+  document.getElementById("stop").hidden = true;
+  document.getElementById("busy").style.display = "block";
+  document.getElementById("busy-text").textContent = text;
+  document.getElementById("busy-back").hidden = false;
+  setStatus("folder missing", false);
+}
 var retryTimer = null;
 function resumeSession(tries) {
   tries = tries || 0;
@@ -4645,6 +4754,10 @@ function resumeSession(tries) {
     if (data.stopping === true && tries < 40 && !stopping) {
       setStatus("waiting for the last grok to exit", false);
       retryTimer = setTimeout(function () { retryTimer = null; resumeSession(tries + 1); }, 250);
+      return;
+    }
+    if (data.state === "folder-missing" && typeof data.error === "string") {
+      showGone(data.error);
       return;
     }
     showEnded();
@@ -4919,7 +5032,8 @@ else if (!hold) {
   try { fit.fit(); } catch (err) {}
   setSid(sid);
   showEnded();
-  if (askOnLoad) openResumeAsk();
+  if (goneText) showGone(goneText);
+  else if (askOnLoad) openResumeAsk();
 }
 </script>
 </body>
@@ -4938,6 +5052,8 @@ else if (!hold) {
         "@@SID_JS@@", json.dumps(sid_js)
     ).replace("@@HOLD_JS@@", hold_js).replace("@@RUN_JS@@", run_js).replace(
         "@@ASK_JS@@", "true" if ask else "false"
+    ).replace(
+        "@@GONE_JS@@", script_json(gone)
     ).replace(
         "@@TITLE@@", html.escape(title)
     ).replace("@@DOC_TITLE@@", html.escape(doc_title)).replace(
@@ -5298,7 +5414,10 @@ class Handler(BaseHTTPRequestHandler):
             # The same folder check /resume makes: only a stopped session it
             # could start gets the resume prompt on load (#52, #43).
             ask = isinstance(saved, dict) and existing_dir(saved.get("cwd"))
-            self._html(chat_page(resume, holder, running, page_title, ask))
+            gone = ""
+            if state["state"] == "folder-missing" and isinstance(saved, dict):
+                gone = folder_missing_text(saved.get("cwd"))
+            self._html(chat_page(resume, holder, running, page_title, ask, gone))
             return
         if path in VENDOR_FILES:
             self._vendor(path)
@@ -5833,13 +5952,16 @@ class Handler(BaseHTTPRequestHandler):
             live.repaint(cols, rows)
             self._read_input(live)
         finally:
-            self.ws_closed = True
             if live is not None:
                 live.detach(client)
             if client is not None and client.dropped:
                 print("term drop slow client sid=%s" % sid, flush=True)
             if client is not None and client.sender is not None:
                 client.sender.join(timeout=2)
+            # Only now: closing first dropped frames the sender had queued (#212).
+            self.ws_closed = True
+            if client is not None:
+                client.alive = False
             try:
                 self.connection.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -5884,6 +6006,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_frame(8, struct.pack("!H", exc.code) + str(exc).encode("utf-8"))
             except (EOFError, OSError):
                 pass
+            # Nothing may follow a close frame: the sender stops here.
+            self.ws_closed = True
             return
         except (EOFError, OSError, RuntimeError, ValueError):
             return
@@ -6248,6 +6372,90 @@ def start_watchdog(httpd):
     return thread
 
 
+# Log lines waiting for the writer thread. Past this a line is dropped and counted.
+LOG_QUEUE_MAX = 1000
+# How long a stop or restart waits for queued log lines to reach the log.
+LOG_DRAIN_WAIT = 2.0
+LOG_QUEUE = queue.Queue(LOG_QUEUE_MAX)
+
+
+class QueuedLog:
+    """Stands in for sys.stdout/sys.stderr: a stalled log never blocks the caller (#70).
+
+    Callers only put whole lines on LOG_QUEUE; one writer thread writes them.
+    print() writes text and "\\n" separately, so each thread keeps its partial
+    line until the newline and two threads' lines never interleave.
+    """
+
+    dropped = 0
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.partial = {}  # thread id -> text written after its last newline
+
+    def write(self, text):
+        me = threading.get_ident()
+        *lines, rest = (self.partial.pop(me, "") + text).split("\n")
+        if rest:
+            self.partial[me] = rest
+        for line in lines:
+            self._put(line + "\n")
+        return len(text)
+
+    def flush(self):
+        rest = self.partial.pop(threading.get_ident(), "")
+        if rest:
+            self._put(rest)
+
+    def _put(self, text):
+        try:
+            LOG_QUEUE.put_nowait((self.stream, text))
+        except queue.Full:
+            QueuedLog.dropped += 1
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+def _log_writer():
+    while True:
+        item = LOG_QUEUE.get()
+        if isinstance(item, threading.Event):
+            item.set()
+            continue
+        stream, text = item
+        try:
+            if QueuedLog.dropped:
+                count, QueuedLog.dropped = QueuedLog.dropped, 0
+                stream.write("log: dropped %d lines while the log was blocked\n" % count)
+            stream.write(text)
+            stream.flush()
+        except (OSError, ValueError):
+            QueuedLog.dropped += 1
+
+
+def start_log_writer():
+    if isinstance(sys.stdout, QueuedLog):
+        return
+    sys.stdout, sys.stderr = QueuedLog(sys.stdout), QueuedLog(sys.stderr)
+    threading.Thread(target=_log_writer, name="log", daemon=True).start()
+    atexit.register(drain_log)
+
+
+def drain_log(timeout=LOG_DRAIN_WAIT):
+    """Wait, at most timeout seconds, until the lines queued so far are written."""
+    if not isinstance(sys.stdout, QueuedLog):
+        return True
+    sys.stdout.flush()
+    sys.stderr.flush()
+    done = threading.Event()
+    try:
+        LOG_QUEUE.put(done, timeout=timeout)
+    except queue.Full:
+        return False
+    return done.wait(timeout)
+
+
 def serve(args, config):
     tls = bool(args.tls_cert)
     # Unset ERGOSPHERE_TOKEN means no bearer check, including --bind 0.0.0.0.
@@ -6286,6 +6494,7 @@ def serve(args, config):
         return 0
     if httpd is None:
         return 1
+    start_log_writer()
     httpd.token = token
     httpd.tls = tls
     httpd.args = args
@@ -6340,6 +6549,7 @@ def restart_self(old_bind, old_port):
     env[RESTART_FALLBACK_ENV] = "%s:%s" % (old_bind, old_port)
     print("restarting: %s (fallback %s:%s)" % (" ".join(argv), old_bind, old_port), flush=True)
     sys.stderr.flush()
+    drain_log()
     # A fresh watchdog interval for the new process to come up in.
     if watchdog_interval() is not None:
         sd_notify("WATCHDOG=1")
