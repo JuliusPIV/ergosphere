@@ -69,7 +69,8 @@ _MODEL_ROW_RE = re.compile(r"^[ \t]*([*-])[ \t]+(\S+)[ \t]*(.*)$")
 _LISTED_EFFORT_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9_-])(minimal|xhigh|medium|none|high|low|max)(?![A-Za-z0-9_-])"
 )
-SID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+# \Z, not $: $ also matches before a trailing newline.
+SID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 # Session directory names are 8-4-4-4-12 hexadecimal digits.
 SID_TOKEN_RE = re.compile(
     r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
@@ -312,29 +313,21 @@ def load_sessions(limit=SESSION_CAP):
 
 
 def find_session(sid):
-    if not isinstance(sid, str) or not SID_RE.match(sid):
+    folder = session_dir_for(sid)
+    if not folder:
         return None
-    root = sessions_root()
-    try:
-        groups = list(os.scandir(root))
-    except OSError:
-        return None
-    for group in groups:
-        if not group.is_dir(follow_symlinks=False):
-            continue
-        summary = os.path.join(group.path, sid, "summary.json")
-        if not os.path.isfile(summary):
-            continue
-        row = read_summary(summary)
-        if row and row["id"] == sid:
-            return row
+    row = read_summary(os.path.join(folder, "summary.json"))
+    if row and row["id"] == sid:
+        return row
     return None
 
 
 def session_dir_for(sid):
     if not isinstance(sid, str) or not SID_RE.match(sid):
         return None
-    root = sessions_root()
+    # Every session path is built from this folder. realpath + startswith is
+    # the guard: a session folder that is a symlink out of the root is refused.
+    root = os.path.realpath(sessions_root())
     try:
         groups = list(os.scandir(root))
     except OSError:
@@ -342,7 +335,9 @@ def session_dir_for(sid):
     for group in groups:
         if not group.is_dir(follow_symlinks=False):
             continue
-        path = os.path.join(group.path, sid)
+        path = os.path.realpath(os.path.join(group.path, sid))
+        if not path.startswith(root + os.sep):
+            continue
         if os.path.isdir(path):
             return path
     return None
