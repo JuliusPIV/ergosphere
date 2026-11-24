@@ -140,6 +140,37 @@ def side(dirname):
     return checks, server.get("info") or {}, browser
 
 
+# B is slow when its median wheel round trip is over both the floor and
+# SLOW_RATIO times A's, measured in the same run on the same host (#151).
+# A median of several samples, never one reading: one slow sample under load
+# does not move it, and the ratio absorbs a host that slows both sides.
+SLOW_FLOOR_MS = 2000
+SLOW_RATIO = 3
+
+
+def median(xs):
+    xs = sorted(x for x in xs if isinstance(x, (int, float)) and not isinstance(x, bool))
+    return xs[len(xs) // 2] if xs else None
+
+
+def latency(a, b):
+    """Takes the wheel round trips that browser.d/input_latency.js puts in its
+    check (so they do not make A and B differ) and marks B's input_latency
+    failed when B is much slower than A, so the table reports a regression."""
+    taken = []
+    for side_checks in (a, b):
+        c = side_checks.get("input_latency")
+        xs = c.pop("samples", None) if isinstance(c, dict) else None
+        taken.append(median(xs) if isinstance(xs, list) else None)
+    ma, mb = taken
+    if ma is None or mb is None:
+        return []
+    limit = max(SLOW_FLOOR_MS, SLOW_RATIO * ma)
+    if mb > limit and b["input_latency"].get("ok"):
+        b["input_latency"] = check(False, "slow: median %sms, A %sms" % (mb, ma))
+    return ["input_latency median ms: A=%s B=%s (B fails over %s)" % (ma, mb, limit)]
+
+
 def summary(adir, bdir):
     a, ainfo, abrowser = side(adir)
     b, binfo, bbrowser = side(bdir)
@@ -150,6 +181,7 @@ def summary(adir, bdir):
     else:
         why = lambda r: str(r.get("browser") and "ran" or r.get("unavailable") or r.get("error") or "no result")
         lines.append("BROWSER CHECKS DID NOT RUN (A: %s; B: %s)" % (why(abrowser)[:150], why(bbrowser)[:150]))
+    lines.extend(latency(a, b))
     # No browser on this host is a warning; a browser.js that breaks on B, or
     # that ran but left out a page check in ORDER, fails the run.  Both sides
     # run B's browser.js, so a check dropped there is missing on A too:
