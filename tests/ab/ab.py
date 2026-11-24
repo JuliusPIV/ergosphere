@@ -1,6 +1,6 @@
 """HTTP-level A/B checks and the side-by-side summary.
 
-  python3 -B ab.py http <port> <session-id>   -> JSON checks on stdout
+  python3 -B ab.py http <port> <session-id> [<folder-gone-id>]  -> JSON checks on stdout
   python3 -B ab.py vendor <code-dir>          -> JSON vendor-manifest check on stdout
   python3 -B ab.py builtin                    -> JSON list of built-in check names (ORDER and HTTP_CHECKS),
                                                  which browser.d/ modules may not reuse
@@ -18,9 +18,9 @@ import urllib.request
 from pathlib import Path
 
 TITLE = "AB seeded session"
-ORDER = ["vendor_listed", "health", "session_list", "open_session", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios", "resume_box", "ended_view", "pinch_fit"]
+ORDER = ["vendor_listed", "health", "session_list", "open_session", "folder_missing", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios", "resume_box", "ended_view", "pinch_fit"]
 # Checks that do not come from browser.js (HTTP and the vendor manifest).
-HTTP_CHECKS = ("vendor_listed", "health", "session_list", "open_session")
+HTTP_CHECKS = ("vendor_listed", "health", "session_list", "open_session", "folder_missing")
 
 
 def module_names():
@@ -62,7 +62,7 @@ def check(ok, value):
     return {"ok": bool(ok), "value": str(value)[:60]}
 
 
-def http_checks(port, sid):
+def http_checks(port, sid, gone=""):
     base = "http://127.0.0.1:%s" % port
     checks, info = {}, {}
     try:
@@ -86,9 +86,22 @@ def http_checks(port, sid):
                 time.sleep(0.2)
         checks["open_session"] = check(code == 200 and state.startswith("running"),
                                        "resume %s state=%s" % (code, state or "-"))
+        if gone:
+            # Issue #43: the state, /resume, the list row and the page all say so.
+            c1, t1 = get(base, "/session-info?id=" + gone)
+            gstate = json.loads(t1).get("state", "") if c1 == 200 else ""
+            c2, t2 = post(base, "/resume", {"id": gone})
+            rstate = json.loads(t2).get("state", "") if t2.startswith("{") else ""
+            _, page = get(base, "/")
+            marked = "AB folder gone [folder missing]" in page
+            _, chat = get(base, "/chat?resume=" + gone)
+            says = '<span id="status">folder missing</span>' in chat
+            checks["folder_missing"] = check(
+                gstate == "folder-missing" and c2 == 409 and rstate == "folder-missing" and marked and says,
+                "state=%s resume=%s list=%s page=%s" % (gstate or "-", c2, "y" if marked else "n", "y" if says else "n"))
     except (OSError, ValueError) as exc:
         checks.setdefault("health", check(False, "error %s" % exc))
-        for name in ("session_list", "open_session"):
+        for name in HTTP_CHECKS:
             checks.setdefault(name, check(False, "not reached"))
     return {"checks": checks, "info": info}
 
@@ -127,6 +140,37 @@ def side(dirname):
     return checks, server.get("info") or {}, browser
 
 
+# B is slow when its median wheel round trip is over both the floor and
+# SLOW_RATIO times A's, measured in the same run on the same host (#151).
+# A median of several samples, never one reading: one slow sample under load
+# does not move it, and the ratio absorbs a host that slows both sides.
+SLOW_FLOOR_MS = 2000
+SLOW_RATIO = 3
+
+
+def median(xs):
+    xs = sorted(x for x in xs if isinstance(x, (int, float)) and not isinstance(x, bool))
+    return xs[len(xs) // 2] if xs else None
+
+
+def latency(a, b):
+    """Takes the wheel round trips that browser.d/input_latency.js puts in its
+    check (so they do not make A and B differ) and marks B's input_latency
+    failed when B is much slower than A, so the table reports a regression."""
+    taken = []
+    for side_checks in (a, b):
+        c = side_checks.get("input_latency")
+        xs = c.pop("samples", None) if isinstance(c, dict) else None
+        taken.append(median(xs) if isinstance(xs, list) else None)
+    ma, mb = taken
+    if ma is None or mb is None:
+        return []
+    limit = max(SLOW_FLOOR_MS, SLOW_RATIO * ma)
+    if mb > limit and b["input_latency"].get("ok"):
+        b["input_latency"] = check(False, "slow: median %sms, A %sms" % (mb, ma))
+    return ["input_latency median ms: A=%s B=%s (B fails over %s)" % (ma, mb, limit)]
+
+
 def summary(adir, bdir):
     a, ainfo, abrowser = side(adir)
     b, binfo, bbrowser = side(bdir)
@@ -137,6 +181,7 @@ def summary(adir, bdir):
     else:
         why = lambda r: str(r.get("browser") and "ran" or r.get("unavailable") or r.get("error") or "no result")
         lines.append("BROWSER CHECKS DID NOT RUN (A: %s; B: %s)" % (why(abrowser)[:150], why(bbrowser)[:150]))
+    lines.extend(latency(a, b))
     # No browser on this host is a warning; a browser.js that breaks on B, or
     # that ran but left out a page check in ORDER, fails the run.  Both sides
     # run B's browser.js, so a check dropped there is missing on A too:
@@ -182,8 +227,8 @@ def summary(adir, bdir):
 
 
 def main(argv):
-    if len(argv) == 4 and argv[1] == "http":
-        print(json.dumps(http_checks(argv[2], argv[3])))
+    if len(argv) in (4, 5) and argv[1] == "http":
+        print(json.dumps(http_checks(*argv[2:])))
         return 0
     if len(argv) == 3 and argv[1] == "vendor":
         print(json.dumps(vendor_checks(argv[2])))
