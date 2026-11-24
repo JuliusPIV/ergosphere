@@ -4555,6 +4555,12 @@ function resumeSession(tries) {
   tries = tries || 0;
   closeResumeAsk();
   ended = false;
+  // A hold left by a Quit during an earlier Resume is stale here: the poll is
+  // blocked while stopping. Clear it so Quit works during this Resume; a reply
+  // that says held sets it again.
+  hold = false;
+  syncStop();
+  document.getElementById("busy").style.display = "none";
   startTitlePoll();
   stopping = false;
   sawOutput = false;

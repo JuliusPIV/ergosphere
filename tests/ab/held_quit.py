@@ -28,6 +28,7 @@ ORDER = [
     "pending_not_stuck", "pending_ends",
     "late_not_stuck", "late_ends",
     "latepoll_not_stuck", "latepoll_ends",
+    "stale_quit_honored", "stale_ends",
     "take_quit_back", "take_quit_ends",
     "refused_no_quit", "refused_ends",
     "tabs_no_quit", "tabs_end",
@@ -142,6 +143,47 @@ async function pending(page, sid, order, name) {
   await p.close();
 }
 
+// Quit during a Resume whose reply says held leaves hold set on an Ended page
+// (the poll is blocked while stopping). The holder then exits. A new Resume must
+// clear that stale hold, so a Quit during that new Resume is honored, not ignored.
+async function staleHold(page, sid) {
+  const p = await page();
+  await p.goto(chatUrl(sid));
+  await until(p, s => s.bar === 'Resume');
+  const pid = await holdStart(sid);
+  let release = null;
+  const caught = new Promise(r => {
+    p.route('**/resume', route => { release = () => route.continue(); r(); });
+  });
+  await p.click('#stop');
+  await caught;
+  await p.click('#stop');
+  release();
+  await until(p, isEnded, END_WAIT);
+  await holdEnd(pid);
+  await waitFor(async () => (await holdFetch('/session-info?id=' + sid)).state === 'stopped');
+  await p.unroute('**/resume');
+  const resumeCaught = new Promise(r => {
+    p.route('**/resume', route => { release = () => route.continue(); r(); });
+  });
+  const stalled = [];
+  await p.route('**/holder*', route => { stalled.push(route); });
+  await p.click('#stop');
+  await resumeCaught;
+  await p.click('#stop');
+  const s = await until(p, s => s.status === 'quitting', 3000);
+  ck('stale_quit_honored', s.status === 'quitting', show(s));
+  await p.unroute('**/holder*');
+  for (const route of stalled) await route.continue();
+  release();
+  await p.waitForResponse(r => r.url().includes('/resume'));
+  let now = await look(p);
+  if (now.quit && now.bar === 'Quit') await p.click('#stop');
+  const ended = await until(p, isEnded, END_WAIT);
+  ck('stale_ends', isEnded(ended), show(ended));
+  await p.close();
+}
+
 (async () => {
   const b = await chromium.launch({executablePath: chrome});
   const ctx = await b.newContext({viewport: {width: 1280, height: 800}});
@@ -174,6 +216,7 @@ async function pending(page, sid, order, name) {
     await pending(page, sids.pending, 'reply_first', 'pending');
     await pending(page, sids.late, 'holder_first', 'late');
     await pending(page, sids.latepoll, 'reply_before_poll', 'latepoll');
+    await staleHold(page, sids.stale);
 
     // 4. Take over: Quit comes back for this server's own grok.
     pid = await holdStart(sids.take);
@@ -305,7 +348,7 @@ def run(code, port, hold_port, work):
     home, bin_dir = os.path.join(work, "home"), os.path.join(work, "bin")
     os.makedirs(bin_dir)
     # Fresh ids: the holder scan is machine-wide, so concurrent runs never meet.
-    sids = {name: str(uuid.uuid4()) for name in ("load", "resume", "pending", "late", "latepoll", "take", "refused", "tabs", "gone")}
+    sids = {name: str(uuid.uuid4()) for name in ("load", "resume", "pending", "late", "latepoll", "stale", "take", "refused", "tabs", "gone")}
     for name, sid in sids.items():
         seed(home, sid, os.path.join(work, "work-" + name))
     with open(os.path.join(bin_dir, "grok"), "w") as handle:
