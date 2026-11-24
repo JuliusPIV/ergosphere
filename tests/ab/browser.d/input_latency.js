@@ -4,9 +4,16 @@
 // SAMPLES times on a fresh page.  The check carries each round trip in ms;
 // ab.py compares the two sides' medians and fails B when it is much slower.
 const SAMPLES = 7;
+// A page size no check before this one uses.  A new page replays the
+// session's old frames, and a frame drawn at a larger size keeps its status
+// line on the last row, so at a size used before openPage can take a stale
+// line (an old wheel count) for the current one and no round trip ever adds
+// up.  At a new size the only frame that fits is the one grok draws for
+// this page.
+const VIEWPORT = {width: 1100, height: 700};
 
 require('../browser_d.js').add(__filename, async t => {
-  const ctx = await t.b.newContext({viewport: {width: 1280, height: 800}});
+  const ctx = await t.b.newContext({viewport: VIEWPORT});
   try {
     let {p, s, met} = await t.openPage(ctx);
     if (!met) return t.check(false, `no grok view at page size: ${t.seen(s)}`);
