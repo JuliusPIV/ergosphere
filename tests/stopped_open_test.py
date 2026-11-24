@@ -3,8 +3,9 @@
 A stopped session's page, loaded fresh, must fit the terminal to the page (not
 xterm's default 80x24) and open the "Resume this session?" box at once, with
 its Resume button focused, before any click.  A stopped session whose folder
-is gone (#43) gets the fitted terminal but no automatic box: its Resume always
-fails.
+is gone (#43) says so, with a Back link, and offers no Resume or box: its
+Resume always fails.  A page opened while the folder was there, whose Resume
+is pressed after it went, turns into that same page.
 
 Run: NODE_PATH=<node_modules with playwright> python3 -B tests/stopped_open_test.py
 Stdlib only, no network, no real grok: "grok" is tests/ab/fakegrok.py.
@@ -25,7 +26,7 @@ FORBIDDEN_PORTS = {9241, 9242, 9119, 9120, 9121}
 
 BROWSER_JS = r"""
 const {chromium} = require('playwright');
-const [url, goneUrl, chrome] = process.argv.slice(1);
+const [url, goneUrl, lateUrl, lateDir, chrome] = process.argv.slice(1);
 const WAIT = 15000;
 const state = p => p.evaluate(() => {
   let want = null;
@@ -34,6 +35,10 @@ const state = p => p.evaluate(() => {
     status: document.getElementById('status').textContent,
     box: !document.getElementById('resume-ask').hidden,
     focus: document.activeElement ? document.activeElement.id : '',
+    stopHidden: document.getElementById('stop').hidden,
+    why: getComputedStyle(document.getElementById('busy')).display === 'none' ? '' :
+      document.getElementById('busy-text').textContent,
+    back: !document.getElementById('busy-back').hidden,
     cols: term.cols, rows: term.rows,
     want: want ? {cols: want.cols, rows: want.rows} : null};
 });
@@ -56,13 +61,20 @@ async function until(p, pred) {
     // No click: the page alone must fit the terminal and ask.
     res.open = await until(p, s => fitted(s) && s.box && s.focus === 'resume-yes');
     res.open.fitted = fitted(res.open);
-    // Folder gone: the box would open in the same synchronous load step that
-    // fits the terminal, so none by the time it is Ended and fitted means none.
+    // Folder gone: the explanation is set in the same synchronous load step
+    // that would open the box, so a page that explains has no box to come.
     const g = await ctx.newPage();
     g.setDefaultTimeout(WAIT);
     await g.goto(goneUrl);
-    res.gone = await until(g, s => s.status === 'Ended' && fitted(s));
-    res.gone.fitted = fitted(res.gone);
+    res.gone = await until(g, s => s.status === 'folder missing' && !!s.why);
+    // Opened while the folder was there, Resume pressed after it went.
+    const l = await ctx.newPage();
+    l.setDefaultTimeout(WAIT);
+    await l.goto(lateUrl);
+    await until(l, s => s.box);
+    require('fs').rmdirSync(lateDir);
+    await l.click('#resume-yes');
+    res.late = await until(l, s => s.status === 'folder missing' && !!s.why);
   } finally {
     await b.close();
   }
@@ -99,9 +111,12 @@ def run_browser():
     # A fresh id: the server looks for a session's holder machine-wide.
     sid = str(uuid.uuid4())
     gone_sid = str(uuid.uuid4())
+    late_sid = str(uuid.uuid4())
+    late_work = os.path.join(tmp, "late")
     sdir = os.path.join(home, ".grok", "sessions", "t", sid)
     gone_dir = os.path.join(home, ".grok", "sessions", "t", gone_sid)
-    for d in (sdir, gone_dir, work, bindir):
+    late_dir = os.path.join(home, ".grok", "sessions", "t", late_sid)
+    for d in (sdir, gone_dir, late_dir, work, late_work, bindir):
         os.makedirs(d)
     # Stopped sessions: listed, but no grok runs them.  The second one's folder
     # does not exist.
@@ -110,7 +125,9 @@ def run_browser():
     Path(gone_dir, "summary.json").write_text(json.dumps({"info": {"id": gone_sid,
         "cwd": os.path.join(tmp, "gone")}, "generated_title": "stopped open test, folder gone",
         "updated_at": "2026-01-01T00:00:00Z"}))
-    grok = os.path.join(bindir, "grok")
+    Path(late_dir, "summary.json").write_text(json.dumps({"info": {"id": late_sid, "cwd": late_work},
+        "generated_title": "stopped open test, folder goes later", "updated_at": "2026-01-01T00:00:00Z"}))
+    grok =os.path.join(bindir, "grok")
     # argv[0] must be "grok" for the server's /proc check.
     Path(grok).write_text('#!/bin/bash\nexec -a grok %s -B %s "$@"\n' % (
         sys.executable, ROOT / "tests" / "ab" / "fakegrok.py"))
@@ -130,7 +147,8 @@ def run_browser():
             return {"error": "server did not start: %r" % line}
         url = "http://127.0.0.1:%d/chat?resume=%s" % (port, sid)
         gone_url = "http://127.0.0.1:%d/chat?resume=%s" % (port, gone_sid)
-        out = subprocess.run([node, "-e", BROWSER_JS, url, gone_url, chrome],
+        late_url = "http://127.0.0.1:%d/chat?resume=%s" % (port, late_sid)
+        out = subprocess.run([node, "-e", BROWSER_JS, url, gone_url, late_url, late_work, chrome],
                              capture_output=True, text=True, timeout=120, env=dict(os.environ, HOME=home))
         try:
             return json.loads(out.stdout)
@@ -158,11 +176,14 @@ def check(res):
         fails.append("the resume box did not open on load")
     elif s["focus"] != "resume-yes":
         fails.append("Resume is not focused: %r" % s["focus"])
-    g = res["gone"]
-    if not g["fitted"]:
-        fails.append("folder gone: terminal not fitted: %sx%s, page fits %r" % (g["cols"], g["rows"], g["want"]))
-    if g["box"]:
-        fails.append("folder gone: the resume box opened on load, but its Resume always fails")
+    for name in ("gone", "late"):
+        g = res[name]
+        if g["status"] != "folder missing" or "no longer exists" not in g["why"]:
+            fails.append("%s: the page does not say the folder is missing: %r" % (name, g))
+        if g["box"] or not g["stopHidden"]:
+            fails.append("%s: the page still offers Resume, which always fails: %r" % (name, g))
+        if not g["back"]:
+            fails.append("%s: no Back link: %r" % (name, g))
     return fails
 
 
