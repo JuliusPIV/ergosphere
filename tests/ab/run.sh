@@ -14,6 +14,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # A fresh id per run: Ergosphere finds a session's holder machine-wide via
 # /proc, so a fixed id makes concurrent runs on one machine block each other.
 SID="$(cat /proc/sys/kernel/random/uuid)" || exit 2
+# Issue #43: a second saved session whose folder does not exist.
+GONE_SID="$(cat /proc/sys/kernel/random/uuid)" || exit 2
 for v in AB_A_DIR AB_B_DIR AB_PORT_A AB_PORT_B AB_OUT; do
   [ -n "${!v:-}" ] || { echo "run.sh: $v is not set" >&2; exit 2; }
 done
@@ -51,6 +53,9 @@ run_side() { # label code-dir port
   rm -rf "$w"; mkdir -p "$w/home/.grok/sessions/ab/$SID" "$w/work" "$w/bin"
   printf '{"info":{"id":"%s","cwd":"%s"},"generated_title":"AB seeded session","updated_at":"2026-01-01T00:00:00Z"}\n' \
     "$SID" "$w/work" >"$w/home/.grok/sessions/ab/$SID/summary.json"
+  mkdir -p "$w/home/.grok/sessions/ab/$GONE_SID"
+  printf '{"info":{"id":"%s","cwd":"%s"},"generated_title":"AB folder gone","updated_at":"2026-01-01T00:00:00Z"}\n' \
+    "$GONE_SID" "$w/gone" >"$w/home/.grok/sessions/ab/$GONE_SID/summary.json"
   printf '{"bind":"127.0.0.1","port":%s}\n' "$port" >"$w/config.json"
   # argv[0] must be "grok": Ergosphere checks /proc/<pid>/cmdline.
   printf '#!/bin/bash\nexec -a grok python3 -B "%s/fakegrok.py" "$@"\n' "$HERE" >"$w/bin/grok"
@@ -66,7 +71,7 @@ run_side() { # label code-dir port
     sleep 0.1
   done
   grep -q ERGOSPHERE_READY "$w/server.log" || log "$label: server not ready: $(tail -n 3 "$w/server.log")"
-  python3 -B "$HERE/ab.py" http "$port" "$SID" >"$w/http.json" 2>"$w/http.err"
+  python3 -B "$HERE/ab.py" http "$port" "$SID" "$GONE_SID" >"$w/http.json" 2>"$w/http.err"
   python3 -B "$HERE/ab.py" vendor "$code" >"$w/vendor.json" 2>"$w/vendor.err"
   if [ -z "$browser_off" ]; then
     brc=0
@@ -127,6 +132,14 @@ for side in A B; do
   python3 -B "$HERE/sigterm_lock.py" run "${!dir}" "${!port}" >"$AB_OUT/sigterm-$side.json" 2>"$AB_OUT/sigterm-$side.err"
 done
 python3 -B "$HERE/sigterm_lock.py" summary "$AB_OUT/sigterm-A.json" "$AB_OUT/sigterm-B.json" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #70: log writes blocked (full stdout pipe), on each side's port again.
+for side in A B; do
+  dir=AB_${side}_DIR port=AB_PORT_${side}
+  rm -rf "$AB_OUT/log-$side"; mkdir -p "$AB_OUT/log-$side"
+  log "$side: blocked log check on ${!port}"
+  python3 -B "$HERE/blocked_log.py" run "${!dir}" "${!port}" "$AB_OUT/log-$side" >"$AB_OUT/log-$side.json" 2>"$AB_OUT/log-$side.err"
+done
+python3 -B "$HERE/blocked_log.py" summary "$AB_OUT/log-A.json" "$AB_OUT/log-B.json" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #97: what each side's install.sh copies into the install dir.
 bash "$HERE/install_files.sh" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #140: --check stops where the real run stops and says what it does with the server.
@@ -139,6 +152,13 @@ bash "$HERE/vendor_rename.sh" >>"$AB_OUT/summary.txt" || rc=1
 # new file in checks/ (or browser.d/ for a page check); never add a block here.
 export AB_A_DIR AB_B_DIR AB_PORT_A AB_PORT_B AB_OUT
 NODE_PATH="$pw_path" bash "$HERE/run_checks.sh" "$HERE/checks" "$AB_A_DIR/tests/ab/checks" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #212: Quit's ended frame reaches the quitting tab (in-process server per side).
+for side in A B; do
+  dir=AB_${side}_DIR port=AB_PORT_${side}
+  log "$side: quit ended frame check on ${!port}"
+  python3 -B "$HERE/quit_ended.py" run "${!dir}" "${!port}" >"$AB_OUT/quit-$side.json" 2>"$AB_OUT/quit-$side.err"
+done
+python3 -B "$HERE/quit_ended.py" summary "$AB_OUT/quit-A.json" "$AB_OUT/quit-B.json" >>"$AB_OUT/summary.txt" || rc=1
 cat "$AB_OUT/summary.txt"
 [ -s "$AB_OUT/summary.txt" ] || exit 1
 exit "$rc"
