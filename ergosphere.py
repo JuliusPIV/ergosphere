@@ -2145,27 +2145,29 @@ def _open_turn_since(path):
     if (dev, ino) != (st.st_dev, st.st_ino) or st.st_size < offset:
         offset, since = 0, None
     if st.st_size > offset:
+        # Line by line: a long history must not be loaded whole on the first poll.
         try:
             with open(path, "rb") as handle:
                 handle.seek(offset)
-                data = handle.read(st.st_size - offset)
+                while offset < st.st_size:
+                    raw = handle.readline()
+                    if not raw.endswith(b"\n"):
+                        break
+                    offset += len(raw)
+                    if b'"turn_' not in raw:
+                        continue
+                    try:
+                        obj = json.loads(raw)
+                    except ValueError:
+                        continue
+                    kind = obj.get("type") if isinstance(obj, dict) else None
+                    if kind == "turn_started":
+                        _shown, stamp = dashboard_stamp(obj.get("ts"))
+                        since = float(stamp) if stamp else 0.0
+                    elif kind == "turn_ended":
+                        since = None
         except OSError:
             return None
-        end = data.rfind(b"\n") + 1
-        for raw in data[:end].split(b"\n"):
-            if b'"turn_' not in raw:
-                continue
-            try:
-                obj = json.loads(raw)
-            except ValueError:
-                continue
-            kind = obj.get("type") if isinstance(obj, dict) else None
-            if kind == "turn_started":
-                _shown, stamp = dashboard_stamp(obj.get("ts"))
-                since = float(stamp) if stamp else 0.0
-            elif kind == "turn_ended":
-                since = None
-        offset += end
     # Two polls may both read; each stored entry is consistent on its own.
     with _TURN_EVENTS_LOCK:
         _TURN_EVENTS[path] = (st.st_dev, st.st_ino, offset, since)

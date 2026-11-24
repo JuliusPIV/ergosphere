@@ -192,6 +192,29 @@ def check_mark_only(erg):
     return None
 
 
+def check_bounded_read(erg):
+    # The first poll of a big events.jsonl must not load the whole file at once.
+    import tracemalloc
+    sid = new_sid(7)
+    filler = json.dumps({"type": "message", "text": "x" * 990}) + "\n"
+    with open(events(sid), "w") as fh:
+        for _ in range(20000):
+            fh.write(filler)
+        fh.write(line("turn_started"))
+    size = os.path.getsize(events(sid))
+    tracemalloc.start()
+    try:
+        since = erg._open_turn_since(events(sid))
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    if since is None:
+        return "bounded: turn_started at the end, want a time, got None"
+    if peak > size // 4:
+        return "bounded: %d byte file peaked at %d bytes allocated" % (size, peak)
+    return None
+
+
 def check_concurrent_polls(erg):
     sid = new_sid(6)
     proc = holder(sid)
@@ -233,7 +256,7 @@ def main():
     erg = load()
     erg.print = lambda *a, **k: None
     checks = (check_holder_mid_turn, check_own_mid_turn, check_stale_turn,
-              check_partial_line, check_mark_only, check_concurrent_polls)
+              check_partial_line, check_mark_only, check_bounded_read, check_concurrent_polls)
     failures = []
     try:
         for check in checks:
