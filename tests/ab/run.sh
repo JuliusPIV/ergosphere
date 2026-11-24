@@ -145,6 +145,13 @@ bash "$HERE/vendor_rename.sh" >>"$AB_OUT/summary.txt" || rc=1
 # new file in checks/ (or browser.d/ for a page check); never add a block here.
 export AB_A_DIR AB_B_DIR AB_PORT_A AB_PORT_B AB_OUT
 NODE_PATH="$pw_path" bash "$HERE/run_checks.sh" "$HERE/checks" "$AB_A_DIR/tests/ab/checks" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #212: Quit's ended frame reaches the quitting tab (in-process server per side).
+for side in A B; do
+  dir=AB_${side}_DIR port=AB_PORT_${side}
+  log "$side: quit ended frame check on ${!port}"
+  python3 -B "$HERE/quit_ended.py" run "${!dir}" "${!port}" >"$AB_OUT/quit-$side.json" 2>"$AB_OUT/quit-$side.err"
+done
+python3 -B "$HERE/quit_ended.py" summary "$AB_OUT/quit-A.json" "$AB_OUT/quit-B.json" >>"$AB_OUT/summary.txt" || rc=1
 cat "$AB_OUT/summary.txt"
 [ -s "$AB_OUT/summary.txt" ] || exit 1
 exit "$rc"
