@@ -3935,6 +3935,8 @@ def chat_page(resume="", holder=None, running=False, title="", ask=False, gone="
         notice = ""
         visible_sid = "" if running else sid_js
     button_attr = "" if can_quit else " hidden"
+    # A held page owns no grok: nothing for Quit to stop (#134).
+    stop_attr = " hidden" if held else ""
     hold_js = "true" if held else "false"
     button = TAKEOVER_LABEL if server else holder_button(holder)
     run_js = "true" if running and not held else "false"
@@ -3998,7 +4000,7 @@ body { position: fixed; left: 0; right: 0; top: var(--vv-top, 0px); }
 </style>
 </head>
 <body>
-<div id="bar"><a href="/">← Session List</a> | <button id="stop" type="button">Quit</button> | <span id="status">@@STATUS@@</span> | <span id="title"@@TITLE_ATTR@@>@@TITLE@@</span><span id="title-gap"@@GAP_ATTR@@> | </span><span id="sid">Session ID: @@SID_TEXT@@</span></div>
+<div id="bar"><a href="/">← Session List</a> | <button id="stop" type="button"@@STOP_ATTR@@>Quit</button> | <span id="status">@@STATUS@@</span> | <span id="title"@@TITLE_ATTR@@>@@TITLE@@</span><span id="title-gap"@@GAP_ATTR@@> | </span><span id="sid">Session ID: @@SID_TEXT@@</span></div>
 <div id="version">v@@VERSION@@</div>
 <div id="wrap"><div id="stage"><div id="resume-ask" hidden><div>Resume this session?</div><button type="button" id="resume-yes">Resume</button><button type="button" id="resume-no">Cancel</button></div><div id="busy"><div id="busy-text">@@NOTICE@@</div><a id="open-there" hidden>Open it there</a><button id="take" type="button"@@BUTTON_ATTR@@>@@BUTTON_LABEL@@</button> <a id="busy-back" href="/" hidden>Back</a></div><div id="term"></div></div></div>
 <script src="/vendor/xterm.js"></script>
@@ -4622,6 +4624,11 @@ function setSid(id) {
   document.getElementById("sid").textContent = "Session ID: " + id;
   pollTitle();
 }
+// Quit is hidden while another grok holds the session: this page owns no grok
+// and no terminal socket, so a Quit there could never end (#134).
+function syncStop() {
+  document.getElementById("stop").hidden = hold && !ended;
+}
 function showEnded() {
   ended = true;
   stopTitlePoll();
@@ -4632,6 +4639,7 @@ function showEnded() {
   // Over the default background #000000 that paints #808080.
   document.getElementById("status").style.color = "#808080";
   document.getElementById("stop").textContent = "Resume";
+  syncStop();
   // grok's last screen would still look live, and a page loaded ended shows a
   // blank terminal: clear it so both look the same (#55).  Text from a grok
   // that never got going (sawOutput false) stays: it says why.
@@ -4656,6 +4664,12 @@ function resumeSession(tries) {
   tries = tries || 0;
   closeResumeAsk();
   ended = false;
+  // A hold left by a Quit during an earlier Resume is stale here: the poll is
+  // blocked while stopping. Clear it so Quit works during this Resume; a reply
+  // that says held sets it again.
+  hold = false;
+  syncStop();
+  document.getElementById("busy").style.display = "none";
   startTitlePoll();
   stopping = false;
   sawOutput = false;
@@ -4804,6 +4818,10 @@ function connect() {
           setStatus(msg.text, false);
           if (msg.text === "session is already running") {
             hold = true;
+            // A Quit pressed before this frame stays asked (stopping): onclose ends
+            // the page, and a Resume reply that still starts grok here (the holder
+            // exited meanwhile) connects with stopping, so onopen quits it.
+            syncStop();
             waitGen += 1;
             if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; }
             if (msg.id) sid = msg.id;
@@ -4871,6 +4889,7 @@ function connect() {
   };
 }
 document.getElementById("stop").addEventListener("click", function () {
+  if (hold && !ended) return;
   if (ended) {
     resumeSession();
     return;
@@ -4887,8 +4906,8 @@ document.getElementById("stop").addEventListener("click", function () {
   if (sock && sock.readyState === 1) sock.send(JSON.stringify({type: "stop"}));
   // A closed socket (failed before grok's first output) has no onclose left to
   // end "quitting": attach again so onopen sends the stop, or onclose ends it.
-  // /term only attaches. A held page is left as it was (#134).
-  else if (!hold && (!sock || sock.readyState > 1)) connect();
+  // /term only attaches. A held page never gets here (#134).
+  else if (!sock || sock.readyState > 1) connect();
 });
 // A link to the other server's page, only where this page's own host reaches it.
 function serverUrl(info) {
@@ -4946,6 +4965,7 @@ var taking = false;
 function openAfterHolder(start) {
   if (!hold) return;
   hold = false;
+  syncStop();
   document.getElementById("busy").style.display = "none";
   try { if (termOpened) term.reset(); } catch (err) {}
   if (start) {
@@ -4990,7 +5010,7 @@ else if (!hold) {
         "@@GAP_ATTR@@", gap_attr
     ).replace("@@SID_TEXT@@", html.escape(visible_sid)).replace(
         "@@NOTICE@@", html.escape(notice)
-    ).replace("@@BUTTON_ATTR@@", button_attr).replace(
+    ).replace("@@BUTTON_ATTR@@", button_attr).replace("@@STOP_ATTR@@", stop_attr).replace(
         "@@BUTTON_LABEL@@", html.escape(button)
     ).replace(
         "@@SERVER_JS@@", json.dumps(server)

@@ -125,6 +125,16 @@ for side in A B; do
   out="$(ERGOSPHERE_TEST_PORT="${!port}" python3 -B "$HERE/../vendor_snapshot_test.py" "${!dir}" 2>&1)" || { [ "$side" = B ] && rc=1; }
   printf '%s: %s\n' "$side" "$(printf '%s\n' "$out" | grep -E '^(PASS|FAIL)' | grep -v 'server output' | tr '\n' ' ')" >>"$AB_OUT/summary.txt"
 done
+# Issue #134: a page held by another server (the other side's port runs the holder server).
+for side in A B; do
+  dir=AB_${side}_DIR port=AB_PORT_${side} other=AB_PORT_B
+  [ "$side" = B ] && other=AB_PORT_A
+  rm -rf "$AB_OUT/held-$side"; mkdir -p "$AB_OUT/held-$side"
+  log "$side: held page check on ${!port} (holder ${!other})"
+  NODE_PATH="$pw_path" python3 -B "$HERE/held_quit.py" run "${!dir}" "${!port}" "${!other}" "$AB_OUT/held-$side" \
+    >"$AB_OUT/held-$side.json" 2>"$AB_OUT/held-$side.err"
+done
+python3 -B "$HERE/held_quit.py" summary "$AB_OUT/held-A.json" "$AB_OUT/held-B.json" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #70: log writes blocked (full stdout pipe), on each side's port again.
 for side in A B; do
   dir=AB_${side}_DIR port=AB_PORT_${side}
