@@ -1,6 +1,6 @@
 """HTTP-level A/B checks and the side-by-side summary.
 
-  python3 -B ab.py http <port> <session-id>   -> JSON checks on stdout
+  python3 -B ab.py http <port> <session-id> [<folder-gone-id>]  -> JSON checks on stdout
   python3 -B ab.py vendor <code-dir>          -> JSON vendor-manifest check on stdout
   python3 -B ab.py builtin                    -> JSON list of built-in check names (ORDER and HTTP_CHECKS),
                                                  which browser.d/ modules may not reuse
@@ -18,9 +18,9 @@ import urllib.request
 from pathlib import Path
 
 TITLE = "AB seeded session"
-ORDER = ["vendor_listed", "health", "session_list", "open_session", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios", "resume_box", "ended_view"]
+ORDER = ["vendor_listed", "health", "session_list", "open_session", "folder_missing", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios", "resume_box", "ended_view"]
 # Checks that do not come from browser.js (HTTP and the vendor manifest).
-HTTP_CHECKS = ("vendor_listed", "health", "session_list", "open_session")
+HTTP_CHECKS = ("vendor_listed", "health", "session_list", "open_session", "folder_missing")
 
 
 def module_names():
@@ -62,7 +62,7 @@ def check(ok, value):
     return {"ok": bool(ok), "value": str(value)[:60]}
 
 
-def http_checks(port, sid):
+def http_checks(port, sid, gone=""):
     base = "http://127.0.0.1:%s" % port
     checks, info = {}, {}
     try:
@@ -86,9 +86,22 @@ def http_checks(port, sid):
                 time.sleep(0.2)
         checks["open_session"] = check(code == 200 and state.startswith("running"),
                                        "resume %s state=%s" % (code, state or "-"))
+        if gone:
+            # Issue #43: the state, /resume, the list row and the page all say so.
+            c1, t1 = get(base, "/session-info?id=" + gone)
+            gstate = json.loads(t1).get("state", "") if c1 == 200 else ""
+            c2, t2 = post(base, "/resume", {"id": gone})
+            rstate = json.loads(t2).get("state", "") if t2.startswith("{") else ""
+            _, page = get(base, "/")
+            marked = "AB folder gone [folder missing]" in page
+            _, chat = get(base, "/chat?resume=" + gone)
+            says = '<span id="status">folder missing</span>' in chat
+            checks["folder_missing"] = check(
+                gstate == "folder-missing" and c2 == 409 and rstate == "folder-missing" and marked and says,
+                "state=%s resume=%s list=%s page=%s" % (gstate or "-", c2, "y" if marked else "n", "y" if says else "n"))
     except (OSError, ValueError) as exc:
         checks.setdefault("health", check(False, "error %s" % exc))
-        for name in ("session_list", "open_session"):
+        for name in HTTP_CHECKS:
             checks.setdefault(name, check(False, "not reached"))
     return {"checks": checks, "info": info}
 
@@ -182,8 +195,8 @@ def summary(adir, bdir):
 
 
 def main(argv):
-    if len(argv) == 4 and argv[1] == "http":
-        print(json.dumps(http_checks(argv[2], argv[3])))
+    if len(argv) in (4, 5) and argv[1] == "http":
+        print(json.dumps(http_checks(*argv[2:])))
         return 0
     if len(argv) == 3 and argv[1] == "vendor":
         print(json.dumps(vendor_checks(argv[2])))
