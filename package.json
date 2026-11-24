@@ -1,0 +1,10 @@
+{
+  "name": "ergosphere",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "description": "Lists the libraries copied into vendor/ so vulnerability scanners can see them. Nothing installs them: the app serves vendor/ as is. vendor/xterm.js is lib/xterm.js of @xterm/xterm without its last sourceMappingURL line, vendor/xterm.css is its css/xterm.css, vendor/addon-fit.js is lib/addon-fit.js of @xterm/addon-fit. tests/vendor_manifest_test.py checks that they match.",
+  "dependencies": {
+    "@xterm/addon-fit": "0.10.0",
+    "@xterm/xterm": "5.5.0"
+  }
+}
