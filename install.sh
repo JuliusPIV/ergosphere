@@ -806,11 +806,11 @@ existing_up() {
   while [[ ! -e "$UP" ]]; do UP=${UP%/*}; UP=${UP:-/}; done
 }
 
-# Prints the free KiB on the filesystem holding $1. --output=avail picks the
-# column by name: df -P puts the filesystem name in column 1, and a name with
-# a space shifts the numbers, so column 4 would be Used. GNU df only, like stat -c.
+# Prints the free KiB on the filesystem holding $1. stat -f reads the numbers
+# directly, so a filesystem name with a space cannot shift them. df --output is
+# GNU-only and BusyBox df rejects it, so it cannot be used here.
 free_kib() {
-  df -k --output=avail -- "$1" 2>/dev/null | awk 'NR == 2 { print $1 }'
+  stat -f -c '%a %S' -- "$1" 2>/dev/null | awk '{ print int($1 * $2 / 1024) }'
 }
 
 # Prints the KiB a copy of file $1 takes: 4 KiB blocks, rounded up.
