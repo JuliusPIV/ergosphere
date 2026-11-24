@@ -2,7 +2,8 @@
 
 Every A/B check waits up to 30 s for its condition, so a change that answers
 5 s late still passes each check.  The summary compares the two sides'
-input_latency samples (median, floor plus ratio).  Runs `ab.py summary` on
+input_latency samples (median, floor plus ratio), which
+browser.d/input_latency.js puts in its check.  Runs `ab.py summary` on
 side folders written here (no server, no browser):
   - B 5 s per round trip, A 0.1 s: exit 1, names input_latency
   - A = B: exit 0
@@ -17,20 +18,25 @@ import subprocess
 import sys
 import tempfile
 
-AB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ab", "ab.py")
+HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ab")
+AB = os.path.join(HERE, "ab.py")
+# summary requires every page check ab.py knows (ORDER plus browser.d/), so
+# take the list from ab.py, not a copy that goes stale when a check is added.
+os.environ.pop("AB_A_DIR", None)
+sys.path.insert(0, HERE)
+import ab  # noqa: E402
+
 # Every page check passes on both sides, so only the latency rule decides.
-PAGE = ["terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize",
-        "keyboard_android", "keyboard_ios", "resume_box"]
+PAGE = [n for n in ab.all_checks() if n not in ab.HTTP_CHECKS and n != "input_latency"]
 
 
 def write_side(root, label, latency):
     d = os.path.join(root, label)
     os.makedirs(d)
     checks = {n: {"ok": True, "value": "ok"} for n in PAGE}
-    checks["input_latency"] = {"ok": True, "value": "7 wheel round trips handled"}
+    checks["input_latency"] = {"ok": True, "value": "7 wheel round trips handled", "samples": latency}
     with open(os.path.join(d, "browser.json"), "w", encoding="utf-8") as fh:
-        json.dump({"browser": "test", "checks": checks, "latency": latency,
-                   "ms": {"input_latency": sum(latency)}}, fh)
+        json.dump({"browser": "test", "checks": checks}, fh)
     return d
 
 
@@ -56,7 +62,9 @@ def main():
     for name, alat, blat, want in cases:
         rc, out = run_summary(alat, blat)
         named = "REGRESSION: passes on A, fails on B: input_latency" in out
-        if rc != want or named != bool(want):
+        # The samples must not make A and B differ, and nothing else may fail.
+        broken = "BROWSER FAILURE" in out or ("check(s) differ" in out and not want)
+        if rc != want or named != bool(want) or broken:
             print("FAIL: %s: rc=%s, want %s:\n%s" % (name, rc, want, out))
             fail = 1
     if fail:
