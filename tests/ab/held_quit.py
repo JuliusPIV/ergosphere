@@ -389,7 +389,13 @@ def summary(apath, bpath):
     width = 36
     lines = ["", "Issue #134: Quit on a page whose session another Ergosphere server runs"]
     if "unavailable" in b or "unavailable" in a:
-        lines.append("BROWSER CHECKS DID NOT RUN: %s" % (b.get("unavailable") or a.get("unavailable")))
+        # Same allowance as run.sh's browser gate: no browser is not a failed check.
+        why = b.get("unavailable") or a.get("unavailable")
+        if os.environ.get("AB_NO_BROWSER") == "1":
+            lines.append("WARNING: browser checks did not run (%s); allowed by AB_NO_BROWSER=1" % why)
+            print("\n".join(lines))
+            return 0
+        lines.append("BROWSER CHECKS DID NOT RUN: %s" % why)
         print("\n".join(lines))
         return 1
     lines.append("%-20s %-*s %-*s %s" % ("check", width, "A", width, "B", "same"))
