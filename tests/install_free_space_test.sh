@@ -19,9 +19,19 @@ chmod +x "$work/bin/df" "$work/bin/stat"
 sed -n '/^free_kib()/,/^}/p' "$repo/install.sh" >"$work/fn.sh"
 
 got=$(PATH="$work/bin:$PATH" bash -c 'source "$1"; free_kib /mnt/x' _ "$work/fn.sh")
-if [[ "$got" == 18775204 ]]; then
-  echo "ok:   free_kib reports available KiB without df --output"
-  exit 0
+if [[ "$got" != 18775204 ]]; then
+  echo "FAIL: free_kib printed '$got', want 18775204"
+  exit 1
 fi
-echo "FAIL: free_kib printed '$got', want 18775204"
-exit 1
+echo "ok:   free_kib reports available KiB without df --output"
+
+# The installer's prerequisites do not list awk, so a host without it must
+# still get the free space. PATH holds only the stat stub here.
+bash_bin=$(command -v bash)
+got=$(PATH="$work/bin" "$bash_bin" -c 'source "$1"; free_kib /mnt/x' _ "$work/fn.sh")
+if [[ "$got" != 18775204 ]]; then
+  echo "FAIL: free_kib with no awk on PATH printed '$got', want 18775204"
+  exit 1
+fi
+echo "ok:   free_kib works with no awk on PATH"
+exit 0

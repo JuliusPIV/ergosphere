@@ -806,11 +806,17 @@ existing_up() {
   while [[ ! -e "$UP" ]]; do UP=${UP%/*}; UP=${UP:-/}; done
 }
 
-# Prints the free KiB on the filesystem holding $1. stat -f reads the numbers
+# Prints the free KiB on the filesystem holding $1, or nothing when it cannot
+# be read (callers treat empty as "could not read"). stat -f reads the numbers
 # directly, so a filesystem name with a space cannot shift them. df --output is
-# GNU-only and BusyBox df rejects it, so it cannot be used here.
+# GNU-only and BusyBox df rejects it. Arithmetic is done in bash, not awk: awk
+# is not in the prerequisite list, so a host without it would be refused here.
 free_kib() {
-  stat -f -c '%a %S' -- "$1" 2>/dev/null | awk '{ print int($1 * $2 / 1024) }'
+  local out blocks size
+  out=$(stat -f -c '%a %S' -- "$1" 2>/dev/null) || return 0
+  read -r blocks size <<<"$out"
+  [[ "$blocks" =~ ^[0-9]+$ && "$size" =~ ^[0-9]+$ ]] || return 0
+  echo $((blocks * size / 1024))
 }
 
 # Prints the KiB a copy of file $1 takes: 4 KiB blocks, rounded up.
