@@ -313,25 +313,30 @@ def load_sessions(limit=SESSION_CAP):
 
 
 def find_session(sid):
-    folder = session_dir_for(sid)
-    if not folder:
-        return None
-    row = read_summary(os.path.join(folder, "summary.json"))
-    if row and row["id"] == sid:
-        return row
+    # The same id can sit in more than one group, and a group may hold an
+    # incomplete folder with no summary.json. Keep going until one has a summary,
+    # or load_sessions would list a session that resume then reports as unknown.
+    for folder in _session_dirs_for(sid):
+        row = read_summary(os.path.join(folder, "summary.json"))
+        if row and row["id"] == sid:
+            return row
     return None
 
 
 def session_dir_for(sid):
+    return next(_session_dirs_for(sid), None)
+
+
+def _session_dirs_for(sid):
     if not isinstance(sid, str) or not SID_RE.match(sid):
-        return None
+        return
     # Every session path is built from this folder. realpath + startswith is
     # the guard: a session folder that is a symlink out of the root is refused.
     root = os.path.realpath(sessions_root())
     try:
         groups = list(os.scandir(root))
     except OSError:
-        return None
+        return
     for group in groups:
         if not group.is_dir(follow_symlinks=False):
             continue
@@ -339,8 +344,7 @@ def session_dir_for(sid):
         if not path.startswith(root + os.sep):
             continue
         if os.path.isdir(path):
-            return path
-    return None
+            yield path
 
 
 def session_updates_path(sid):
