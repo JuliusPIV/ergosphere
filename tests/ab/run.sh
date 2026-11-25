@@ -125,6 +125,19 @@ for side in A B; do
   out="$(ERGOSPHERE_TEST_PORT="${!port}" python3 -B "$HERE/../vendor_snapshot_test.py" "${!dir}" 2>&1)" || { [ "$side" = B ] && rc=1; }
   printf '%s: %s\n' "$side" "$(printf '%s\n' "$out" | grep -E '^(PASS|FAIL)' | grep -v 'server output' | tr '\n' ' ')" >>"$AB_OUT/summary.txt"
 done
+# Issues #148 and #191: quitting a holder grok whose pid is reused.  B's
+# tests/pid_reuse_test.py (stand-ins in a private pid namespace) against each
+# side's ergosphere.py.  B must exit 0 and report every check in ab.py
+# PID_REUSE_CHECKS as passed.
+for side in A B; do
+  dir=AB_${side}_DIR
+  log "$side: pid reuse checks"
+  prc=0
+  (cd "$AB_OUT" && ERGOSPHERE_CODE="${!dir}/ergosphere.py" python3 -B "$AB_B_DIR/tests/pid_reuse_test.py") \
+    >"$AB_OUT/pidreuse-$side.txt" 2>&1 || prc=$?
+  echo "exit: $prc" >>"$AB_OUT/pidreuse-$side.txt"
+done
+python3 -B "$HERE/ab.py" pidreuse "$AB_OUT/pidreuse-A.txt" "$AB_OUT/pidreuse-B.txt" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #70: log writes blocked (full stdout pipe), on each side's port again.
 for side in A B; do
   dir=AB_${side}_DIR port=AB_PORT_${side}
