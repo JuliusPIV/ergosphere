@@ -7,6 +7,8 @@
   python3 -B ab.py summary <A-dir> <B-dir>    -> summary text on stdout;
                                                  exit 1 when a check passes on A and fails on B,
                                                  or B's browser checks break or miss a check in ORDER or browser.d/
+  python3 -B ab.py pidreuse <A.txt> <B.txt>   -> pid reuse rows (tests/pid_reuse_test.py output);
+                                                 exit 1 unless B ran and passed every check
 Stdlib only.
 """
 import json
@@ -140,6 +142,37 @@ def side(dirname):
     return checks, server.get("info") or {}, browser
 
 
+# B is slow when its median wheel round trip is over both the floor and
+# SLOW_RATIO times A's, measured in the same run on the same host (#151).
+# A median of several samples, never one reading: one slow sample under load
+# does not move it, and the ratio absorbs a host that slows both sides.
+SLOW_FLOOR_MS = 2000
+SLOW_RATIO = 3
+
+
+def median(xs):
+    xs = sorted(x for x in xs if isinstance(x, (int, float)) and not isinstance(x, bool))
+    return xs[len(xs) // 2] if xs else None
+
+
+def latency(a, b):
+    """Takes the wheel round trips that browser.d/input_latency.js puts in its
+    check (so they do not make A and B differ) and marks B's input_latency
+    failed when B is much slower than A, so the table reports a regression."""
+    taken = []
+    for side_checks in (a, b):
+        c = side_checks.get("input_latency")
+        xs = c.pop("samples", None) if isinstance(c, dict) else None
+        taken.append(median(xs) if isinstance(xs, list) else None)
+    ma, mb = taken
+    if ma is None or mb is None:
+        return []
+    limit = max(SLOW_FLOOR_MS, SLOW_RATIO * ma)
+    if mb > limit and b["input_latency"].get("ok"):
+        b["input_latency"] = check(False, "slow: median %sms, A %sms" % (mb, ma))
+    return ["input_latency median ms: A=%s B=%s (B fails over %s)" % (ma, mb, limit)]
+
+
 def summary(adir, bdir):
     a, ainfo, abrowser = side(adir)
     b, binfo, bbrowser = side(bdir)
@@ -150,6 +183,7 @@ def summary(adir, bdir):
     else:
         why = lambda r: str(r.get("browser") and "ran" or r.get("unavailable") or r.get("error") or "no result")
         lines.append("BROWSER CHECKS DID NOT RUN (A: %s; B: %s)" % (why(abrowser)[:150], why(bbrowser)[:150]))
+    lines.extend(latency(a, b))
     # No browser on this host is a warning; a browser.js that breaks on B, or
     # that ran but left out a page check in ORDER, fails the run.  Both sides
     # run B's browser.js, so a check dropped there is missing on A too:
@@ -194,7 +228,65 @@ def summary(adir, bdir):
     return 1 if regress or broken else 0
 
 
+# Every check tests/pid_reuse_test.py runs, by name.  B must report each one:
+# a crash or skip part-way leaves rows out, and a dropped check would vanish
+# from both columns (the #179 rule for HTTP checks).
+PID_REUSE_CHECKS = [
+    "legit quit (pidfd)",
+    "pid reused before the signal",
+    "pid reused after the pidfd opened",
+    "same-session grok relaunched at the pid, re-read sees it",
+    "same-session grok relaunched at the pid after the re-read",
+    "same-session grok relaunched, re-read sees it (pidfd_send_signal EPERM by policy)",
+    "checked grok exits just before the signal",
+    "checked grok quits right after the re-read",
+    "legit quit (no pidfd fallback)",
+    "pid reused before the signal (no pidfd fallback)",
+    "legit quit (pidfd_send_signal ENOSYS)",
+    "legit quit (pidfd_send_signal EPERM by policy)",
+    "another user's grok (every signal EPERM) refused",
+]
+
+
+def pid_reuse_rows(path):
+    """({check name: passed}, exit status or None) from tests/pid_reuse_test.py output.
+
+    Rows are "ok: name" / "FAIL: name -- why"; run.sh appends "exit: N".
+    """
+    rows, status = {}, None
+    for line in open(path, errors="replace"):
+        mark, _, rest = line.rstrip("\n").partition(": ")
+        if mark == "exit" and rest.strip().lstrip("-").isdigit():
+            status = int(rest)
+        elif mark in ("ok", "FAIL") and not rest[:1].isdigit():  # not the "FAIL: 3 of 13" total
+            rows[rest.split(" -- ")[0]] = mark == "ok"
+    return rows, status
+
+
+def pidreuse(apath, bpath):
+    (a, _astatus), (b, bstatus) = pid_reuse_rows(apath), pid_reuse_rows(bpath)
+    cell = lambda ok: "-" if ok is None else ("PASS" if ok else "FAIL")
+    lines = ["", "Issues #148, #191: quitting a holder grok whose pid is reused (stand-ins, private pid namespace)",
+             "%-84s %-4s %s" % ("check", "A", "B")]
+    names = PID_REUSE_CHECKS + [n for n in b if n not in PID_REUSE_CHECKS]
+    lines += ["%-84s %-4s %s" % (name, cell(a.get(name)), cell(b.get(name))) for name in names]
+    bad = []
+    missing = [n for n in PID_REUSE_CHECKS if n not in b]
+    if missing:
+        bad.append("PID REUSE FAILURE: B did not report check(s): %s" % ", ".join(missing))
+    failed = [n for n in names if b.get(n) is False]
+    if failed:
+        bad.append("PID REUSE FAILURE: fails on B: %s" % ", ".join(failed))
+    if bstatus != 0:
+        tail = open(bpath, errors="replace").read().strip().splitlines()[-3:]
+        bad.append("PID REUSE FAILURE: B's test exited %s: %s" % (bstatus, " | ".join(tail)))
+    print("\n".join(lines + bad))
+    return 1 if bad else 0
+
+
 def main(argv):
+    if len(argv) == 4 and argv[1] == "pidreuse":
+        return pidreuse(argv[2], argv[3])
     if len(argv) in (4, 5) and argv[1] == "http":
         print(json.dumps(http_checks(*argv[2:])))
         return 0
