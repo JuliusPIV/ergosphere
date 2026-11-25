@@ -831,6 +831,13 @@ def open_pidfd(pid):
         return None
 
 
+def pidfd_exited(pidfd):
+    """True once the process behind pidfd has exited (it polls readable then); never waits."""
+    poller = select.poll()
+    poller.register(pidfd, select.POLLIN)
+    return bool(poller.poll(0))
+
+
 def term_holder(sid, holder, raw):
     """SIGTERM the holder grok after checking raw (its command line) names sid; wait for exit."""
     pid = holder["pid"]
@@ -858,6 +865,16 @@ def term_holder(sid, holder, raw):
         if not grok_cmdline(again) or not cmdline_contains_sid(again, sid):
             print("take refuse pid=%s sid=%s changed before the signal" % (pid, sid), flush=True)
             return False, {"ok": False, "error": "that grok changed; try again", "pid": pid}
+        # A pidfd turns readable once its process exits.  Still unreadable
+        # after the re-read: that read was of the pinned grok.  Readable: the
+        # checked grok is gone and the read may be of a new grok at the
+        # reused pid (#191).  Signal nothing; a grok on sid there now is new.
+        if pidfd is not None and pidfd_exited(pidfd):
+            now = read_proc_cmdline(pid)
+            if grok_cmdline(now) and cmdline_contains_sid(now, sid):
+                print("take refuse pid=%s sid=%s relaunched at that pid" % (pid, sid), flush=True)
+                return False, {"ok": False, "error": "that grok changed; try again", "pid": pid}
+            return True, {"ok": True, "pid": pid, "already": "gone"}
         via = "kill"
         if pidfd is not None:
             try:
