@@ -211,6 +211,37 @@ async function resumeBoxCheck(b) {
   }
 }
 
+// Settings with every /session-info reply held 4 s (longer than its 2 s
+// poll): Quit the running session in another page, then the count must reach
+// 0 and Restart turn on (#155).  The replies are the server's own.
+async function settingsPollCheck(b) {
+  const ctx = await b.newContext({viewport: {width: 1280, height: 800}});
+  try {
+    const sp = await ctx.newPage();
+    await sp.route('**/session-info', async route => {
+      const response = await route.fetch();
+      await wait(4000);
+      await route.fulfill({response});
+    });
+    await sp.goto(`http://127.0.0.1:${port}/settings`);
+    const read = () => sp.evaluate(() => ({text: document.getElementById('sessions').textContent,
+      off: document.getElementById('restart').disabled}));
+    let r = await read();
+    if (!r.text.startsWith('Running in this server: 1.')) return check(false, `start: ${r.text}`);
+    const {p, s, met} = await openPage(ctx);
+    if (!met) return check(false, `no grok view to quit: ${seen(s)}`);
+    await p.click('#stop');
+    const zero = x => x.text.startsWith('Running in this server: 0.') && !x.off;
+    const end = Date.now() + WAIT;
+    r = await read();
+    while (!zero(r) && Date.now() < end) { await wait(100); r = await read(); }
+    return check(zero(r), zero(r) ? 'slow replies: 1->0, Restart on'
+      : `slow: shows ${(r.text.match(/\d+/) || ['?'])[0]}, Restart ${r.off ? 'off' : 'on'}`);
+  } finally {
+    await ctx.close();
+  }
+}
+
 // Quit, then Resume: the ended page shows a blank terminal, as one loaded
 // ended does, and Resume shows no frame of the old screen before the new grok
 // draws (#55).
@@ -358,6 +389,8 @@ async function run() {
     checks.pinch_fit = await pinchFitCheck(b);
     checks.resume_box = await resumeBoxCheck(b);
     checks.ended_view = await endedViewCheck(b);
+    // Last: it quits that session for good.
+    checks.settings_poll = await settingsPollCheck(b);
     return {browser: b.version(), checks};
   } finally {
     await b.close();
