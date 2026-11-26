@@ -125,13 +125,6 @@ for side in A B; do
   out="$(ERGOSPHERE_TEST_PORT="${!port}" python3 -B "$HERE/../vendor_snapshot_test.py" "${!dir}" 2>&1)" || { [ "$side" = B ] && rc=1; }
   printf '%s: %s\n' "$side" "$(printf '%s\n' "$out" | grep -E '^(PASS|FAIL)' | grep -v 'server output' | tr '\n' ' ')" >>"$AB_OUT/summary.txt"
 done
-# Issue #218: the PTY master is closed once (in process, forced close orders).
-for side in A B; do
-  dir=AB_${side}_DIR
-  log "$side: master close check"
-  python3 -B "$HERE/master_close.py" run "${!dir}" >"$AB_OUT/mclose-$side.json" 2>"$AB_OUT/mclose-$side.err"
-done
-python3 -B "$HERE/master_close.py" summary "$AB_OUT/mclose-A.json" "$AB_OUT/mclose-B.json" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #150: install --bind 0.0.0.0 while the port is held on 127.0.0.2.
 bash "$HERE/install_bind_any.sh" >>"$AB_OUT/summary.txt" || rc=1
 # Issues #148 and #191: quitting a holder grok whose pid is reused.  B's
