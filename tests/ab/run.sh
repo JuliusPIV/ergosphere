@@ -132,6 +132,8 @@ for side in A B; do
   python3 -B "$HERE/master_close.py" run "${!dir}" >"$AB_OUT/mclose-$side.json" 2>"$AB_OUT/mclose-$side.err"
 done
 python3 -B "$HERE/master_close.py" summary "$AB_OUT/mclose-A.json" "$AB_OUT/mclose-B.json" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #150: install --bind 0.0.0.0 while the port is held on 127.0.0.2.
+bash "$HERE/install_bind_any.sh" >>"$AB_OUT/summary.txt" || rc=1
 # Issues #148 and #191: quitting a holder grok whose pid is reused.  B's
 # tests/pid_reuse_test.py (stand-ins in a private pid namespace) against each
 # side's ergosphere.py.  B must exit 0 and report every check in ab.py

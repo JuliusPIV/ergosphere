@@ -212,6 +212,23 @@ else
   bad "auto on busy $busy: exit $rc, $(grep '^failed at' <<<"$out")"
 fi
 
+# This install's own server moves from 127.0.0.2:$busy to 127.0.0.2:$free, then
+# manual mode keeps $free and asks bind 0.0.0.0. The only thing on $free is this
+# install's own server, so the port is free and the server moves (#150).
+out=$(run_manual "$free" "" "" 127.0.0.2 "") || true
+pid=$(field pid "$out")
+if [[ -n "$pid" ]]; then pids+=("$pid"); fi
+rc=0
+out=$(run_manual "$free" "" "" 0.0.0.0 "" y) || rc=$?
+new=$(field pid "$out")
+if [[ -n "$new" ]]; then pids+=("$new"); fi
+if [[ "$rc" -eq 0 && -n "$new" && "$new" != "$pid" && "$(health_pid "$free")" == "$new" ]] && ! grep -q "in use by" <<<"$out"; then
+  ok "manual bind 0.0.0.0 on $free moves own server (pid $pid -> $new)"
+else
+  bad "manual bind 0.0.0.0 on $free: exit $rc, pid '${new:-none}' (was '${pid:-none}')"
+  printf "%s\n" "$out" | tail -n 15
+fi
+
 if unshare -rn true 2>/dev/null; then
   ERGOSPHERE_TEST_PORT=$port unshare -rn bash "$0" --netns || fail=1
 else

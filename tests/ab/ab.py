@@ -20,7 +20,7 @@ import urllib.request
 from pathlib import Path
 
 TITLE = "AB seeded session"
-ORDER = ["vendor_listed", "health", "session_list", "open_session", "folder_missing", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios", "resume_box", "ended_view"]
+ORDER = ["vendor_listed", "health", "session_list", "open_session", "folder_missing", "terminal", "wheel_scroll", "bar_drag", "touch_scroll", "resize", "keyboard_android", "keyboard_ios", "resume_box", "ended_view", "settings_poll"]
 # Checks that do not come from browser.js (HTTP and the vendor manifest).
 HTTP_CHECKS = ("vendor_listed", "health", "session_list", "open_session", "folder_missing")
 
@@ -37,7 +37,7 @@ def module_names():
 
 
 def all_checks():
-    """ORDER with the browser.d/ checks before resume_box, which stays last."""
+    """ORDER with the browser.d/ checks before resume_box, which runs after them."""
     i = ORDER.index("resume_box") if "resume_box" in ORDER else len(ORDER)
     return ORDER[:i] + module_names() + ORDER[i:]
 

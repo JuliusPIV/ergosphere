@@ -3763,9 +3763,12 @@ function renderAgents() {
   el("add").disabled = !free.length;
 }
 var restarting = false;
-// Bumped by every poll and every restart click, so a reply from a poll that
-// started before a newer poll or a restart attempt is dropped.
+// pollSeq numbers each poll.  appliedSeq is the newest poll whose reply was
+// applied, or the last poll sent before a Restart click: a reply at or below
+// it is older than what the page shows and is dropped.  A slow reply that
+// lands in order is still applied (#155).
 var pollSeq = 0;
+var appliedSeq = 0;
 function renderRestart() {
   say("sessions", "Running in this server: " + state.sessions + ". Restart needs zero.");
   el("restart").disabled = restarting || state.sessions !== 0;
@@ -3778,7 +3781,8 @@ function pollSessions() {
   fetch("/session-info", {cache: "no-store"}).then(function (resp) {
     return resp.ok ? resp.json() : null;
   }).then(function (data) {
-    if (seq !== pollSeq || restarting || !data || typeof data.running !== "number") return;
+    if (seq <= appliedSeq || restarting || !data || typeof data.running !== "number") return;
+    appliedSeq = seq;
     var n = data.running;
     if (n !== state.sessions) {
       state.sessions = n;
@@ -3877,7 +3881,7 @@ function waitFor(origin, oldStart, tries) {
 }
 el("restart").addEventListener("click", function () {
   restarting = true;
-  pollSeq++;
+  appliedSeq = pollSeq;
   el("restart").disabled = true;
   say("restart-msg", "Restarting...");
   fetch("/health", {cache: "no-store"}).then(function (resp) { return resp.json(); }).then(function (health) {
