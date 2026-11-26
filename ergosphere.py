@@ -4058,6 +4058,18 @@ html, body { overflow: hidden; overscroll-behavior: none; }
    pans. Fixed boxes are placed against the layout viewport. */
 body { position: fixed; left: 0; right: 0; top: var(--vv-top, 0px); }
 #term .xterm-viewport { overflow-y: hidden; }
+/* At a device scale that is not a whole number (2.625 on a Pixel, 1.25 or
+   1.5 on a scaled desktop) xterm's row height is a fraction of a device
+   pixel, and two coloured rows met at a half-covered pixel: a faint dark
+   line between them (#69).  Each run's background reaches 1px into the next
+   row, which paints over it, so the shared pixel is fully covered.  At a
+   whole-number scale rows meet on a pixel edge: left as xterm draws it. */
+#term .xterm-rows > div { overflow: clip !important; overflow-clip-margin: 1px; }
+#term .xterm-rows span:not(.xterm-cursor) { padding-bottom: 1px; }
+@media (resolution: 1x), (resolution: 2x), (resolution: 3x), (resolution: 4x) {
+#term .xterm-rows > div { overflow: hidden !important; }
+#term .xterm-rows span:not(.xterm-cursor) { padding-bottom: 0; }
+}
 /* The browser neither pans nor zooms on the terminal: a one-finger drag is
    grok scrolling and a pinch changes the terminal text size (the script). */
 #term { touch-action: none; }
