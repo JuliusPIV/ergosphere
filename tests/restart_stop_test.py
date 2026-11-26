@@ -64,9 +64,14 @@ def check(signum, where):
     erg.RESTART.set()
     args = argparse.Namespace(bind="127.0.0.1", port=1, tls_cert=None, tls_key=None)
     saved = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
+    # serve() starts the log writer, which wraps sys.stdout/stderr; each check
+    # loads a fresh module, so without this the wrappers stack and the final
+    # PASS/FAIL line is lost.
+    out, err = sys.stdout, sys.stderr
     try:
         rc = erg.serve(args, {"agents": {}})
     finally:
+        sys.stdout, sys.stderr = out, err
         for s, handler in saved.items():
             signal.signal(s, handler)
     name = "%s in %s" % (signal.Signals(signum).name, where)
