@@ -10,6 +10,7 @@ Bytes both ways are a WebSocket. There is no grok agent serve child.
 """
 
 import argparse
+import atexit
 import base64
 import contextlib
 import copy
@@ -88,6 +89,11 @@ LIVE_LOCK = threading.Lock()
 # hung mount must not block every other launch. Guarded by LIVE_LOCK.
 STARTING = set()
 STOP = threading.Event()
+# Set by the SIGTERM/SIGINT handler, which does nothing else (#132). The
+# handler runs in the main thread wherever that thread was, maybe holding
+# LIVE_LOCK; a handler that took a lock could wait on itself forever. The
+# serve loop turns this flag into STOP and the stop.
+STOP_SIGNALED = False
 # Set once a restart is accepted. No new grok starts after that.
 RESTART = threading.Event()
 SCREEN_CAP = 2 * 1024 * 1024
@@ -831,6 +837,13 @@ def open_pidfd(pid):
         return None
 
 
+def pidfd_exited(pidfd):
+    """True once the process behind pidfd has exited (it polls readable then); never waits."""
+    poller = select.poll()
+    poller.register(pidfd, select.POLLIN)
+    return bool(poller.poll(0))
+
+
 def term_holder(sid, holder, raw):
     """SIGTERM the holder grok after checking raw (its command line) names sid; wait for exit."""
     pid = holder["pid"]
@@ -858,6 +871,16 @@ def term_holder(sid, holder, raw):
         if not grok_cmdline(again) or not cmdline_contains_sid(again, sid):
             print("take refuse pid=%s sid=%s changed before the signal" % (pid, sid), flush=True)
             return False, {"ok": False, "error": "that grok changed; try again", "pid": pid}
+        # A pidfd turns readable once its process exits.  Still unreadable
+        # after the re-read: that read was of the pinned grok.  Readable: the
+        # checked grok is gone and the read may be of a new grok at the
+        # reused pid (#191).  Signal nothing; a grok on sid there now is new.
+        if pidfd is not None and pidfd_exited(pidfd):
+            now = read_proc_cmdline(pid)
+            if grok_cmdline(now) and cmdline_contains_sid(now, sid):
+                print("take refuse pid=%s sid=%s relaunched at that pid" % (pid, sid), flush=True)
+                return False, {"ok": False, "error": "that grok changed; try again", "pid": pid}
+            return True, {"ok": True, "pid": pid, "already": "gone"}
         via = "kill"
         if pidfd is not None:
             try:
@@ -1196,6 +1219,79 @@ def existing_dir(path):
     return os.path.isdir(path)
 
 
+# A stat on a hung mount never returns. GET / and the 4 s /list-rows poll call
+# folder_missing, so wait only this long; a slow folder reads as present. One
+# check per folder is outstanding at a time, so polls do not pile up threads.
+# A hung check keeps its thread forever, so at most FOLDER_CHECK_THREADS run at
+# once. A folder with no slot in time reads as present (#43 review: a list of
+# hundreds of stalled folders must not exhaust the thread budget).
+FOLDER_CHECK_WAIT = 0.5
+FOLDER_CHECK_THREADS = 16
+folder_checks = {}
+folder_checks_lock = threading.Lock()
+folder_check_slots = threading.BoundedSemaphore(FOLDER_CHECK_THREADS)
+
+
+def folder_missing(cwd):
+    # A saved session whose folder was deleted: Resume can never start it (#43).
+    return cwd in missing_folders([cwd])
+
+
+def missing_folders(cwds):
+    # The given folders that do not exist. All share one FOLDER_CHECK_WAIT, so
+    # many stalled folders in one list do not add up.
+    deadline = time.monotonic() + FOLDER_CHECK_WAIT
+    started = []
+    for cwd in set(c for c in cwds if isinstance(c, str) and c):
+        check = start_folder_check(cwd, deadline)
+        if check is not None:
+            started.append((cwd, check))
+    out = set()
+    for cwd, check in started:
+        if check["done"].wait(max(0, deadline - time.monotonic())) and not check["exists"]:
+            out.add(cwd)
+    return out
+
+
+def start_folder_check(cwd, deadline):
+    # A check already outstanding is joined, not started again: 50 rows on one
+    # stuck folder cost one thread. None means no slot came free in time, so
+    # the folder reads as present for this render.
+    with folder_checks_lock:
+        check = folder_checks.get(cwd)
+    if check is not None:
+        return check
+    if not folder_check_slots.acquire(timeout=max(0, deadline - time.monotonic())):
+        return None
+    with folder_checks_lock:
+        check = folder_checks.get(cwd)
+        if check is not None:
+            folder_check_slots.release()
+            return check
+        check = {"done": threading.Event(), "exists": False}
+        folder_checks[cwd] = check
+    try:
+        threading.Thread(target=check_folder, args=(cwd, check), daemon=True).start()
+    except RuntimeError:
+        # The process is out of threads anyway. Forget this check, so the next
+        # render retries it, and read the folder as present rather than fail the list.
+        with folder_checks_lock:
+            folder_checks.pop(cwd, None)
+        folder_check_slots.release()
+        return None
+    return check
+
+
+def check_folder(cwd, check):
+    try:
+        check["exists"] = existing_dir(cwd)
+    finally:
+        check["done"].set()
+        with folder_checks_lock:
+            folder_checks.pop(cwd, None)
+        folder_check_slots.release()
+
+
 def one_query(qs, key):
     values = qs.get(key)
     if not values:
@@ -1218,6 +1314,18 @@ def dim_arg(raw, default):
     if n > 500:
         return 500
     return n
+
+
+def body_dims(obj):
+    # The page's fitted terminal size from a /launch or /resume body, so grok
+    # starts at it (#58).  Bounded as /term's query is; a missing or
+    # non-integer value keeps 80x24.
+    def one(key, default):
+        value = obj.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return default
+        return dim_arg(str(value), default)
+    return one("cols", 80), one("rows", 24)
 
 
 def new_launch(agent, approval, cwd, cwd_defaults, fallback_cwd):
@@ -1808,7 +1916,9 @@ class Live:
                 self.clients.remove(client)
             except ValueError:
                 pass
-        client.alive = False
+        # alive stays true: the sender still sends what was queued before
+        # this None (the ended frame from Quit, #212). _term joins it, then
+        # marks the client dead and shuts the socket.
         client.queue.put(None)
 
     def write(self, data):
@@ -2194,8 +2304,9 @@ def live_state(live):
 def session_state(sid, with_turn=True, scan=None):
     """The one answer to "who runs this session", for every handler and page.
 
-    state: stopped, starting, running-idle, running-working, stopping,
-    held-by-cli or held-by-other-server. pid: the grok it names.
+    state: stopped, folder-missing (stopped, and its saved folder is gone),
+    starting, running-idle, running-working, stopping, held-by-cli or
+    held-by-other-server. pid: the grok it names.
     holder: another grok on this session (session_holder). Any holder makes
     the state held-by-*, also when this server runs a grok on it too. here:
     this server's own grok is starting or running. With here, pid and turn
@@ -2233,6 +2344,10 @@ def session_state(sid, with_turn=True, scan=None):
         out["pid"] = holder["pid"]
         if with_turn:
             out["turn"] = grok_turn(holder["pid"], scan)
+        return out
+    row = find_session(sid)
+    if row is not None and folder_missing(row.get("cwd")):
+        out["state"] = "folder-missing"
     return out
 
 
@@ -2262,7 +2377,7 @@ def settled_state(sid, with_turn=True):
             return state
 
 
-def resume_reply(sid):
+def resume_reply(sid, cols=80, rows=24):
     # /resume reply (code, body), or None when a start of sid began after this
     # request looked (open_live: SessionBusy "starting"): look again once done.
     state = settled_state(sid, with_turn=False)
@@ -2278,11 +2393,15 @@ def resume_reply(sid):
     if row is None:
         return (404, {"ok": False, "error": "unknown session"})
     cwd = row.get("cwd")
+    # Also a folder deleted after session_state looked.
+    if folder_missing(cwd):
+        return (409, {"ok": False, "state": "folder-missing", "cwd": cwd,
+                      "error": folder_missing_text(cwd)})
     if not existing_dir(cwd):
         return (400, {"ok": False, "error": "session cwd is not an existing absolute directory"})
     try:
         cmd = grok_argv(None, None, cwd, sid)
-        open_live(sid, cmd, cwd, 80, 24)
+        open_live(sid, cmd, cwd, cols, rows)
     except SessionBusy as exc:
         if exc.state == "starting":
             return None
@@ -2291,6 +2410,12 @@ def resume_reply(sid):
     except (RuntimeError, OSError) as exc:
         return (400, {"ok": False, "error": str(exc)[:300]})
     return (200, {"ok": True, "id": sid})
+
+
+def folder_missing_text(cwd):
+    return ("The folder this session ran in no longer exists:\n%s\n\n"
+            "grok resumes a session in its own folder, so Resume cannot work "
+            "until that folder is back." % cwd)
 
 
 def running_here(state):
@@ -2371,7 +2496,7 @@ def list_states():
     out = {}
     for sid in sids:
         state = session_state(sid, scan=scan)
-        if state["state"] != "stopped":
+        if state["state"] not in ("stopped", "folder-missing"):
             out[sid] = state
     return out
 
@@ -2526,9 +2651,11 @@ def list_rows_tag(sessions, owners=None):
     """Change tag of the list rows, from the same inputs, without the HTML."""
     if owners is None:
         owners = list_states()
+    missing = missing_folders(row.get("cwd") for row in sessions)
     key = [
         sorted([sid, st["turn"] == "working", st["pid"], conflict_note(st)] for sid, st in owners.items()),
-        [[row.get(k) for k in ("id", "title", "cwd", "updated")] for row in sessions],
+        [[row.get(k) for k in ("id", "title", "cwd", "updated")] + [row.get("cwd") in missing]
+         for row in sessions],
     ]
     text = json.dumps(key, default=str, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
@@ -2592,9 +2719,11 @@ def dashboard_rows(sessions, owners=None):
     blocks.append(dashboard_head("older"))
     blocks.append('<div class="sec" id="sec-older">')
     blocks.append('<div class="empty"%s>- none -</div>' % ("" if not older else " hidden"))
+    missing = missing_folders(row.get("cwd") for row in older)
     for seq, row in enumerate(older):
         blocks.append(dashboard_session_row(
-            "older", seq, row, None, seq >= OLDER_WINDOW
+            "older", seq, row, None, seq >= OLDER_WINDOW,
+            note="folder missing" if row.get("cwd") in missing else "",
         ))
     if len(older) > OLDER_WINDOW:
         blocks.append(
@@ -2612,6 +2741,7 @@ def dashboard_page(sessions, agents, cwd_defaults):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ergosphere</title>
+<link rel="stylesheet" href="/vendor/xterm.css">
 <style>
 body { background: #000; color: #fff; font: 14px/1.45 ui-monospace, monospace; margin: 0; padding: 0.6rem 0.8rem 3rem; }
 a, a:visited, a:hover, a:active { color: #fff; }
@@ -2695,6 +2825,8 @@ footer { display: none; }
 </form>
 </div>
 <footer>↑/↓ select | Enter: open | Ctrl+Enter: new tab | Alt+N new agent</footer>
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
 <script>
 var cwdDefaults = @@CWD@@;
 var agentNames = @@AGENTS@@;
@@ -3066,6 +3198,37 @@ function setLaunch(state) {
   btn.disabled = state === "launching";
   btn.textContent = state === "launching" ? "Starting…" : "Create";
 }
+// grok starts at the size the chat page's terminal will fit to (#58): the
+// same xterm, font and size, in a hidden box where the chat page puts it (the
+// window less its 28px bar, 56px at 40rem wide or less), measured and
+// dropped.  Any failure sends no size, so grok starts at 80x24.
+function chatTermSize() {
+  if (typeof Terminal === "undefined" || typeof FitAddon === "undefined") return null;
+  var n = NaN;
+  try { n = parseInt(localStorage.getItem("ergosphere.fontSize"), 10); } catch (err) {}
+  var fontSize = isNaN(n) ? 14 : Math.max(8, Math.min(28, n));
+  var narrow = window.matchMedia && window.matchMedia("(max-width: 40rem)").matches;
+  var box = document.createElement("div");
+  box.style.cssText = "position: fixed; left: 0; top: 0; visibility: hidden; width: " +
+    window.innerWidth + "px; height: " + Math.max(0, window.innerHeight - (narrow ? 56 : 28)) + "px";
+  document.body.appendChild(box);
+  var t = null;
+  try {
+    t = new Terminal({fontFamily: "monospace", fontSize: fontSize, scrollback: 5000});
+    var f = new FitAddon.FitAddon();
+    t.loadAddon(f);
+    t.open(box);
+    // As the chat page's dropScrollBarGutter: its bar is hidden, so no width.
+    if (t._core && t._core.viewport) t._core.viewport.scrollBarWidth = 0;
+    var d = f.proposeDimensions();
+    return d && d.cols > 0 && d.rows > 0 ? {cols: d.cols, rows: d.rows} : null;
+  } catch (err) {
+    return null;
+  } finally {
+    try { if (t) t.dispose(); } catch (err) {}
+    box.remove();
+  }
+}
 function launchNew(blank) {
   if (launchState === "launching") {
     setModelError("Already starting a session.");
@@ -3087,6 +3250,11 @@ function launchNew(blank) {
   };
   if (modelPicked) payload.touched.push("model");
   if (effortPicked) payload.touched.push("effort");
+  var size = chatTermSize();
+  if (size) {
+    payload.cols = size.cols;
+    payload.rows = size.rows;
+  }
   setLaunch("launching");
   setModelError("");
   fetch("/launch", {
@@ -3685,9 +3853,12 @@ function renderAgents() {
   el("add").disabled = !free.length;
 }
 var restarting = false;
-// Bumped by every poll and every restart click, so a reply from a poll that
-// started before a newer poll or a restart attempt is dropped.
+// pollSeq numbers each poll.  appliedSeq is the newest poll whose reply was
+// applied, or the last poll sent before a Restart click: a reply at or below
+// it is older than what the page shows and is dropped.  A slow reply that
+// lands in order is still applied (#155).
 var pollSeq = 0;
+var appliedSeq = 0;
 function renderRestart() {
   say("sessions", "Running in this server: " + state.sessions + ". Restart needs zero.");
   el("restart").disabled = restarting || state.sessions !== 0;
@@ -3700,7 +3871,8 @@ function pollSessions() {
   fetch("/session-info", {cache: "no-store"}).then(function (resp) {
     return resp.ok ? resp.json() : null;
   }).then(function (data) {
-    if (seq !== pollSeq || restarting || !data || typeof data.running !== "number") return;
+    if (seq <= appliedSeq || restarting || !data || typeof data.running !== "number") return;
+    appliedSeq = seq;
     var n = data.running;
     if (n !== state.sessions) {
       state.sessions = n;
@@ -3799,7 +3971,7 @@ function waitFor(origin, oldStart, tries) {
 }
 el("restart").addEventListener("click", function () {
   restarting = true;
-  pollSeq++;
+  appliedSeq = pollSeq;
   el("restart").disabled = true;
   say("restart-msg", "Restarting...");
   fetch("/health", {cache: "no-store"}).then(function (resp) { return resp.json(); }).then(function (health) {
@@ -3861,7 +4033,7 @@ document.getElementById("pick").hidden = false;
 """.replace("@@VERSION@@", html.escape(VERSION))
 
 
-def chat_page(resume="", holder=None, running=False, title="", ask=False):
+def chat_page(resume="", holder=None, running=False, title="", ask=False, gone=""):
     # Full-height xterm. Leaving this page drops the socket and does not
     # ask the server to kill grok. A reload or a second window reattaches.
     # running: this server already has the grok process. Only then does the
@@ -3884,7 +4056,7 @@ def chat_page(resume="", holder=None, running=False, title="", ask=False):
     else:
         busy_css = "#busy { display: none; padding: 0.8rem 1rem; white-space: pre-wrap; }"
         term_css = "#term { flex: 1; min-height: 0; }"
-        status = "connecting" if running else "Ended"
+        status = "connecting" if running else ("folder missing" if gone else "Ended")
         notice = ""
         visible_sid = "" if running else sid_js
     button_attr = "" if can_quit else " hidden"
@@ -3934,6 +4106,18 @@ html, body { overflow: hidden; overscroll-behavior: none; }
    pans. Fixed boxes are placed against the layout viewport. */
 body { position: fixed; left: 0; right: 0; top: var(--vv-top, 0px); }
 #term .xterm-viewport { overflow-y: hidden; }
+/* At a device scale that is not a whole number (2.625 on a Pixel, 1.25 or
+   1.5 on a scaled desktop) xterm's row height is a fraction of a device
+   pixel, and two coloured rows met at a half-covered pixel: a faint dark
+   line between them (#69).  Each run's background reaches 1px into the next
+   row, which paints over it, so the shared pixel is fully covered.  At a
+   whole-number scale rows meet on a pixel edge: left as xterm draws it. */
+#term .xterm-rows > div { overflow: clip !important; overflow-clip-margin: 1px; }
+#term .xterm-rows span:not(.xterm-cursor) { padding-bottom: 1px; }
+@media (resolution: 1x), (resolution: 2x), (resolution: 3x), (resolution: 4x) {
+#term .xterm-rows > div { overflow: hidden !important; }
+#term .xterm-rows span:not(.xterm-cursor) { padding-bottom: 0; }
+}
 /* The browser neither pans nor zooms on the terminal: a one-finger drag is
    grok scrolling and a pinch changes the terminal text size (the script). */
 #term { touch-action: none; }
@@ -4068,6 +4252,8 @@ var running = @@RUN_JS@@;
 // Stopped and its folder exists: ask to resume on load (#52). A missing
 // folder makes every Resume fail (#43), so that page does not ask.
 var askOnLoad = @@ASK_JS@@;
+// Stopped and its folder was deleted: why Resume cannot work, or "" (#43).
+var goneText = @@GONE_JS@@;
 var termOpened = false;
 var sawOutput = false;
 var sessionReady = false;
@@ -4383,7 +4569,7 @@ function resumeAskOpen() {
 }
 function openResumeAsk() {
   var box = document.getElementById("resume-ask");
-  if (!box.hidden) return;
+  if (!box.hidden || goneText) return;
   box.hidden = false;
   document.getElementById("resume-yes").focus();
 }
@@ -4536,7 +4722,7 @@ var stateGen = 0;
 function applyState(data) {
   if (!data || typeof data.state !== "string") return;
   if (hold || ended || stopping || !sawOutput) return;
-  if (data.state === "stopped") {
+  if (data.state === "stopped" || data.state === "folder-missing") {
     showEnded();
     return;
   }
@@ -4590,6 +4776,18 @@ function showEnded() {
     try { term.reset(); } catch (err) {}
   }
 }
+// The folder is gone: say so and offer no Resume, which would always fail.
+function showGone(text) {
+  goneText = text;
+  showEnded();
+  closeResumeAsk();
+  hideTerm();
+  document.getElementById("stop").hidden = true;
+  document.getElementById("busy").style.display = "block";
+  document.getElementById("busy-text").textContent = text;
+  document.getElementById("busy-back").hidden = false;
+  setStatus("folder missing", false);
+}
 var retryTimer = null;
 function resumeSession(tries) {
   tries = tries || 0;
@@ -4617,11 +4815,14 @@ function resumeSession(tries) {
   }
   // Only this request starts a stopped session. /term attaches only.
   // held: another grok owns it; connect so /term shows that notice.
+  // grok starts at this terminal's fitted size, not 80x24 (#58).
+  ensureTerm();
+  try { fit.fit(); } catch (err) {}
   fetch("/resume", {
     method: "POST",
     cache: "no-store",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({id: sid})
+    body: JSON.stringify({id: sid, cols: term.cols, rows: term.rows})
   }).then(function (resp) {
     return resp.json().then(function (data) {
       return {ok: resp.ok, data: data};
@@ -4639,6 +4840,10 @@ function resumeSession(tries) {
     if (data.stopping === true && tries < 40 && !stopping) {
       setStatus("waiting for the last grok to exit", false);
       retryTimer = setTimeout(function () { retryTimer = null; resumeSession(tries + 1); }, 250);
+      return;
+    }
+    if (data.state === "folder-missing" && typeof data.error === "string") {
+      showGone(data.error);
       return;
     }
     showEnded();
@@ -4913,7 +5118,8 @@ else if (!hold) {
   try { fit.fit(); } catch (err) {}
   setSid(sid);
   showEnded();
-  if (askOnLoad) openResumeAsk();
+  if (goneText) showGone(goneText);
+  else if (askOnLoad) openResumeAsk();
 }
 </script>
 </body>
@@ -4932,6 +5138,8 @@ else if (!hold) {
         "@@SID_JS@@", json.dumps(sid_js)
     ).replace("@@HOLD_JS@@", hold_js).replace("@@RUN_JS@@", run_js).replace(
         "@@ASK_JS@@", "true" if ask else "false"
+    ).replace(
+        "@@GONE_JS@@", script_json(gone)
     ).replace(
         "@@TITLE@@", html.escape(title)
     ).replace("@@DOC_TITLE@@", html.escape(doc_title)).replace(
@@ -5292,7 +5500,10 @@ class Handler(BaseHTTPRequestHandler):
             # The same folder check /resume makes: only a stopped session it
             # could start gets the resume prompt on load (#52, #43).
             ask = isinstance(saved, dict) and existing_dir(saved.get("cwd"))
-            self._html(chat_page(resume, holder, running, page_title, ask))
+            gone = ""
+            if state["state"] == "folder-missing" and isinstance(saved, dict):
+                gone = folder_missing_text(saved.get("cwd"))
+            self._html(chat_page(resume, holder, running, page_title, ask, gone))
             return
         if path in VENDOR_FILES:
             self._vendor(path)
@@ -5530,7 +5741,8 @@ class Handler(BaseHTTPRequestHandler):
             argv_model, argv_effort = launch_model_effort(model, effort, touched)
             sid = str(uuid.uuid4())
             cmd = grok_argv(agent, approval, cwd, None, sid, argv_model, argv_effort)
-            live, _reattach = open_live(sid, cmd, cwd, 80, 24)
+            cols, rows = body_dims(obj)
+            live, _reattach = open_live(sid, cmd, cwd, cols, rows)
         except (ValueError, RuntimeError, OSError) as exc:
             self._json(400, {"ok": False, "error": str(exc)[:300]})
             return
@@ -5568,9 +5780,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         # One state answers it (session_state). Reply after LIVE_LOCK is
         # released: a slow client must not hold it.
+        cols, rows = body_dims(obj)
         reply = None
         while reply is None:
-            reply = resume_reply(sid)
+            reply = resume_reply(sid, cols, rows)
         self._json(*reply)
 
     def _take(self):
@@ -5825,13 +6038,16 @@ class Handler(BaseHTTPRequestHandler):
             live.repaint(cols, rows)
             self._read_input(live)
         finally:
-            self.ws_closed = True
             if live is not None:
                 live.detach(client)
             if client is not None and client.dropped:
                 print("term drop slow client sid=%s" % sid, flush=True)
             if client is not None and client.sender is not None:
                 client.sender.join(timeout=2)
+            # Only now: closing first dropped frames the sender had queued (#212).
+            self.ws_closed = True
+            if client is not None:
+                client.alive = False
             try:
                 self.connection.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -5876,6 +6092,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_frame(8, struct.pack("!H", exc.code) + str(exc).encode("utf-8"))
             except (EOFError, OSError):
                 pass
+            # Nothing may follow a close frame: the sender stops here.
+            self.ws_closed = True
             return
         except (EOFError, OSError, RuntimeError, ValueError):
             return
@@ -6066,10 +6284,23 @@ def cmd_check(args, binary):
 TLS_HANDSHAKE_TIMEOUT = 10
 
 
+class StopSignaled(Exception):
+    """Ends serve_forever after SIGTERM/SIGINT (raised by service_actions)."""
+
+
 class ErgosphereServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
     tls_context = None
+
+    def service_actions(self):
+        # Called by serve_forever between requests (at least every 0.5 s), in
+        # the main thread with no lock held: the safe place to act on a stop
+        # signal (#132).
+        super().service_actions()
+        if STOP_SIGNALED:
+            STOP.set()
+            raise StopSignaled()
 
     def finish_request(self, request, client_address):
         # The handshake runs here, in the connection's own thread, not in the
@@ -6240,6 +6471,90 @@ def start_watchdog(httpd):
     return thread
 
 
+# Log lines waiting for the writer thread. Past this a line is dropped and counted.
+LOG_QUEUE_MAX = 1000
+# How long a stop or restart waits for queued log lines to reach the log.
+LOG_DRAIN_WAIT = 2.0
+LOG_QUEUE = queue.Queue(LOG_QUEUE_MAX)
+
+
+class QueuedLog:
+    """Stands in for sys.stdout/sys.stderr: a stalled log never blocks the caller (#70).
+
+    Callers only put whole lines on LOG_QUEUE; one writer thread writes them.
+    print() writes text and "\\n" separately, so each thread keeps its partial
+    line until the newline and two threads' lines never interleave.
+    """
+
+    dropped = 0
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.partial = {}  # thread id -> text written after its last newline
+
+    def write(self, text):
+        me = threading.get_ident()
+        *lines, rest = (self.partial.pop(me, "") + text).split("\n")
+        if rest:
+            self.partial[me] = rest
+        for line in lines:
+            self._put(line + "\n")
+        return len(text)
+
+    def flush(self):
+        rest = self.partial.pop(threading.get_ident(), "")
+        if rest:
+            self._put(rest)
+
+    def _put(self, text):
+        try:
+            LOG_QUEUE.put_nowait((self.stream, text))
+        except queue.Full:
+            QueuedLog.dropped += 1
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+def _log_writer():
+    while True:
+        item = LOG_QUEUE.get()
+        if isinstance(item, threading.Event):
+            item.set()
+            continue
+        stream, text = item
+        try:
+            if QueuedLog.dropped:
+                count, QueuedLog.dropped = QueuedLog.dropped, 0
+                stream.write("log: dropped %d lines while the log was blocked\n" % count)
+            stream.write(text)
+            stream.flush()
+        except (OSError, ValueError):
+            QueuedLog.dropped += 1
+
+
+def start_log_writer():
+    if isinstance(sys.stdout, QueuedLog):
+        return
+    sys.stdout, sys.stderr = QueuedLog(sys.stdout), QueuedLog(sys.stderr)
+    threading.Thread(target=_log_writer, name="log", daemon=True).start()
+    atexit.register(drain_log)
+
+
+def drain_log(timeout=LOG_DRAIN_WAIT):
+    """Wait, at most timeout seconds, until the lines queued so far are written."""
+    if not isinstance(sys.stdout, QueuedLog):
+        return True
+    sys.stdout.flush()
+    sys.stderr.flush()
+    done = threading.Event()
+    try:
+        LOG_QUEUE.put(done, timeout=timeout)
+    except queue.Full:
+        return False
+    return done.wait(timeout)
+
+
 def serve(args, config):
     tls = bool(args.tls_cert)
     # Unset ERGOSPHERE_TOKEN means no bearer check, including --bind 0.0.0.0.
@@ -6278,6 +6593,7 @@ def serve(args, config):
         return 0
     if httpd is None:
         return 1
+    start_log_writer()
     httpd.token = token
     httpd.tls = tls
     httpd.args = args
@@ -6302,9 +6618,11 @@ def serve(args, config):
     print("ERGOSPHERE_READY port=%s tls=%s" % (args.port, 1 if tls else 0), flush=True)
 
     def _stop(_signum, _frame):
-        STOP.set()
-        kill_all()
-        threading.Thread(target=httpd.shutdown, daemon=True).start()
+        # Only the flag (#132): no lock, no print, no thread start. A second
+        # signal while the main thread held LIVE_LOCK in kill_all left one
+        # thread waiting on that lock forever, deaf to every later SIGTERM.
+        global STOP_SIGNALED
+        STOP_SIGNALED = True
 
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
@@ -6314,12 +6632,20 @@ def serve(args, config):
     start_watchdog(httpd)
     try:
         httpd.serve_forever()
+    except StopSignaled:
+        pass
     finally:
+        # Also when the signal came as serve_forever was already returning
+        # (a Settings restart): STOP before kill_all, so a spawn in flight
+        # kills its child, and the stop wins over the restart below.
+        if STOP_SIGNALED:
+            STOP.set()
         kill_all()
         httpd.server_close()
     # A stop request wins over a pending restart: a service manager or the
-    # installer that sent SIGTERM must see the process exit.
-    if RESTART.is_set() and not STOP.is_set():
+    # installer that sent SIGTERM must see the process exit. The flag too: a
+    # signal during the kill_all or server_close above set only the flag.
+    if RESTART.is_set() and not STOP.is_set() and not STOP_SIGNALED:
         return restart_self(httpd.server_address[0], httpd.server_address[1])
     return 0
 
@@ -6332,6 +6658,7 @@ def restart_self(old_bind, old_port):
     env[RESTART_FALLBACK_ENV] = "%s:%s" % (old_bind, old_port)
     print("restarting: %s (fallback %s:%s)" % (" ".join(argv), old_bind, old_port), flush=True)
     sys.stderr.flush()
+    drain_log()
     # A fresh watchdog interval for the new process to come up in.
     if watchdog_interval() is not None:
         sd_notify("WATCHDOG=1")

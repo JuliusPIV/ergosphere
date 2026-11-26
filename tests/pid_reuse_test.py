@@ -51,13 +51,17 @@ LIBC.syscall.restype = ctypes.c_long
 SYS_CLONE3 = 435
 
 
-def spawn_at(pid, argv):
-    """Fork and exec argv as exactly pid (clone3 set_tid; needs our own pid namespace)."""
+def spawn_at(pid, argv, block=()):
+    """Fork and exec argv as exactly pid (clone3 set_tid; needs our own pid namespace).
+
+    block: signals the new process starts with blocked (the mask survives exec).
+    """
     tid = (ctypes.c_int32 * 1)(pid)
     args = CloneArgs(exit_signal=signal.SIGCHLD, set_tid=ctypes.addressof(tid), set_tid_size=1)
     got = LIBC.syscall(SYS_CLONE3, ctypes.byref(args), ctypes.c_size_t(ctypes.sizeof(args)))
     if got == 0:
         try:
+            signal.pthread_sigmask(signal.SIG_BLOCK, block)
             os.execv(argv[0], argv)
         finally:
             os._exit(127)
@@ -96,6 +100,28 @@ class Run:
         while not self.erg.read_proc_cmdline(self.pid).startswith(b"/bin/sleep"):
             assert time.time() < deadline, "bystander did not exec"
             time.sleep(0.01)
+
+    def relaunch(self):
+        """The checked grok exits and a new grok on the same session gets its pid (#191)."""
+        self.grok.kill()
+        self.grok.wait()
+        # SIGTERM blocked: a signal sent to it stays pending, so the test reads
+        # whether it was hit (ShdPnd) instead of racing its exit.
+        self.bystander = spawn_at(self.pid, [self.grok.args[0], "-c", "import signal; signal.pause()",
+                                             "--resume", self.sid], block=(signal.SIGTERM,))
+        assert self.bystander == self.pid, "new grok got pid %s, not %s" % (self.bystander, self.pid)
+        deadline = time.time() + 5
+        while not self.erg.cmdline_contains_sid(self.erg.read_proc_cmdline(self.pid), self.sid):
+            assert time.time() < deadline, "new grok did not exec"
+            time.sleep(0.01)
+
+    def relaunched_hit(self):
+        """True if the relaunched grok got a SIGTERM (pending, it blocks it); then kill and reap it."""
+        with open("/proc/%d/status" % self.bystander) as fh:
+            pending = [int(line.split()[1], 16) for line in fh if line.startswith(("SigPnd:", "ShdPnd:"))]
+        os.kill(self.bystander, signal.SIGKILL)
+        os.waitpid(self.bystander, 0)
+        return any(mask & (1 << (signal.SIGTERM - 1)) for mask in pending)
 
     def bystander_signal(self):
         """Kill the bystander; the signal that ended it (SIGTERM = it was hit)."""
@@ -166,6 +192,104 @@ def check_reused_after_pidfd(erg, grok):
     return None
 
 
+def relaunched_after_pidfd(before_read):
+    """A new grok on the same session takes the pid after the pidfd opened (#191).
+
+    before_read: the relaunch happens before the re-read (it reads the new
+    grok) or right after it (it read the old one).  Either way term_holder
+    must not report ok while the new grok runs, and must not signal it.
+    """
+    def check(erg, grok):
+        if erg.open_pidfd(os.getpid()) is None:
+            return "pidfd unavailable on this host"
+        run = Run(erg, grok)
+        real_open, real_read = erg.open_pidfd, erg.read_proc_cmdline
+        armed = []
+
+        def open_pidfd(pid):
+            fd = real_open(pid)
+            armed.append(pid)
+            return fd
+
+        def read(pid):
+            fire = armed and pid == armed[0]
+            if fire:
+                armed.clear()
+                if before_read:
+                    run.relaunch()
+            raw = real_read(pid)
+            if fire and not before_read:
+                run.relaunch()
+            return raw
+
+        erg.open_pidfd, erg.read_proc_cmdline = open_pidfd, read
+        try:
+            ok, info = erg.term_holder(run.sid, run.holder, run.raw)
+        finally:
+            erg.open_pidfd, erg.read_proc_cmdline = real_open, real_read
+        if run.bystander is None:
+            return "the relaunch did not happen (term_holder %r)" % (info,)
+        if run.relaunched_hit():
+            return "new grok at reused pid %s was signalled (term_holder %r)" % (run.pid, info)
+        if ok:
+            return "term_holder reported %r while the new grok at pid %s ran" % (info, run.pid)
+        return None
+    return check
+
+
+def check_exit_before_signal(erg, grok):
+    # The checked grok exits on its own between the checks and the signal
+    # (ESRCH through the pidfd): that is a quit, reported ok.
+    run = Run(erg, grok)
+    real_send = signal.pidfd_send_signal
+
+    def send(fd, sig, *rest):
+        run.grok.kill()
+        run.grok.wait()
+        return real_send(fd, sig, *rest)
+
+    signal.pidfd_send_signal = send
+    try:
+        ok, info = erg.term_holder(run.sid, run.holder, run.raw)
+    finally:
+        signal.pidfd_send_signal = real_send
+        run.done()
+    if not ok:
+        return "grok that exited before the signal not reported gone: %r" % (info,)
+    return None
+
+
+def check_exit_after_reread(erg, grok):
+    # The checked grok quits right after the re-read, nothing takes its pid
+    # (e.g. a second tab's /take got it first): that is a quit, reported ok.
+    run = Run(erg, grok)
+    real_open, real_read = erg.open_pidfd, erg.read_proc_cmdline
+    armed = []
+
+    def open_pidfd(pid):
+        fd = real_open(pid)
+        armed.append(pid)
+        return fd
+
+    def read(pid):
+        raw = real_read(pid)
+        if armed and pid == armed[0]:
+            armed.clear()
+            run.grok.kill()
+            run.grok.wait()
+        return raw
+
+    erg.open_pidfd, erg.read_proc_cmdline = open_pidfd, read
+    try:
+        ok, info = erg.term_holder(run.sid, run.holder, run.raw)
+    finally:
+        erg.open_pidfd, erg.read_proc_cmdline = real_open, real_read
+        run.done()
+    if not ok:
+        return "grok that quit after the re-read not reported gone: %r" % (info,)
+    return None
+
+
 def without_pidfd(check):
     def run(erg, grok):
         if not hasattr(erg, "open_pidfd"):
@@ -219,6 +343,12 @@ CHECKS = [
     ("legit quit (pidfd)", check_legit_quit),
     ("pid reused before the signal", check_reused_before_signal),
     ("pid reused after the pidfd opened", check_reused_after_pidfd),
+    ("same-session grok relaunched at the pid, re-read sees it", relaunched_after_pidfd(True)),
+    ("same-session grok relaunched at the pid after the re-read", relaunched_after_pidfd(False)),
+    ("same-session grok relaunched, re-read sees it (pidfd_send_signal EPERM by policy)",
+     pidfd_signal_fails(errno.EPERM)(relaunched_after_pidfd(True))),
+    ("checked grok exits just before the signal", check_exit_before_signal),
+    ("checked grok quits right after the re-read", check_exit_after_reread),
     ("legit quit (no pidfd fallback)", without_pidfd(check_legit_quit)),
     ("pid reused before the signal (no pidfd fallback)", without_pidfd(check_reused_before_signal)),
     ("legit quit (pidfd_send_signal ENOSYS)", pidfd_signal_fails(errno.ENOSYS)(check_legit_quit)),

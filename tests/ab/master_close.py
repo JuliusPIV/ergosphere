@@ -7,7 +7,8 @@
 run runs tests/master_close_test.py (from this tree) against <code-dir>'s
 ergosphere.py: each check forces one close order (Quit, grok exit, two Quits,
 server stop, reader held in poll), puts an unrelated file at the master's old
-fd number and reports whether that file survived.  Stdlib only.
+fd number and reports whether that file survived; resize_after_close reports
+whether a resize after the close is a quiet no-op.  Stdlib only.
 """
 import json
 import os
@@ -18,7 +19,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEST = os.path.join(os.path.dirname(HERE), "master_close_test.py")
 ORDER = ["quit_then_reader", "grok_exit_then_shutdown", "quit_twice",
-         "server_stop_then_reader", "reader_blocked_in_poll"]
+         "server_stop_then_reader", "reader_blocked_in_poll", "resize_after_close"]
 
 
 def run(code):
@@ -33,7 +34,8 @@ def run(code):
         word, _, rest = line.partition(" ")
         name, _, why = rest.partition(": ")
         if word in ("ok", "FAIL") and name in ORDER:
-            checks[name] = {"ok": word == "ok", "value": "unrelated fd kept" if word == "ok" else why}
+            kept = "no error" if name == "resize_after_close" else "unrelated fd kept"
+            checks[name] = {"ok": word == "ok", "value": kept if word == "ok" else why}
     return {"checks": checks, "seconds": round(time.time() - start, 2)}
 
 
