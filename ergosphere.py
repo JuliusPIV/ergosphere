@@ -88,6 +88,11 @@ LIVE_LOCK = threading.Lock()
 # hung mount must not block every other launch. Guarded by LIVE_LOCK.
 STARTING = set()
 STOP = threading.Event()
+# Set by the SIGTERM/SIGINT handler, which does nothing else (#132). The
+# handler runs in the main thread wherever that thread was, maybe holding
+# LIVE_LOCK; a handler that took a lock could wait on itself forever. The
+# serve loop turns this flag into STOP and the stop.
+STOP_SIGNALED = False
 # Set once a restart is accepted. No new grok starts after that.
 RESTART = threading.Event()
 SCREEN_CAP = 2 * 1024 * 1024
@@ -6219,10 +6224,23 @@ def cmd_check(args, binary):
 TLS_HANDSHAKE_TIMEOUT = 10
 
 
+class StopSignaled(Exception):
+    """Ends serve_forever after SIGTERM/SIGINT (raised by service_actions)."""
+
+
 class ErgosphereServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
     tls_context = None
+
+    def service_actions(self):
+        # Called by serve_forever between requests (at least every 0.5 s), in
+        # the main thread with no lock held: the safe place to act on a stop
+        # signal (#132).
+        super().service_actions()
+        if STOP_SIGNALED:
+            STOP.set()
+            raise StopSignaled()
 
     def finish_request(self, request, client_address):
         # The handshake runs here, in the connection's own thread, not in the
@@ -6540,9 +6558,11 @@ def serve(args, config):
     print("ERGOSPHERE_READY port=%s tls=%s" % (args.port, 1 if tls else 0), flush=True)
 
     def _stop(_signum, _frame):
-        STOP.set()
-        kill_all()
-        threading.Thread(target=httpd.shutdown, daemon=True).start()
+        # Only the flag (#132): no lock, no print, no thread start. A second
+        # signal while the main thread held LIVE_LOCK in kill_all left one
+        # thread waiting on that lock forever, deaf to every later SIGTERM.
+        global STOP_SIGNALED
+        STOP_SIGNALED = True
 
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
@@ -6552,12 +6572,20 @@ def serve(args, config):
     start_watchdog(httpd)
     try:
         httpd.serve_forever()
+    except StopSignaled:
+        pass
     finally:
+        # Also when the signal came as serve_forever was already returning
+        # (a Settings restart): STOP before kill_all, so a spawn in flight
+        # kills its child, and the stop wins over the restart below.
+        if STOP_SIGNALED:
+            STOP.set()
         kill_all()
         httpd.server_close()
     # A stop request wins over a pending restart: a service manager or the
-    # installer that sent SIGTERM must see the process exit.
-    if RESTART.is_set() and not STOP.is_set():
+    # installer that sent SIGTERM must see the process exit. The flag too: a
+    # signal during the kill_all or server_close above set only the flag.
+    if RESTART.is_set() and not STOP.is_set() and not STOP_SIGNALED:
         return restart_self(httpd.server_address[0], httpd.server_address[1])
     return 0
 
