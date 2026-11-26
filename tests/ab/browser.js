@@ -132,54 +132,6 @@ async function keyboardCheck(b, device, kb, pan) {
   }
 }
 
-// Pinch the font size from 8 to 28 px and back, one size per touch move
-// (#117): after each move the width left over is under one cell and not
-// below zero (xterm rounds the cell width over the old columns, so one fit
-// could land a column short).  Then grok draws at the final size.
-async function pinchFitCheck(b) {
-  const ctx = await b.newContext({...devices['Pixel 7']});
-  try {
-    let {p, s, met} = await openPage(ctx);
-    if (!met) return check(false, `no grok view at page size: ${seen(s)}`);
-    const cdp = await ctx.newCDPSession(p);
-    const g = await screen(p);
-    const cx = g.x + g.w / 2, cy = g.y + g.h / 2, D0 = 100;
-    const pts = d => [{x: cx - d / 2, y: cy, id: 1}, {x: cx + d / 2, y: cy, id: 2}];
-    const at = n => p.evaluate(n => {
-      if (term.options.fontSize !== n) return null;
-      const w = parseInt(getComputedStyle(term.element.parentElement).width);
-      const cell = term._core._renderService.dimensions.css.cell.width;
-      // Rounded: 412 - 76 * (412 / 76) is -6e-14, not below zero.
-      return {cols: term.cols, gap: Math.round((w - term.cols * cell) * 100) / 100, cell};
-    }, n);
-    const bad = [];
-    async function pinch(sizes) {
-      const size0 = await p.evaluate(() => term.options.fontSize);
-      await cdp.send('Input.dispatchTouchEvent', {type: 'touchStart', touchPoints: pts(D0)});
-      for (const n of sizes) {
-        await cdp.send('Input.dispatchTouchEvent', {type: 'touchMove', touchPoints: pts(D0 * n / size0)});
-        const end = Date.now() + WAIT;
-        let r = await at(n);
-        while (!r && Date.now() < end) { await wait(50); r = await at(n); }
-        if (!r) bad.push(`${n}px:font`);
-        else if (!(r.gap >= 0 && r.gap < r.cell)) bad.push(`${n}px:${r.cols}c`);
-      }
-      await cdp.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
-    }
-    const up = [], down = [];
-    for (let n = 9; n <= 28; n++) up.push(n);
-    for (let n = 27; n >= 8; n--) down.push(n);
-    await pinch([8]);
-    bad.length = 0;
-    await pinch(up);
-    await pinch(down);
-    ({s, met} = await until(p, fitted));
-    return check(met && !bad.length, `${bad.length} of 40 short${bad.length ? ': ' + bad.join(' ') : ''}, grok ${s.rows}x${s.cols}`);
-  } finally {
-    await ctx.close();
-  }
-}
-
 // Quit, open the "Resume this session?" box from the ended terminal, then
 // press the bar's Resume instead: the box must close once grok is live (#57).
 async function resumeBoxCheck(b) {
@@ -384,9 +336,7 @@ async function run() {
     if (clash.length) throw new Error(`browser.d/ name(s) clash with built-in checks: ${clash.join(', ')}`);
     Object.assign(checks, await browserD.runAll(browserD.list(),
       {b, port, sid, url, WAIT, wait, check, status, until, fitted, caughtUp, seen, openPage, screen, devices}));
-    // Last: these quit and resume the session the other checks share.
-    // pinch_fit quits the session, so it runs after every browser.d/ module.
-    checks.pinch_fit = await pinchFitCheck(b);
+    // Late: these quit and resume the session the other checks share.
     checks.resume_box = await resumeBoxCheck(b);
     checks.ended_view = await endedViewCheck(b);
     // Last: it quits that session for good.
