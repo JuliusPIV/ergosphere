@@ -840,6 +840,160 @@ install_files() {
   if [[ "$n" -gt 0 ]]; then CHANGED+=("$n package files"); fi
 }
 
+# "sha256 path" of every developer file in the releases whose installer
+# copied them into DEST (all 15 releases before #97). Fixed: later
+# installers copy none. Built from each tag's git archive.
+OLD_DEV_FILES='
+ac0752c3bd9baa66515814b556c37ba752883519d6774192ca33b0c7071d42b0 docs/images/chat.png
+7187fd000376ad59936cdd130f15c283ca870dd540e224b0bd7d2fd747bd8ca8 docs/images/ergosphere-banner.svg
+6a0fc91ac5f1d567c8ed3b8df7c46570c9253b0126538644c6e65aeb2c4a8546 docs/images/new-session.png
+8447c8a32572a7b1288d16f6d7849036ce5bab70a071d4d3af8538cdac34be5e docs/images/session-list.png
+762722e87f71b2efca433ddfa5a00bc0683cb76b61a72ef1f64382eb15de29c9 docs/images/settings.png
+169f5a7dd1994c9eb515899b32dadb79a04cd66ef9592e31ae4a4ae0957fe837 .ghflow-allow
+34da7c49ff845bafe52636ae7878defe4d26d182175000efad59e55592d4ef5f .ghflow.conf
+5abee068f303e3d2c280d9529946a28ac5ad849f64cfafb01eb809d4d12fb7e0 .ghflow.conf
+1f20f473aaa065da077385bbf5720c895b58dd467a3a721ba01f1cc792f0d2d7 .gitattributes
+2b37aa6016d302851b7caeac134aca546464dd46033c404cf97daab13ad75c51 .gitignore
+0c5c4f58cee98c93343176edbd3c2f5911fa15d1bb0ee88b39990c743e9f143b tests/ab/ab.py
+442811ad6768f354564266425ff125e9ae6a4bedbe7ae936bec459e0c30457f7 tests/ab/ab.py
+5876da9f6e6cae33e1d24dd202a9e7f707c9eedcf76b0cdb40ab4a1542645a50 tests/ab/ab.py
+9089b6670a051ec69c30cb15e64ea1ddc0a9f0ca954d407de81c0fe0742a59b6 tests/ab/ab.py
+6f1de28b8f625b18e09d491f9b073255ad824a3cf102fb86b8583d45571c5191 tests/ab/browser.js
+a7c3136d59866ca66e9831817bb082de0b69b7de8f03f11885e8b40d0f09cec5 tests/ab/browser.js
+b10e38e8288cdcf19557c1aa23efc1cadf234112c91648aa6fb6406fbfc6bfc5 tests/ab/browser.js
+ddf2595e3be66616d46d03216b24499708aa47afecc18ac72c0984050726867c tests/ab/browser.js
+1e9fc601efa91e328ace09eb7bb80b5090aa9f58f06e087e46d6e2a11bc310d3 tests/ab/fakegrok.py
+ab52a2879f9de3ec91924fdd7983540bbe4d706f4ae09ac1f0fe8b4477c36168 tests/ab/fakegrok.py
+3912af09b0e50f061d9e13b535d9509465a8d118d697026326203053b8125b2e tests/ab/run.sh
+80f34c689ba1df54f8fa3824c28d19926d26b4a2d7a61581bc118c693ce2b962 tests/ab/run.sh
+9c09c1941061ac933417a6fea5873ba33c9ad313d11c4c5c3fb240ca58c50c3c tests/ab/run.sh
+d2ee83c9d5365dcf53535493940bf9d6ccd31cee0a54820410d5f6d829340fb8 tests/ab/run.sh
+a71998fbeec9eec5824eabc9b4d70ff3e7f425d71e26ce69e889783ae9a8b33c tests/ab/slow_start.py
+c639b9c6bfeed9a8a3b425198f9f1ca2686c92d4936fae66d2c873cb2587d6c4 tests/attach_race_test.py
+4ccf2a6823e841c3e9aab6228467e6a8606583c5918a4f5cc268343630850695 tests/config_path_test.py
+f63041fb994de2f0fb77bee2f2651d205a317296c1992cf2502d59a74aa2d7af tests/copyright_test.sh
+a62b93e8c8cfb70a0b72191cb2c61e2b09edaf22238daaf17ab59d4d67d9318f tests/faq_test.sh
+64028e72a1b8af1c5014bbcc1839a6ee3f705492cd5324e0e5e907b23613eb9c tests/free_port.py
+f7a9fcbd58b6a45c67cf411d4836d02eb3fa0be4b5c4c4a85c39f08fa0f1c3db tests/high_fd_pty_test.py
+5e8431df7856a74ff4e4c78710f36a9c4b5d01be50b05574ed231d4309ce58e6 tests/install_config_home_test.sh
+7f4632718a30f9b8f6aac107dcaf8a0bade0f4c46ebea235410891325abec2ad tests/install_config_home_test.sh
+5387ba59cca5de6392615067f2c863d76b59246fd3ad775ed12b43e75d1af2ba tests/install_config_noport_test.sh
+6c099d4b38e0af2ff7051459bcb4569094a1e702ed1f21bb477571964de082ab tests/install_config_noport_test.sh
+35afa1ed0c58572ca14e6f40899c95dfe5bfd7327c1877198e4284a4b153fdda tests/install_config_test.sh
+956a599ef2e943e02402ef2f1772aab5fa11260f98afdaad93afc3341e859496 tests/install_config_test.sh
+7d896970389d67dbcc290d9443a739c0a95d15fcc4c82450dcb49debdde24728 tests/install_port_menu_test.sh
+bd8a51a2ef141feb102fe185bb798ec9155fa834dede986be6ccb3ea8ffb60cf tests/install_port_menu_test.sh
+a7d33797d308ff1c61b8b0a843c0018cd70ba608edba890fd916ff1e397e8e18 tests/install_port_taken_test.sh
+fcb03ae526aa97747594eb116be5684af2b5cb6ab50f03a303d5b24eb862d09c tests/install_port_taken_test.sh
+c881bf76f1721ec9fd5f2de61767c469b07c500a43a57a375c325c216e458ff7 tests/install_verify_release_test.sh
+bce6b58d8f2d58c2d1139d289eba189483550e470ad0de084a157479122763d5 tests/keyboard_fit_test.py
+c4fcf15b53589df3ef88f4dfcb048bb938e473fb2fca31b5cb2d058672d2b387 tests/keyboard_fit_test.py
+547aa4af7ea03d27bdacb4d1aac8131c546663e8a75269ac2f60e75338213a42 tests/launch_args_test.py
+c1b98ae61779fdb68751fd1d7df533e0669674686221f68b4702ee55ee2b9386 tests/live_lock_io_test.py
+ded26cb928fc326f6c8d96abf2c9a4b506eef7ff53b0defbac1ccb3608601dc4 tests/live_lock_io_test.py
+c1a941e54ce209a4074587a856d8f7cae4460ff58872a6d64b31468d151d9a5b tests/missing_config_message_test.py
+2f33cc2a84aac82d6657c2b29d63c51128381d6d42bfa9ec68539cb8296b90d6 tests/models_cache_test.py
+850468620903b55bcd0b9b075a7f4a35fe9989c0773e31209602c1a701eef8cf tests/notify_marker_test.sh
+5dcb5eb4eacbebb68c0def1e895b2909f0034a7a4b017127edf755c2bed38cb4 tests/pending_attach_test.py
+a9793101bcb1abc3d81a6002b091d29fab7d9c80bef7edc8ee29c76453e6079d tests/pid_reuse_test.py
+56ed11e7f2389b520bacc43a8b7a0aa5701b1875c3b807cf11a3358b4faba41d tests/quit_socket_failed_test.py
+a3da2908804c9fc745a16f26e8bc6a6b38bbc430f73a8903e532a4910b509c0a tests/readme_claims_test.sh
+7eeb642668075e0e18f1704ba34916ad7e8a5831ccdbb127a285b360fe1e4d3c tests/readme_uninstall_test.sh
+2cd4d7d87ac1cc7e155d341c27d23476d4c7c6a09b5c840785e5d1f2aa2eab25 tests/release_version_test.sh
+3ce7cc81394c99ba82c8aeac6546aa4874a33b99a824825c62e01be572e268f7 tests/release_version_test.sh
+4b1254e1a54e9d7d554323a835279b016be17391c467be91f4e5c0e69f832291 tests/release_version_test.sh
+378aefa1a90978590dffbfbd42775f03a2143bac62055ca48c284f06560c8bed tests/restart_config_test.py
+141cd4e8ff6921b9db9a693021c302f357a7c1a53b62c7a738cbd70c050f1e27 tests/restart_reply_test.py
+70f20f1ade1487d04041e7722200d772e9493601f5a23d6858187448595bed03 tests/restart_reply_test.py
+05a67809593bd49082cddc65e469e61e73eb6845a1d299bf274782f087d29384 tests/restart_stop_test.py
+29a2a935bb8f46be3393edbe6bd96addbd42258d551c3a07fae3761a34131fdf tests/resume_box_test.py
+16e596dfd6e490c98aa22f90f4880820bf165608fea3c2a714c00e20f8bf5b34 tests/resume_race_test.py
+997ca191e160bb5f88903973975ea67f9c3d018889225d4b99202165c0d10aa9 tests/roadmap_test.sh
+d867403a752a399842338496aab5b19b29cf984e84f686c2a4f35eb8efee1a05 tests/run_all_browser_env_test.sh
+6d10664e520af13ee93d017051b3b7717e8e405bd011f966a13ff517653e772e tests/run_all_capture_test.sh
+228caafa4d29adf2ed2eeea55aea1b6936bd387f15b8ae334e8abedcab19cf0b tests/run_all.sh
+812aa4ec09889365713c8d7991074bb3715ee552c7a9acf9f5661379dd7316c4 tests/run_all.sh
+c851d4c473e868cfeb1d92b53ed1bf85d34de5138c5edd0a59d5e70d4ce0b711 tests/run_all.sh
+cebc8bd1608732a88d73084a2e808b0f95176507720282c0624c94e5ba85baae tests/scroll_bar_test.py
+15da658873dc77543adb3e3c81cd262448e24349aee3c62cb0b6734afa21ac18 tests/session_state_test.py
+bdea4b244e2f211cc1963972e5bc7d7f5acac5cc9ac244ab8012d9ba4d731c54 tests/session_state_test.py
+a9eda791534215f79499bc96511ad7998c88b390764cce74ec64079b10784ad6 tests/settings_restart_poll_test.py
+c90b7acaa740ee39fe74eb51f50b8a01b6efea3b09bbf43277fec12ebcca0524 tests/settings_restart_poll_test.py
+d20e56a705062c92a83d7ec03c862bf4eb5de5c4dde2e9f82407c23764e98007 tests/settings_restart_poll_test.py
+0d830fdd426a91dfdbea2f39a069e653f87b48a2a87f92bd880c0e9cafc4b29c tests/slow_client_test.py
+13805a52233593790aa10b95a044be526df2e225a37b9fb5d02b4f24e812a4e7 tests/slow_spawn_test.py
+f20423f8bb5aa60eb210c66eb68586d03e95da861687d0964cfb53249d9867f8 tests/stop_finally_spawn_test.py
+82e431459c338dd7cb92331041b89a7a250cac010c05082ffef0e87a90dca20a tests/stopped_open_test.py
+4510737fe25a9b9f94485f82c23845281cd423c985ebdb43584a3681dc5011a5 tests/stop_pending_spawn_test.py
+619c3ecefe3f3e5fe0e2380cd4d7896a4eb6c1cffbe9caece75518c6c3703c6c tests/test_cmd_test.sh
+ec0ac3a38e06823e55631bb3b3194d4359ec0406212bde3a84b174779f14ab9b tests/tls_idle_test.py
+3fbdf51c907eb4194d083d02a72971300fe2d47c73d6ef015a9aa15a5635f9ac tests/touch_scroll_test.py
+b4ec575ef5a17f833893ba3da606024dee6bfd1d6e61d2964d6718f3a9b26f37 tests/touch_scroll_test.py
+bd71a6f691606b7c7e734df1c75b98bb818b4b4fc8a9ce0d271cf2df0bebe65f tests/touch_scroll_test.py
+cb2147bc7baa8a914ec759f3124a07f9d1ac641980e1e30b1937b53bedd6df0f tests/touch_scroll_test.py
+92a738f1cb3d3dbb61e1af50c77c7a5184c356291af1293348f194540daae1b1 tests/viewport_test.py
+d25f73bf53c6efca47966bde2a4578f15253966f22319ceba5b6049c77805367 tests/watchdog_test.py
+abb51b59526abe314044d0ad43c5d442962df0b2065208a86fd600e8b9f5f7bf tests/writing_hints_test.py
+'
+# An old installer copies every developer file of its release in one run, and
+# no release dropped one, so every pre-#97 install holds all of the first
+# release's. A DEST missing one of these was not written by an old installer:
+# a byte-identical file there is the user's own copy, and is kept.
+OLD_INSTALL_SET='.ghflow-allow .ghflow.conf .gitignore docs/images/chat.png
+docs/images/ergosphere-banner.svg docs/images/new-session.png
+docs/images/session-list.png docs/images/settings.png'
+
+# Installers before #97 copied the archive's developer files into DEST, and
+# install_files never removes anything (#199). Removes only those: a regular
+# file in DEST, reached through no link, at a path install_files skips, whose
+# bytes match that path in a pre-#97 release (OLD_DEV_FILES), and only in a DEST
+# that holds OLD_INSTALL_SET (an old installer's evidence). Matching this
+# archive is not enough: a file that only the current release has was never
+# written by an old installer, so a user's copy of it is kept. A user's own
+# file or an edited copy at that path is kept. Then the folders that leaves
+# empty. A DEST holding .git is a checkout, which no installer wrote: it is
+# left alone.
+# install.sh is never removed: a user who copies the release's install.sh into
+# DEST makes a file the bytes of which cannot be told from an old installer's.
+# A stale install.sh is harmless, since the server never reads it.
+remove_dev_files() {
+  local rel dir real sha known n=0 dirs=()
+  if [[ -e "$DEST/.git" || -L "$DEST/.git" ]]; then
+    printf 'install: %s holds .git (a checkout), old developer files not checked\n' "$DEST"
+    return 0
+  fi
+  for rel in $OLD_INSTALL_SET; do
+    [[ -f "$DEST/$rel" ]] || return 0
+  done
+  real=$(realpath -- "$DEST") || fail install "could not resolve $DEST"
+  known=$OLD_DEV_FILES
+  while IFS= read -r rel; do
+    case "$rel" in tests/*|docs/*|.git*|.ghflow*) ;; *) continue ;; esac
+    dir=$(dirname -- "$rel")
+    [[ -f "$DEST/$rel" && ! -L "$DEST/$rel" ]] || continue
+    # An installer copy has the bytes of some release. Anything else at that
+    # path (a user's own script, an edited file) is not ours to delete.
+    sha=$(sha_of "$DEST/$rel")
+    grep -qxF -- "$sha $rel" <<<"$known" || continue
+    # A linked folder on the way would point the rm outside DEST.
+    if [[ "$dir" != . && "$(realpath -- "$DEST/$dir")" != "$real/$dir" ]]; then continue; fi
+    rm -f -- "$DEST/$rel" || fail install "could not remove $DEST/$rel"
+    printf 'install: removed old developer file %s\n' "$rel"
+    n=$((n + 1))
+    while [[ "$dir" != . ]]; do dirs+=("$dir"); dir=$(dirname -- "$dir"); done
+  done < <(cut -d' ' -f2- <<<"$known" | sort -u)
+  # Only folders a removal touched, deepest first, so a folder emptied by its
+  # subfolders goes too. rmdir removes only empty folders; links are skipped.
+  if [[ ${#dirs[@]} -gt 0 ]]; then
+    while IFS= read -r dir; do
+      if [[ -d "$DEST/$dir" && ! -L "$DEST/$dir" && "$(realpath -- "$DEST/$dir")" == "$real/$dir" ]]; then
+        rmdir -- "$DEST/$dir" 2>/dev/null || true
+      fi
+    done < <(printf '%s\n' "${dirs[@]}" | sort -ur)
+  fi
+  if [[ "$n" -gt 0 ]]; then CHANGED+=("$n old developer files removed"); fi
+}
+
 # Creates ergosphere.json, or updates only the keys this run sets: bind/port
 # when given, a manual agent when its name is new. cwd-defaults.json is never
 # changed. The result is read back.
@@ -1124,6 +1278,7 @@ main() {
     return 0
   fi
   install_files
+  remove_dev_files
   write_config
   start_server
   summary
