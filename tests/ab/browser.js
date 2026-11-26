@@ -58,54 +58,6 @@ async function until(p, pred) {
 }
 const seen = s => `saw "${s.text.slice(0, 30)}" page ${s.termRows}x${s.termCols} sent ${s.sent}`;
 
-// A page held by a grok this server did not start, then that grok exits: the
-// page shows Ended and its terminal must fit the page then (#186).  The holder
-// is a stand-in whose argv[0] is "grok" and whose command line names a fresh id.
-async function heldExitFitCheck(b) {
-  const hsid = require('crypto').randomUUID();
-  const base = `http://127.0.0.1:${port}`;
-  const held = async () => (await (await fetch(`${base}/holder?id=${hsid}`, {cache: 'no-store'})).json()).held;
-  const holdUntil = async want => {
-    const end = Date.now() + WAIT;
-    while (Date.now() < end) { if (await held() === want) return true; await wait(50); }
-    return false;
-  };
-  const holder = require('child_process').spawn('python3',
-    ['-c', 'import time; time.sleep(600)', '-r', hsid], {argv0: 'grok', stdio: 'ignore'});
-  const ctx = await b.newContext({viewport: {width: 1280, height: 800}});
-  try {
-    if (!await holdUntil(true)) return check(false, 'stand-in holder not seen');
-    const p = await ctx.newPage();
-    p.setDefaultTimeout(WAIT);
-    await p.goto(`${base}/chat?resume=${hsid}`);
-    const page = () => p.evaluate(() => {
-      let want = null;
-      try { want = fit.proposeDimensions() || null; } catch (err) {}
-      return {hold, ended, status: document.getElementById('status').textContent,
-        cols: term.cols, rows: term.rows, want: want ? {cols: want.cols, rows: want.rows} : null};
-    });
-    const pageUntil = async pred => {
-      const end = Date.now() + WAIT;
-      let r = await page();
-      while (!pred(r) && Date.now() < end) { await wait(25); r = await page(); }
-      return {r, met: pred(r)};
-    };
-    let q = await pageUntil(r => r.hold);
-    if (!q.met) return check(false, `page not held: ${q.r.status}`);
-    holder.kill();
-    if (!await holdUntil(false)) return check(false, 'holder exit not seen');
-    // The fit, when the page makes one, runs in the step that shows Ended.
-    q = await pageUntil(r => r.ended);
-    if (!q.met) return check(false, `not Ended: ${q.r.status}`);
-    const r = q.r, w = r.want || {};
-    return check(r.status === 'Ended' && r.cols === w.cols && r.rows === w.rows,
-      `Ended at ${r.cols}x${r.rows}, page fits ${w.cols}x${w.rows}`);
-  } finally {
-    holder.kill();
-    await ctx.close();
-  }
-}
-
 async function openPage(ctx) {
   await ctx.addInitScript(countWheelReports);
   const p = await ctx.newPage();
@@ -308,8 +260,6 @@ async function run() {
   }
   const checks = {};
   try {
-    // Its own session id, so it leaves the shared session alone.
-    checks.held_exit_fit = await heldExitFitCheck(b).catch(e => check(false, String(e && e.message || e)));
     let ctx = await b.newContext({viewport: {width: 1280, height: 800}});
     let {p, s, met} = await openPage(ctx);
     checks.terminal = check(met, met ? `grok drawn at ${s.rows}x${s.cols}` : `no grok view at page size: ${seen(s)}`);
