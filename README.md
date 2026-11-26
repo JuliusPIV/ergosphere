@@ -359,7 +359,7 @@ Pass options after `| bash -s --`.
 | `--bind ADDR` | Listen address: an IPv4 address of this machine, `0.0.0.0`, or `localhost`. Default: the address saved in `ergosphere.json`, else `127.0.0.1`. |
 | `--yes` | Approve a listen address other than loopback without asking. |
 | `--version vA.B.C` | Install that release instead of the latest one (pin or roll back). The rerun command it prints keeps it. |
-| `--check` | Run the checks only. Asks what a real run asks (the `--manual` questions, a non-loopback bind without `--yes`). Downloads the release to a temp dir and checks its files are all there. Runs nothing from it. Says what would happen to the server (start, restart, or keep). Changes nothing. |
+| `--check` | Run the checks only. Asks what a real run asks (the `--manual` questions, a non-loopback bind without `--yes`). Downloads the release to a temp dir, checks its files are all there and that the install and config folders are writable with room for it. Says what would happen to the server (start, restart, or keep). Runs nothing from it. Changes nothing. |
 | `--help` | Show the options. |
 
 Prerequisites are checked first and listed when missing. The installer never installs them, and it does not check grok sign-in.
@@ -369,6 +369,7 @@ Prerequisites are checked first and listed when missing. The installer never ins
 - a port below 1024 when not run as root;
 - a listen address that is not one of this machine's addresses;
 - a non-empty directory that is not an Ergosphere install;
+- a folder it would write in that is not writable (the install directory, a subfolder such as `vendor/`, or the config folder), or a disk without room for the release, before it changes any file;
 - a port already in use by anything else, including an Ergosphere from a different install directory (that one is left running).
 
 A failure prints `failed at check|download|install|start: ...` and exits 1.

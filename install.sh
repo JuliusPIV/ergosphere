@@ -29,7 +29,8 @@ ergosphere.json next to ergosphere.py. A rerun keeps them;
   --yes        approve a non-loopback bind without asking
   --version vA.B.C  install this release instead of the latest (pin or roll back)
   --check      run the checks only: ask what a real run asks, download the release
-               to a temp dir and check its files are all there, say what would
+               to a temp dir, check its files are all there and the install and
+               config folders are writable with room for it, say what would
                happen to the server; run nothing from it, change nothing
   --help       this help
 EOF
@@ -763,7 +764,9 @@ print("\n".join(names))' "$1" </dev/null 2>/dev/null
 }
 
 # Before anything changes. --check only looks at the downloaded files and runs
-# nothing from them. A real run also runs the release's own --check (vendor
+# nothing from them; it and a real run both build the candidate config with
+# this installer's own cfg_py and check writability and free space. A real run
+# also runs the release's own --check (vendor
 # files, grok, the server's config validators) against the config this run
 # would write, built in STAGE from copies; that --check never writes config.
 verify_release() {
@@ -778,10 +781,6 @@ verify_release() {
   done <<<"$names"
   if [[ ${#missing[@]} -gt 0 ]]; then
     row invalid release "archive is missing ${missing[*]}"
-    return 0
-  fi
-  if [[ "$WANT_CHECK" -eq 1 ]]; then
-    row ok release "archive holds ergosphere.py and the vendor files it names (--check runs nothing from it)"
     return 0
   fi
   cand="$STAGE/cfg/ergosphere.json" legacy="$STAGE/cfg/cwd-defaults.json"
@@ -800,12 +799,117 @@ verify_release() {
     row invalid config "${out//$'\n'/; }"
     return 0
   fi
+  check_writes "$out" "$cand"
+  if [[ "$WANT_CHECK" -eq 1 ]]; then
+    row ok release "archive holds ergosphere.py and its vendor files (--check runs nothing from it)"
+    return 0
+  fi
   if out=$(cd -- "$STAGE" && unset ERGOSPHERE_PORT && PATH="${GROK%/*}:$PATH" ERGOSPHERE_CONFIG="$cand" \
       "$PYTHON" -I -B "$SRC/ergosphere.py" --check </dev/null 2>&1); then
     row ok release "ergosphere.py --check passed with the settings this run writes"
   else
     out=${out//"$cand"/"$CFG_FILE"}
     row invalid release "ergosphere.py --check failed: ${out//$'\n'/; }"
+  fi
+}
+
+# Sets UP to the path itself when it exists, else its nearest existing parent.
+# A variable, not $( ): that would drop a newline at the end of a folder name.
+existing_up() {
+  UP=$1
+  while [[ ! -e "$UP" ]]; do UP=${UP%/*}; UP=${UP:-/}; done
+}
+
+# Prints the free KiB on the filesystem holding $1, or nothing when it cannot
+# be read (callers treat empty as "could not read"). stat -f reads the numbers
+# directly, so a filesystem name with a space cannot shift them. df --output is
+# GNU-only and BusyBox df rejects it. Arithmetic is done in bash, not awk: awk
+# is not in the prerequisite list, so a host without it would be refused here.
+free_kib() {
+  local out blocks size
+  out=$(stat -f -c '%a %S' -- "$1" 2>/dev/null) || return 0
+  read -r blocks size <<<"$out"
+  [[ "$blocks" =~ ^[0-9]+$ && "$size" =~ ^[0-9]+$ ]] || return 0
+  echo $((blocks * size / 1024))
+}
+
+# Prints the KiB a copy of file $1 takes: 4 KiB blocks, rounded up.
+blocks_kib() {
+  echo $((4 * (($(stat -c %s -- "$1") + 4095) / 4096)))
+}
+
+# Developer files in the release archive; the server never reads them (#97).
+# Not export-ignore: ghflow's reviewers read a git archive of the repo.
+# install_files and check_writes both use this, so the gate never checks a
+# folder the install will not write in.
+is_dev_file() {
+  case "$1" in tests/*|docs/*|.git*|.ghflow*|install.sh) return 0 ;; esac
+  return 1
+}
+
+# check_writes CFG_RESULT CANDIDATE. Every folder install_files and
+# write_config will write in must be writable now (-w/-x, no probe writes),
+# and each filesystem must hold what is copied there, so a read-only folder or
+# a full disk stops at the gate instead of after half the files are replaced.
+# CFG_RESULT is cfg_py's answer for the candidate config: wrote or kept.
+check_writes() {
+  local rel dir up dev new old k free cfg_dir cfg_need dirs=() bad=()
+  # Per filesystem (st_dev): running net growth, peak need, and a path to ask df.
+  # A symlinked folder such as vendor/ can sit on another disk than DEST.
+  local -A net=() need=() fs_path=()
+  while IFS= read -r -d '' rel; do
+    rel=${rel#./}
+    if [[ "$rel" == cwd-defaults.json || "$rel" == ergosphere.json || "$rel" == ergosphere.log ]]; then continue; fi
+    if is_dev_file "$rel"; then continue; fi
+    [[ "$(sha_of "$SRC/$rel")" != "$(sha_of "$DEST/$rel")" ]] || continue
+    # install_files copies each file beside the old one, then moves it over,
+    # which frees the old one. So the peak is the top of the running total in
+    # the same order: earlier files' net growth plus this copy. The sum of all
+    # new sizes would refuse an upgrade that replaces the files one at a time.
+    dir="$DEST/$rel"
+    existing_up "${dir%/*}"; up=$UP
+    # -L: a folder symlink (vendor/) must report its target's filesystem, the one
+    # df and the copy use. Without it stat reports the link's own filesystem.
+    dev=$(stat -L -c %d -- "$up")
+    new=$(blocks_kib "$SRC/$rel")
+    old=0
+    if [[ -e "$DEST/$rel" ]]; then old=$(blocks_kib "$DEST/$rel"); fi
+    fs_path[$dev]=${fs_path[$dev]:-$up}
+    if (( ${net[$dev]:-0} + new > ${need[$dev]:-0} )); then need[$dev]=$(( ${net[$dev]:-0} + new )); fi
+    net[$dev]=$(( ${net[$dev]:-0} + new - old ))
+    dirs+=("${dir%/*}")
+  done < <(cd "$SRC" && find . -type f -print0 | sort -z)
+  for dir in ${dirs[@]+"${dirs[@]}"}; do
+    existing_up "$dir"; up=$UP
+    # One entry per folder: vendor/ holds several files.
+    if [[ ( ! -d "$up" || ! -w "$up" || ! -x "$up" ) && " ${bad[*]-} " != *" $up "* ]]; then bad+=("$up"); fi
+  done
+  if [[ "$1" == wrote ]]; then
+    existing_up "${CFG_FILE%/*}"; cfg_dir=$UP
+    if [[ ! -d "$cfg_dir" || ! -w "$cfg_dir" || ! -x "$cfg_dir" ]]; then bad+=("$cfg_dir"); fi
+  fi
+  if [[ ${#bad[@]} -gt 0 ]]; then
+    row invalid write "not writable: ${bad[*]}"
+  else
+    row ok write "the install and config folders are writable"
+  fi
+  for k in "${!need[@]}"; do
+    if (( need[$k] <= 0 )); then continue; fi
+    free=$(free_kib "${fs_path[$k]}")
+    if [[ ! "$free" =~ ^[0-9]+$ ]]; then
+      row invalid space "could not read the free space of ${fs_path[$k]}"
+    elif (( free < need[$k] )); then
+      row invalid space "${fs_path[$k]} has $free KiB free, the release needs ${need[$k]} KiB"
+    fi
+  done
+  if [[ "$1" == wrote ]]; then
+    cfg_need=$(blocks_kib "$2")
+    free=$(free_kib "$cfg_dir")
+    if [[ ! "$free" =~ ^[0-9]+$ ]]; then
+      row invalid space "could not read the free space of $cfg_dir"
+    elif (( free < cfg_need )); then
+      row invalid space "$cfg_dir has $free KiB free, the config needs $cfg_need KiB"
+    fi
   fi
 }
 
@@ -820,9 +924,7 @@ install_files() {
   while IFS= read -r -d '' rel; do
     rel=${rel#./}
     if [[ "$rel" == cwd-defaults.json || "$rel" == ergosphere.json || "$rel" == ergosphere.log ]]; then continue; fi
-    # Developer files in the release archive; the server never reads them (#97).
-    # Not export-ignore: ghflow's reviewers read a git archive of the repo.
-    case "$rel" in tests/*|docs/*|.git*|.ghflow*|install.sh) continue ;; esac
+    if is_dev_file "$rel"; then continue; fi
     if [[ "$(sha_of "$SRC/$rel")" != "$(sha_of "$DEST/$rel")" ]]; then
       { mkdir -p -- "$DEST/$(dirname -- "$rel")" &&
         cp -p -- "$SRC/$rel" "$DEST/$rel.part" &&
