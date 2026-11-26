@@ -10,8 +10,17 @@
 # starting "SKIP" or "skip:" counts as skipped in the final line.
 # Browser tests get NODE_PATH (playwright) and ERGO_CHROME, found as
 # tests/ab/run.sh finds them: NODE_PATH, `npm root -g`, /usr/local/lib/*/node_modules;
-# ERGO_CHROME, AB_CHROME, then google-chrome, chromium, chromium-browser.
+# ERGO_CHROME, AB_CHROME, then google-chrome, chromium, chromium-browser, /usr/bin/google-chrome (the tests' own default).
+# --require-browser (the review gate's TEST_CMD passes it): fail, after running
+# every test, when node, playwright or the browser is missing, so browser tests
+# cannot pass the gate by skipping (#147).
 set -u
+require_browser=0
+case "${1:-}" in
+  "") ;;
+  --require-browser) require_browser=1 ;;
+  *) echo "usage: bash tests/run_all.sh [--require-browser]"; exit 2 ;;
+esac
 cd "$(dirname "$0")/.." || exit 1
 base=${ERGOSPHERE_TEST_PORT_BASE:-}
 limit=${ERGOSPHERE_TEST_TIMEOUT:-300}
@@ -24,12 +33,17 @@ for d in "$(npm root -g 2>/dev/null)" /usr/local/lib/*/node_modules; do
 done
 [ -n "$pw_path" ] && export NODE_PATH="$pw_path"
 if [ -z "${ERGO_CHROME:-}" ]; then
-  for c in "${AB_CHROME:-}" google-chrome chromium chromium-browser; do
+  for c in "${AB_CHROME:-}" google-chrome chromium chromium-browser /usr/bin/google-chrome; do
     [ -n "$c" ] && ERGO_CHROME="$(command -v "$c" 2>/dev/null)" && break
   done
 fi
 if [ -n "${ERGO_CHROME:-}" ]; then export ERGO_CHROME; else unset ERGO_CHROME; fi
 echo "run_all: playwright path: ${pw_path:-none}; browser: ${ERGO_CHROME:-none}"
+# The same checks the browser tests make before they print SKIP.
+missing=""
+command -v node >/dev/null 2>&1 || missing="node"
+[ -z "$missing" ] && ! node -e 'require("playwright")' >/dev/null 2>&1 && missing="playwright (NODE_PATH)"
+{ [ -n "${ERGO_CHROME:-}" ] && [ -x "$ERGO_CHROME" ]; } || missing="${missing:+$missing, }browser (ERGO_CHROME, AB_CHROME, google-chrome, chromium)"
 
 
 for t in tests/*_test.py tests/*_test.sh; do
@@ -58,6 +72,9 @@ done
 if [ "$total" -eq 0 ]; then echo "FAIL: no tests found in tests/"; exit 1; fi
 if [ "${#failed[@]}" -gt 0 ]; then
   echo "FAIL: ${#failed[@]} of $total tests failed:"; printf '  %s\n' "${failed[@]}"; exit 1
+fi
+if [ "$require_browser" -eq 1 ] && [ -n "$missing" ]; then
+  echo "FAIL: --require-browser: no $missing, so the browser tests skipped"; exit 1
 fi
 if [ "${#skipped[@]}" -gt 0 ]; then
   echo "skipped:"; printf '  %s\n' "${skipped[@]}"
