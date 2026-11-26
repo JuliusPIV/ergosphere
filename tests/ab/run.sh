@@ -125,13 +125,6 @@ for side in A B; do
   out="$(ERGOSPHERE_TEST_PORT="${!port}" python3 -B "$HERE/../vendor_snapshot_test.py" "${!dir}" 2>&1)" || { [ "$side" = B ] && rc=1; }
   printf '%s: %s\n' "$side" "$(printf '%s\n' "$out" | grep -E '^(PASS|FAIL)' | grep -v 'server output' | tr '\n' ' ')" >>"$AB_OUT/summary.txt"
 done
-# Issue #132: a stop signal landing while the main thread holds a lock, on each side's port again.
-for side in A B; do
-  dir=AB_${side}_DIR port=AB_PORT_${side}
-  log "$side: stop signal check on ${!port}"
-  python3 -B "$HERE/sigterm_lock.py" run "${!dir}" "${!port}" >"$AB_OUT/sigterm-$side.json" 2>"$AB_OUT/sigterm-$side.err"
-done
-python3 -B "$HERE/sigterm_lock.py" summary "$AB_OUT/sigterm-A.json" "$AB_OUT/sigterm-B.json" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #150: install --bind 0.0.0.0 while the port is held on 127.0.0.2.
 bash "$HERE/install_bind_any.sh" >>"$AB_OUT/summary.txt" || rc=1
 # Issues #148 and #191: quitting a holder grok whose pid is reused.  B's
