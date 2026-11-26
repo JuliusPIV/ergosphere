@@ -46,13 +46,14 @@ let infoBody = null;
 let refusal = null;
 let healthDown = false;
 let hold = false;
-let held = null;
+// Held /session-info replies, oldest first.
+const held = [];
 function reply(body, status) {
   status = status || 200;
   return Promise.resolve({ok: status === 200, status, json: () => Promise.resolve(body)});
 }
 function fetch(url) {
-  if (url === '/session-info' && hold) return new Promise((r) => { held = r; });
+  if (url === '/session-info' && hold) return new Promise((r) => { held.push(r); });
   if (url === '/session-info') return reply(infoBody);
   // Restart: /health fails with step.healthDown, is refused with step.refuse,
   // else /health never answers.
@@ -75,9 +76,13 @@ const settle = () => new Promise((r) => setImmediate(() => setImmediate(() => se
     infoBody = step.body;
     hold = !!step.hold;
     if (step.click) { nodes.restart.listeners.click(); await settle(); }
-    if (step.release) {
-      held({ok: true, status: 200, json: () => Promise.resolve(step.release)});
-      held = null;
+    // release answers the oldest held poll, releaseNewest the newest; a body
+    // of null is a failed reply.  A release step starts no poll.
+    const own = (k) => Object.prototype.hasOwnProperty.call(step, k);
+    if (own('release') || own('releaseNewest')) {
+      const r = own('release') ? held.shift() : held.pop();
+      const body = own('release') ? step.release : step.releaseNewest;
+      r({ok: true, status: 200, json: () => Promise.resolve(body)});
     } else {
       for (const f of intervals) f();
     }
