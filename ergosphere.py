@@ -5063,6 +5063,8 @@ function openAfterHolder(start) {
     return;
   }
   ensureTerm();
+  // As the load path does (#52): only connect() and resize fit otherwise (#186).
+  try { fit.fit(); } catch (err) {}
   showEnded();
 }
 function pollHold() {
