@@ -150,6 +150,20 @@ done
 python3 -B "$HERE/blocked_log.py" summary "$AB_OUT/log-A.json" "$AB_OUT/log-B.json" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #97: what each side's install.sh copies into the install dir.
 bash "$HERE/install_files.sh" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #218: the PTY master is closed once (in process, forced close orders).
+for side in A B; do
+  dir=AB_${side}_DIR
+  log "$side: master close check"
+  python3 -B "$HERE/master_close.py" run "${!dir}" >"$AB_OUT/mclose-$side.json" 2>"$AB_OUT/mclose-$side.err"
+done
+python3 -B "$HERE/master_close.py" summary "$AB_OUT/mclose-A.json" "$AB_OUT/mclose-B.json" >>"$AB_OUT/summary.txt" || rc=1
+# Issue #227: no write, resize or read reaches the master's number after its close.
+for side in A B; do
+  dir=AB_${side}_DIR
+  log "$side: master use check"
+  python3 -B "$HERE/master_use.py" run "${!dir}" >"$AB_OUT/muse-$side.json" 2>"$AB_OUT/muse-$side.err"
+done
+python3 -B "$HERE/master_use.py" summary "$AB_OUT/muse-A.json" "$AB_OUT/muse-B.json" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #140: --check stops where the real run stops and says what it does with the server.
 bash "$HERE/install_check_plan.sh" >>"$AB_OUT/summary.txt" || rc=1
 # Issue #63: sessions between the installer's session check and its restart.
